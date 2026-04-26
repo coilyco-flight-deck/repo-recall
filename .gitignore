@@ -2,6 +2,7 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+.env
 .DS_Store
 .claude/settings.local.json
 .claude/worktrees/
