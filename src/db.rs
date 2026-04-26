@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::Connection;
+use serde::Serialize;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -176,7 +177,7 @@ pub fn wipe(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileHotspot {
     pub file_path: String,
     pub churn: i64,
@@ -239,7 +240,7 @@ pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub kind: String,
     pub ref_id: i64,
@@ -278,7 +279,7 @@ pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<Vec<SearchHi
     Ok(out)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Repo {
     pub id: i64,
     pub path: String,
@@ -309,7 +310,7 @@ pub struct Repo {
     pub default_branch: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Session {
     pub id: i64,
     pub session_uuid: String,
@@ -326,13 +327,13 @@ pub struct Session {
     pub cache_creation_tokens: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionWithRepos {
     pub session: Session,
     pub repos: Vec<(i64, String, String)>, // id, name, path
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Commit {
     pub id: i64,
     pub repo_id: i64,
@@ -343,7 +344,7 @@ pub struct Commit {
     pub subject: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CommitWithRepo {
     pub commit: Commit,
     pub repo_id: i64,
@@ -603,7 +604,7 @@ pub fn earliest_session_ts(conn: &Connection) -> Result<Option<i64>> {
 /// One repo's uncommitted-work summary — total counts + a capped sample of
 /// individual paths. Used by the dashboard's "action required" column so we
 /// group dirt *by repo* instead of emitting a flat list that scrolls past.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UncommittedGroup {
     pub repo_id: i64,
     pub repo_name: String,
@@ -673,7 +674,7 @@ pub fn uncommitted_by_repo(
     Ok(groups)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CiFailure {
     pub repo_id: i64,
     pub repo_name: String,

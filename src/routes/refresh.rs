@@ -199,6 +199,9 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let content_matches = ingest_content_mentions(state.clone()).await;
 
     *state.last_scan.lock().await = Some(Utc::now());
+    state
+        .scan_version
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
     let msg = format!(
         "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches ({} skipped)",
         stats.repos,

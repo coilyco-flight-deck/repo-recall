@@ -38,6 +38,7 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
         gh_health: Arc::new(Mutex::new(gh)),
         my_gh_login: Arc::new(Mutex::new(None)),
         my_git_email: Arc::new(Mutex::new(None)),
+        scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let app = routes::router(state);
@@ -132,6 +133,101 @@ async fn static_assets_are_served() {
         let res = client.get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(res.status(), 200, "expected 200 for {path}");
     }
+}
+
+#[tokio::test]
+async fn dashboard_serves_json_via_accept() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/"))
+        .header("accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(
+        res.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+    );
+    assert!(res.headers().get("etag").is_some(), "missing ETag");
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(body.get("repos").is_some());
+    assert!(body.get("banner").is_some());
+    assert!(body.get("scan_version").is_some());
+}
+
+#[tokio::test]
+async fn dashboard_serves_json_via_format_param() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/?format=json")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(body.get("action_required").is_some());
+    assert!(body.get("gh_health").is_some());
+}
+
+#[tokio::test]
+async fn action_required_endpoint_returns_json() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/api/action-required"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert!(res.headers().get("etag").is_some());
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(body.get("repos").is_some(), "missing repos array");
+    assert!(body.get("scan_version").is_some());
+    assert!(body.get("generated_at").is_some());
+}
+
+#[tokio::test]
+async fn etag_returns_304_when_unchanged() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::new();
+    let first = client
+        .get(format!("{base}/api/action-required"))
+        .send()
+        .await
+        .unwrap();
+    let etag = first.headers().get("etag").unwrap().clone();
+    let second = client
+        .get(format!("{base}/api/action-required"))
+        .header("if-none-match", etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 304);
+}
+
+#[tokio::test]
+async fn dashboard_html_carries_data_attrs_when_repos_present() {
+    // No repos in the test boot, so data-repo-id won't appear, but the
+    // surrounding markup contract should still be present (no panic, valid
+    // HTML). Just verifies the new attribute names don't break rendering.
+    let (base, _h) = boot().await;
+    let body = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // The repo-list block is empty in the test environment, but the action
+    // banner / counters should still render.
+    assert!(body.contains("<title>repo-recall"));
+}
+
+#[tokio::test]
+async fn scan_version_endpoint_is_cheap_poll() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/api/scan-version"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(body.get("scan_version").is_some());
 }
 
 #[tokio::test]

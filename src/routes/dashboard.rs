@@ -1,10 +1,14 @@
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use axum::extract::{Query, State};
-use axum::response::IntoResponse;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use maud::{html, Markup};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::routes::api::{derive_action_signals, ActionRequiredItem};
+use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
     absolute_time, compact_count, display_name, page, page_with_banners, relative_time, H2, LI,
     LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW, SCAN_STATUS,
@@ -17,12 +21,63 @@ pub struct DashboardParams {
     /// (the default). Any other string is treated as a literal email.
     #[serde(default)]
     pub author: Option<String>,
+    /// `json` switches the response to a JSON projection of the same data.
+    /// Equivalent to `Accept: application/json`. See [issue #2].
+    ///
+    /// [issue #2]: https://github.com/coilysiren/repo-recall/issues/2
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardJson {
+    pub repos: Vec<RepoJson>,
+    pub recent_sessions: Vec<db::SessionWithRepos>,
+    pub recent_commits: Vec<db::CommitWithRepo>,
+    pub uncommitted_groups: Vec<db::UncommittedGroup>,
+    pub ci_failures: Vec<db::CiFailure>,
+    pub action_required: Vec<ActionRequiredItem>,
+    pub banner: BannerCounts,
+    pub counts: DashboardCounts,
+    pub gh_health: &'static str,
+    pub last_scan: Option<i64>,
+    pub earliest_session: Option<i64>,
+    pub author_filter: Option<String>,
+    pub scan_version: u64,
+    pub generated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoJson {
+    #[serde(flatten)]
+    pub repo: db::Repo,
+    pub action_required: bool,
+    pub action_signals: Vec<&'static str>,
+    pub activity_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BannerCounts {
+    pub ci_failing: usize,
+    pub dirty_repos: usize,
+    pub in_progress_ops: usize,
+    pub detached_heads: usize,
+    pub review_requested: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardCounts {
+    pub repos: i64,
+    pub sessions: i64,
+    pub links: i64,
+    pub commits: i64,
 }
 
 pub async fn index(
     State(state): State<AppState>,
     Query(params): Query<DashboardParams>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
     // Resolve `?author=` into a concrete email filter. `me` needs to see the
     // cached git email; anything non-`all` / non-empty is used literally.
     let my_email = state.my_git_email.lock().await.clone();
@@ -78,7 +133,7 @@ pub async fn index(
         Ok(d) => d,
         Err(e) => {
             tracing::error!("dashboard query failed: {e:?}");
-            return page("error", html! { p { "Error: " (e.to_string()) } });
+            return page("error", html! { p { "Error: " (e.to_string()) } }).into_response();
         }
     };
 
@@ -88,18 +143,8 @@ pub async fn index(
         .unwrap_or_else(|| "never".into());
     let gh_health = *state.gh_health.lock().await;
 
-    // Format "back to" line: "2025-11-12 (164d)" or "—" if we have no
-    // sessions with timestamps yet (first boot before the initial scan lands).
-    let earliest_str = earliest_ts
-        .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
-        .map(|dt| {
-            let days = (chrono::Utc::now() - dt).num_days().max(0);
-            format!("{} ({}d)", dt.format("%Y-%m-%d"), days)
-        })
-        .unwrap_or_else(|| "—".into());
-
-    // Aggregate the action-required signals for the top bar. Cheap — we
-    // already have every repo in memory.
+    // Aggregate banner counts and per-repo signal sets up front so both the
+    // JSON branch and the HTML branch read from the same numbers.
     let ci_failing_count = repos
         .iter()
         .filter(|r| r.ci_status.as_deref() == Some("failure"))
@@ -120,6 +165,77 @@ pub async fn index(
         + detached_count
         + (review_requested_count as usize)
         > 0;
+
+    if wants_json(&headers, params.format.as_deref()) {
+        let norms = activity::normalisers(&repos);
+        let repo_json: Vec<RepoJson> = repos
+            .iter()
+            .map(|r| {
+                let signals: Vec<&'static str> = derive_action_signals(r)
+                    .into_iter()
+                    .map(|s| s.signal)
+                    .collect();
+                RepoJson {
+                    repo: r.clone(),
+                    action_required: activity::is_action_required(r),
+                    action_signals: signals,
+                    activity_score: activity::score(r, &norms),
+                }
+            })
+            .collect();
+        let mut action_items: Vec<ActionRequiredItem> = Vec::new();
+        for r in &repos {
+            for sig in derive_action_signals(r) {
+                action_items.push(ActionRequiredItem {
+                    id: format!("{}:{}", r.id, sig.signal),
+                    repo_id: r.id,
+                    repo_name: r.name.clone(),
+                    repo_path: r.path.clone(),
+                    remote_url: r.remote_url.clone(),
+                    signal: sig.signal,
+                    detail: sig.detail,
+                });
+            }
+        }
+        let body = DashboardJson {
+            repos: repo_json,
+            recent_sessions,
+            recent_commits,
+            uncommitted_groups,
+            ci_failures,
+            action_required: action_items,
+            banner: BannerCounts {
+                ci_failing: ci_failing_count,
+                dirty_repos: dirty_count,
+                in_progress_ops: in_progress_count,
+                detached_heads: detached_count,
+                review_requested: review_requested_count,
+            },
+            counts: DashboardCounts {
+                repos: repos_n,
+                sessions: sessions_n,
+                links: links_n,
+                commits: commits_n,
+            },
+            gh_health: gh_health_str(gh_health),
+            last_scan: last_scan.map(|t| t.timestamp()),
+            earliest_session: earliest_ts,
+            author_filter: filter_label.clone(),
+            scan_version: state.scan_version.load(Ordering::Acquire),
+            generated_at: chrono::Utc::now().timestamp(),
+        };
+        return json_with_etag(&headers, body.scan_version, &body);
+    }
+
+    // Format "back to" line: "2025-11-12 (164d)" or "—" if we have no
+    // sessions with timestamps yet (first boot before the initial scan lands).
+    let earliest_str = earliest_ts
+        .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
+        .map(|dt| {
+            let days = (chrono::Utc::now() - dt).num_days().max(0);
+            format!("{} ({}d)", dt.format("%Y-%m-%d"), days)
+        })
+        .unwrap_or_else(|| "—".into());
 
     let body = html! {
         @if has_action {
@@ -242,7 +358,16 @@ pub async fn index(
             }
         }
     };
-    page_with_banners("dashboard", body, Some(gh_health))
+    page_with_banners("dashboard", body, Some(gh_health)).into_response()
+}
+
+fn gh_health_str(h: crate::commits::GhHealth) -> &'static str {
+    use crate::commits::GhHealth;
+    match h {
+        GhHealth::Ok => "ok",
+        GhHealth::NotAuthenticated => "not_authenticated",
+        GhHealth::Missing => "missing",
+    }
 }
 
 /// Expandable standup summary — collapsed by default so it doesn't crowd the
@@ -486,10 +611,19 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
         } @else {
             ul class="list-none p-0 m-0" {
                 @for r in repos {
+                    @let action_required = activity::is_action_required(r);
+                    @let signals: Vec<&'static str> =
+                        crate::routes::api::derive_action_signals(r)
+                            .into_iter().map(|s| s.signal).collect();
+                    @let signal_attr = signals.join(" ");
                     li class={
-                        (LI)
-                        @if activity::is_dormant(r) { " opacity-40" }
-                    } {
+                            (LI)
+                            @if activity::is_dormant(r) { " opacity-40" }
+                        }
+                        data-repo-id=(r.id)
+                        data-repo-name=(r.name)
+                        data-action-required=(if action_required { "true" } else { "false" })
+                        data-signals=(signal_attr) {
                         div class=(ROW) {
                             span class="font-semibold" {
                                 a class=(LINK) href={ "/repos/" (r.id) } {
@@ -519,6 +653,7 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                             @let uncommitted = r.untracked_files + r.modified_files;
                             @if uncommitted > 0 {
                                 span class=(PILL_ALERT)
+                                     data-flag="dirty_tree"
                                      title={
                                         "working-tree files right now — "
                                         (r.modified_files) " modified + "
@@ -528,12 +663,16 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                                 }
                             }
                             @if let Some(op) = r.in_progress_op.as_deref() {
-                                span class=(PILL_ALERT) title="a git operation is mid-flight — finish or abort it" {
+                                span class=(PILL_ALERT)
+                                     data-flag="in_progress_op"
+                                     title="a git operation is mid-flight — finish or abort it" {
                                     (op) " in progress"
                                 }
                             }
                             @if r.head_ref.as_deref() == Some("detached") {
-                                span class=(PILL_ALERT) title="HEAD is detached — not on any branch" {
+                                span class=(PILL_ALERT)
+                                     data-flag="detached_head"
+                                     title="HEAD is detached — not on any branch" {
                                     "detached HEAD"
                                 }
                             }
@@ -555,6 +694,7 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                             (ci_pill(r))
                             @if r.prs_awaiting_my_review > 0 {
                                 span class=(PILL_ALERT)
+                                     data-flag="review_requested"
                                      title="PRs where you're a requested reviewer" {
                                     (r.prs_awaiting_my_review) " awaiting your review"
                                 }
@@ -740,31 +880,36 @@ fn ci_pill(r: &db::Repo) -> Markup {
         .as_deref()
         .filter(|_| !default_branch.is_empty())
         .map(|u| format!("{u}/actions?query=branch%3A{default_branch}"));
-    let (class, text, title) = match status {
+    let (class, text, title, flag) = match status {
         "failure" => (
             PILL_ALERT,
             "CI failing",
             "latest default-branch CI run failed",
+            Some("ci_failing"),
         ),
         "running" => (
             PILL_FAINT,
             "CI running",
             "default-branch CI currently running",
+            None,
         ),
         "pending" => (
             PILL_FAINT,
             "CI pending",
             "default-branch CI is queued / waiting",
+            None,
         ),
         _ => return html! {}, // success / unknown — stay silent
     };
+    let flag_attr = flag.unwrap_or("");
     html! {
         @match href {
             Some(h) => {
-                a class=(class) href=(h) target="_blank" rel="noopener" title=(title) { (text) }
+                a class=(class) href=(h) target="_blank" rel="noopener"
+                  data-flag=(flag_attr) title=(title) { (text) }
             }
             None => {
-                span class=(class) title=(title) { (text) }
+                span class=(class) data-flag=(flag_attr) title=(title) { (text) }
             }
         }
     }

@@ -1,9 +1,13 @@
+use std::sync::atomic::Ordering;
+
 use axum::extract::{Query, State};
-use axum::response::IntoResponse;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use maud::html;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db;
+use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{page, H2, LI, LINK, PANEL, PATH, ROW};
 use crate::AppState;
 
@@ -11,12 +15,24 @@ use crate::AppState;
 pub struct SearchParams {
     #[serde(default)]
     pub q: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SearchJson {
+    query: String,
+    repos: Vec<db::SearchHit>,
+    sessions: Vec<db::SearchHit>,
+    commits: Vec<db::SearchHit>,
+    scan_version: u64,
 }
 
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
     let q = params.q.unwrap_or_default();
     let q_trimmed = q.trim().to_string();
 
@@ -46,6 +62,18 @@ pub async fn search(
             "commit" => commits.push(h),
             _ => {}
         }
+    }
+
+    if wants_json(&headers, params.format.as_deref()) {
+        let v = state.scan_version.load(Ordering::Acquire);
+        let body = SearchJson {
+            query: q_trimmed.clone(),
+            repos: repos.iter().map(|h| (*h).clone()).collect(),
+            sessions: sessions.iter().map(|h| (*h).clone()).collect(),
+            commits: commits.iter().map(|h| (*h).clone()).collect(),
+            scan_version: v,
+        };
+        return json_with_etag(&headers, v, &body);
     }
 
     let body = html! {

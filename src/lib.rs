@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, Mutex};
@@ -39,4 +40,9 @@ pub struct AppState {
     /// the default author for `?author=me` filtering. Fallback when
     /// `REPO_RECALL_AUTHOR` isn't set.
     pub my_git_email: Arc<Mutex<Option<String>>>,
+    /// Monotonic counter incremented at the end of every successful refresh.
+    /// Drives the `scan_version` field in JSON responses + the `ETag` header
+    /// on cacheable endpoints, so a polling orchestrator can short-circuit
+    /// with `304 Not Modified` between scans.
+    pub scan_version: Arc<AtomicU64>,
 }

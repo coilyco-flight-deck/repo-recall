@@ -35,6 +35,25 @@ The sweet spot is a broad prompt in auto mode — let the agent work through eve
 - `Open http://127.0.0.1:7777. Review my recent Claude Code sessions and surface any in-progress work I left unfinished across repos.`
 - `Open http://127.0.0.1:7777/repos/<id>. Look at the hottest files by churn and tell me what's driving the thrash.`
 
+## For agents
+
+The same URLs a browser hits also serve JSON. Send `Accept: application/json` (or append `?format=json`) to any of:
+
+- `GET /` — the full dashboard projection: repos, banner counts, action-required items, recent sessions/commits, gh health, scan version.
+- `GET /repos/{id}` — repo + sessions + commits + hotspots.
+- `GET /sessions/{id}` — session metadata + linked repos + estimated cost.
+- `GET /search?q=…` — partitioned hits (repos, sessions, commits).
+
+Three endpoints exist purely for orchestrators that don't want HTML at all:
+
+- `GET /api/action-required` — thin slice of just the action-required list. Each item carries `id = "<repo_id>:<signal>"` so you can tell "same broken thing, still broken" from "this one cleared and a different one appeared." Signals: `ci_failing`, `dirty_tree`, `in_progress_op`, `detached_head`, `review_requested`.
+- `GET /api/scan-version` — single-integer poll target so you can ask "did anything change" without paying the JSON projection cost.
+- `POST /api/refresh` — sync refresh. Awaits the scan, returns the new `scan_version`. Sibling of `POST /refresh`, which returns 202 and asks you to watch the WebSocket.
+
+Every JSON response carries `ETag: "<scan_version>"`. Send `If-None-Match` on the next poll and you'll get `304 Not Modified` between scans for free.
+
+The HTML repo-list cards also carry `data-repo-id`, `data-repo-name`, `data-action-required`, and `data-signals` attributes, plus `data-flag` on each action pill. Lets you parse the dashboard without regex on Tailwind class soup if you'd rather not switch to JSON.
+
 ## Quick start
 
 ```sh
@@ -46,6 +65,30 @@ open http://127.0.0.1:7777
 ```
 
 That's it. No config file, no setup wizard. The server walks its cwd + 4 levels deep for `.git`, parses `~/.claude/projects/**/*.jsonl`, joins them by the session's recorded `cwd`, and ships HTML.
+
+## Install via Homebrew
+
+For long-lived background use, install via the [`coilysiren/tap`](https://github.com/coilysiren/homebrew-tap) and let `brew services` manage the daemon:
+
+```sh
+brew install coilysiren/tap/repo-recall
+brew services start repo-recall
+
+# then:
+open http://localhost:7777
+```
+
+`brew services` follows the systemd-style `start | stop | restart | info` verbs. Logs go to `$(brew --prefix)/var/log/repo-recall.{log,err.log}`. `brew upgrade` keeps the binary current.
+
+The Formula's default `WorkingDirectory` is `$HOME` so it'll work for any user out of the box. To point it at a specific tree (mine: `~/projects/coilysiren`), edit your per-user service file once:
+
+```sh
+brew services edit repo-recall
+# change WorkingDirectory and any REPO_RECALL_* env vars, save
+brew services restart repo-recall
+```
+
+Edits persist across `brew upgrade`.
 
 ### Dev loop
 

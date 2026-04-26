@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         gh_health: Arc::new(Mutex::new(gh_health)),
         my_gh_login: Arc::new(Mutex::new(my_gh_login)),
         my_git_email: Arc::new(Mutex::new(my_git_email)),
+        scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     // Kick off initial scan in the background so the dashboard has data

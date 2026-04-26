@@ -4,8 +4,10 @@ use tower_http::services::ServeDir;
 
 use crate::AppState;
 
+pub mod api;
 pub mod dashboard;
 pub mod fallback;
+pub mod negotiate;
 pub mod refresh;
 pub mod repos;
 pub mod search;
@@ -23,6 +25,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(sessions::detail))
         .route("/search", get(search::search))
         .route("/refresh", post(refresh::trigger))
+        .route("/api/action-required", get(api::action_required))
+        .route("/api/refresh", post(api::refresh_sync))
+        .route("/api/scan-version", get(api::scan_version))
         .route("/ws", get(ws::ws_handler))
         .route("/livereload", get(ws::livereload_handler))
         .nest_service("/static", ServeDir::new(static_dir))

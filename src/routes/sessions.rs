@@ -1,12 +1,38 @@
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use maud::html;
+use std::sync::atomic::Ordering;
 
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use maud::html;
+use serde::{Deserialize, Serialize};
+
+use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
     absolute_time, compact_count, page, relative_time, H2, LI, LINK, PANEL, PATH, ROW,
 };
 use crate::{db, sessions as sess, AppState};
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DetailParams {
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionDetailJson {
+    session: db::Session,
+    cwd_matches: Vec<RepoRef>,
+    content_matches: Vec<RepoRef>,
+    estimated_cost_usd: f64,
+    scan_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RepoRef {
+    id: i64,
+    name: String,
+    path: String,
+}
 
 /// Rough cost estimate for a session's token usage in USD. Prices are the
 /// public Claude Sonnet 4.x rates (cheaper tier; most of our sessions run
@@ -120,8 +146,15 @@ fn format_duration_ms(ms: Option<i64>) -> String {
     }
 }
 
-pub async fn detail(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+pub async fn detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(params): Query<DetailParams>,
+    headers: HeaderMap,
+) -> Response {
+    let state2 = state.clone();
     let data = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let state = state2;
         let conn = db::open(&state.db_path)?;
         let sr = db::get_session(&conn, id)?;
         let partitioned = match sr.as_ref() {
@@ -159,6 +192,39 @@ pub async fn detail(State(state): State<AppState>, Path(id): Path<i64>) -> impl 
         )
             .into_response();
     };
+
+    if wants_json(&headers, params.format.as_deref()) {
+        let s = sr.session.clone();
+        let est = estimate_cost_usd(
+            s.input_tokens,
+            s.output_tokens,
+            s.cache_read_tokens,
+            s.cache_creation_tokens,
+        );
+        let v = state.scan_version.load(Ordering::Acquire);
+        let body = SessionDetailJson {
+            session: s,
+            cwd_matches: cwd_matches
+                .iter()
+                .map(|(id, name, path)| RepoRef {
+                    id: *id,
+                    name: name.clone(),
+                    path: path.clone(),
+                })
+                .collect(),
+            content_matches: content_matches
+                .iter()
+                .map(|(id, name, path)| RepoRef {
+                    id: *id,
+                    name: name.clone(),
+                    path: path.clone(),
+                })
+                .collect(),
+            estimated_cost_usd: est,
+            scan_version: v,
+        };
+        return json_with_etag(&headers, v, &body);
+    }
 
     let s = &sr.session;
     let body = html! {

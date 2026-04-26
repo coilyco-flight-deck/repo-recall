@@ -1,14 +1,40 @@
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use std::sync::atomic::Ordering;
+
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use maud::html;
+use serde::{Deserialize, Serialize};
 
 use crate::db;
+use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{page, relative_time, H2, LI, LINK, META, PANEL, PATH, ROW};
 use crate::AppState;
 
-pub async fn detail(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+#[derive(Debug, Deserialize, Default)]
+pub struct DetailParams {
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RepoDetailJson {
+    repo: db::Repo,
+    sessions: Vec<db::Session>,
+    commits: Vec<db::Commit>,
+    hotspots: Vec<db::FileHotspot>,
+    scan_version: u64,
+}
+
+pub async fn detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(params): Query<DetailParams>,
+    headers: HeaderMap,
+) -> Response {
+    let state2 = state.clone();
     let data = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let state = state2;
         let conn = db::open(&state.db_path)?;
         let repo = db::get_repo(&conn, id)?;
         let sessions = if repo.is_some() {
@@ -50,6 +76,18 @@ pub async fn detail(State(state): State<AppState>, Path(id): Path<i64>) -> impl 
         )
             .into_response();
     };
+
+    if wants_json(&headers, params.format.as_deref()) {
+        let v = state.scan_version.load(Ordering::Acquire);
+        let body = RepoDetailJson {
+            repo,
+            sessions,
+            commits,
+            hotspots,
+            scan_version: v,
+        };
+        return json_with_etag(&headers, v, &body);
+    }
 
     let body = html! {
         h1 class="text-lg font-semibold mb-1" { (repo.name) }
