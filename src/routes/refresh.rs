@@ -573,15 +573,13 @@ fn ingest_commits(
 
 /// HTML fragment that HTMX will swap into #scan-status via out-of-band swap.
 /// Carries the same class string as the initial template render — without
-/// it, every status update strips the banner's styling.
+/// it, every status update strips the banner's styling. Built with `maud`
+/// so escaping is handled by the template engine rather than by hand.
 fn status_fragment(text: &str) -> String {
-    // Escape angle-brackets minimally — inputs are our own templated strings.
-    let escaped = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    format!(
-        r#"<div id="scan-status" hx-swap-oob="true" class="{}">{escaped}</div>"#,
-        crate::routes::templates::SCAN_STATUS
-    )
+    maud::html! {
+        div id="scan-status" hx-swap-oob="true" class=(crate::routes::templates::SCAN_STATUS) {
+            (text)
+        }
+    }
+    .into_string()
 }

@@ -10,6 +10,19 @@ use repo_recall::{commits, db, routes, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Tiny CLI surface — just enough that `brew test` has a deterministic
+    // smoke probe and `--help` doesn't dump an axum stack trace. Anything
+    // beyond `--version` / `--help` falls through to the server boot path.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("repo-recall {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
+
     // Load .env from cwd (or repo root when launched via cargo run) before
     // reading any env vars. Missing .env is not an error.
     let _ = dotenvy::dotenv();
@@ -125,6 +138,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("listening on http://{}", addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn print_help() {
+    println!(
+        "repo-recall {ver}
+Local dev dashboard that indexes Claude Code session history against your repos.
+
+Usage:
+  repo-recall              start the server (binds 127.0.0.1:$REPO_RECALL_PORT)
+  repo-recall --version    print version and exit
+  repo-recall --help       print this help and exit
+
+Config is via env vars (or a .env file in cwd). See the README for the full list.
+Common ones: REPO_RECALL_PORT, REPO_RECALL_CWD, REPO_RECALL_DEPTH.
+",
+        ver = env!("CARGO_PKG_VERSION"),
+    );
 }
 
 /// Detect the viewer's git identity so "my commits" author-filter works by

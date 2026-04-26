@@ -348,49 +348,41 @@ pub fn mentions_in_file(path: &Path, needles: &[(i64, String)]) -> Vec<i64> {
         return Vec::new();
     };
     let haystack = content.to_ascii_lowercase();
-    let mut hits = Vec::new();
+
+    // Build the Aho-Corasick automaton once and stream the haystack through
+    // it in a single pass — multi-pattern, ASCII-case-insensitive (we
+    // pre-lowered the haystack, so plain matching suffices). Names shorter
+    // than 3 chars are dropped: "io", "ai", etc. would match constantly.
+    let mut pat_owners: Vec<i64> = Vec::with_capacity(needles.len());
+    let mut patterns: Vec<String> = Vec::with_capacity(needles.len());
     for (id, name) in needles {
-        let n = name.to_ascii_lowercase();
-        if n.is_empty() || n.len() < 3 {
-            // Shorter than 3 chars is pure noise — everything matches "io",
-            // "ai", etc. Skip.
+        if name.len() < 3 {
             continue;
         }
-        if has_word_match(&haystack, &n) {
-            hits.push(*id);
-        }
+        patterns.push(name.to_ascii_lowercase());
+        pat_owners.push(*id);
     }
-    hits
-}
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let Ok(ac) = aho_corasick::AhoCorasick::new(&patterns) else {
+        return Vec::new();
+    };
 
-/// Word-boundary substring check. A match counts when `needle` appears with
-/// non-alphanumeric (or start/end) on both sides. Prevents "backend" from
-/// matching "backends" or "bugbackend". Fast path uses raw substring scan
-/// then validates the boundary — avoids pulling in a regex engine.
-fn has_word_match(hay: &str, needle: &str) -> bool {
-    let mut start = 0;
-    while let Some(pos) = hay[start..].find(needle) {
-        let abs = start + pos;
-        let before_ok = abs == 0
-            || !hay
-                .as_bytes()
-                .get(abs - 1)
-                .is_some_and(|b| b.is_ascii_alphanumeric());
-        let after = abs + needle.len();
-        let after_ok = after >= hay.len()
-            || !hay
-                .as_bytes()
-                .get(after)
-                .is_some_and(|b| b.is_ascii_alphanumeric());
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + needle.len();
-        if start >= hay.len() {
-            break;
+    let bytes = haystack.as_bytes();
+    let mut hit_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for m in ac.find_iter(&haystack) {
+        let start = m.start();
+        let end = m.end();
+        // Word-boundary check: bordering byte (or start/end) must not be
+        // alphanumeric, so "backend" doesn't match "backends" or "bugbackend".
+        let left_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let right_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            hit_set.insert(pat_owners[m.pattern().as_usize()]);
         }
     }
-    false
+    hit_set.into_iter().collect()
 }
 
 fn walk_content(v: &serde_json::Value, turn: &mut Turn) {

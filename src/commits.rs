@@ -678,16 +678,11 @@ pub fn my_gh_login() -> Option<String> {
 /// be clever with enterprise GHE hosts yet — if that becomes real we'll
 /// match on the host whitelist `gh` itself reads.
 pub fn github_owner_repo(remote_url: &str) -> Option<String> {
-    let rest = remote_url.strip_prefix("https://github.com/")?;
-    let trimmed = rest.trim_end_matches('/');
-    // Expect exactly `owner/repo`; reject nested paths like `/tree/main/...`.
-    let mut parts = trimmed.split('/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+    let parsed = parse_owner_repo(remote_url)?;
+    if parsed.host != "github.com" {
         return None;
     }
-    Some(format!("{owner}/{repo}"))
+    Some(format!("{}/{}", parsed.owner, parsed.name))
 }
 
 /// Turn a raw git remote URL (`git@github.com:owner/repo.git`,
@@ -695,29 +690,49 @@ pub fn github_owner_repo(remote_url: &str) -> Option<String> {
 /// into a browsable HTTPS base — no trailing `.git`, no trailing slash.
 /// Returns `None` if we can't confidently produce one.
 fn normalize_remote_url(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    // SSH shorthand: `git@host:path`. Split on the first ':' *after* the `@`.
-    let normalized = if let Some(rest) = raw.strip_prefix("git@") {
-        let (host, path) = rest.split_once(':')?;
-        format!("https://{host}/{path}")
-    } else if let Some(rest) = raw.strip_prefix("ssh://") {
-        // `ssh://[user@]host[:port]/path` → `https://host/path`.
-        let after_user = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
-        let (host_with_port, path) = after_user.split_once('/')?;
-        let host = host_with_port.split(':').next().unwrap_or(host_with_port);
-        format!("https://{host}/{path}")
-    } else if raw.starts_with("http://") || raw.starts_with("https://") {
-        raw.to_string()
-    } else {
-        return None;
-    };
+    let parsed = parse_owner_repo(raw)?;
+    Some(format!(
+        "https://{}/{}/{}",
+        parsed.host, parsed.owner, parsed.name
+    ))
+}
 
-    let trimmed = normalized.trim_end_matches('/').trim_end_matches(".git");
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+struct OwnerRepo {
+    host: String,
+    owner: String,
+    name: String,
+}
+
+/// Parse a remote URL via `git-url-parse` and validate that the URL's path is
+/// *exactly* `owner/repo(.git)?` — no extra segments. The crate is
+/// permissive: `https://github.com/a/b/tree/main` parses without error and
+/// silently picks the last two segments as owner/name, which would let
+/// pasted browser URLs sneak past as legit remotes. Reject anything where
+/// the path doesn't round-trip back to `fullname`.
+fn parse_owner_repo(raw: &str) -> Option<OwnerRepo> {
+    use git_url_parse::Scheme;
+    let parsed = git_url_parse::GitUrl::parse(raw.trim()).ok()?;
+    if matches!(parsed.scheme, Scheme::File | Scheme::Unspecified) {
+        return None;
     }
+    let host = parsed.host.filter(|s| !s.is_empty())?;
+    let owner = parsed.owner.filter(|s| !s.is_empty())?;
+    if parsed.name.is_empty() {
+        return None;
+    }
+    let canonical_path = parsed
+        .path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    if canonical_path != parsed.fullname {
+        return None;
+    }
+    Some(OwnerRepo {
+        host,
+        owner,
+        name: parsed.name,
+    })
 }
 
 #[cfg(test)]
