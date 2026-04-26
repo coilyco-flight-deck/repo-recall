@@ -104,6 +104,28 @@ Claude Code session files can contain code, pasted credentials, and internal dis
 
 The 200-char summary can still leak sensitive content. Redaction is future work.
 
+## Release framework
+
+Every push to `main` triggers `.github/workflows/release.yml`, which fully automates versioning and Homebrew distribution. No manual `cargo release`, no manual tag, no manual PR.
+
+**Per-push flow:**
+
+1. `mathieudutour/github-tag-action` computes the next semver from commits since the last tag. `default_bump: patch` means *every* push releases at least a patch.
+   - plain commit → patch bump
+   - `feat: …` → minor bump
+   - `feat!: …` or body containing `BREAKING CHANGE:` → major bump
+2. Cargo.toml + Cargo.lock are bumped, committed back to `main` as `github-actions[bot]`, and tagged.
+3. A GitHub Release is cut with the auto-generated changelog.
+4. The `bump-tap` job downloads the new tarball, computes its sha256, and pushes the updated Formula directly to `main` on `coilysiren/homebrew-tap`. No PR.
+
+**Loop safety:** the bump commit is pushed with the workflow's `GITHUB_TOKEN`, which by GitHub policy doesn't re-trigger workflows. So the release job won't recurse on its own commit, and `ci.yml` doesn't re-run on it (the *pre-bump* commit already passed CI; the bump only changes versions).
+
+**Secret required:** `HOMEBREW_TAP_TOKEN` — fine-grained PAT scoped to `coilysiren/homebrew-tap` with `Repository permissions → Contents: Read and write`. Set via `gh secret set HOMEBREW_TAP_TOKEN --repo coilysiren/repo-recall`.
+
+**Formula source of truth:** `Formula/repo-recall.rb` in this repo. The tap at [`coilysiren/homebrew-tap`](https://github.com/coilysiren/homebrew-tap) is the install surface (`brew install coilysiren/tap/repo-recall`); the bump-tap job mirrors source-of-truth → tap on every release. Never edit the tap's Formula by hand — it'll get overwritten on the next release.
+
+**Skipping a release:** there's no built-in skip mechanism (intentional — we *want* every commit released). If you need to land a commit without releasing, you'd have to either temporarily disable the workflow or push directly to a tag without going through `main`. Don't do this without a reason.
+
 ## Commit verification
 
 Local policy on every repo Kai pulls from: only pull commits down if those commits are GPG-signed and from the expected author. Reject unsigned history. Reject signed-but-wrong-author commits on a solo repo. See `coilyco-vault/Notes/git-pull-verification.md` for rationale and config.
