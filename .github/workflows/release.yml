@@ -1,0 +1,107 @@
+name: release
+
+# release-please drives versioning + releases off conventional-commit
+# subjects on `main`. Workflow:
+#
+# 1. push to main → release-please opens (or updates) a "Release PR" that
+#    bumps Cargo.toml + Cargo.lock + writes CHANGELOG.md.
+# 2. merge that PR → release-please tags + creates a GitHub Release.
+# 3. the `bump-tap` job picks up the release event, computes the tarball
+#    sha256, and opens a PR to coilysiren/homebrew-tap pinning the new
+#    URL + sha. Merging that PR makes `brew upgrade repo-recall` ship it.
+#
+# Conventional-commit subjects we honor (anything else = no release):
+#   feat: …    → minor bump
+#   fix: …     → patch bump
+#   feat!: …   → major bump (also `BREAKING CHANGE:` in body)
+#
+# Manual setup (one-time, requires Kai):
+#   gh secret set HOMEBREW_TAP_TOKEN --repo coilysiren/repo-recall
+#     value: a fine-grained PAT with `contents:write` + `pull-requests:write`
+#     on coilysiren/homebrew-tap
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  bump-tap:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Outputs from release-please are not user-controlled (they come from
+      # the Cargo.toml version it just bumped + the tag it just cut), but
+      # surface them as env vars anyway so the shell never sees `${{ … }}`
+      # interpolation directly. Defense-in-depth against workflow injection.
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - name: Compute tarball sha256
+        id: sha
+        run: |
+          set -euo pipefail
+          url="https://github.com/coilysiren/repo-recall/archive/refs/tags/${TAG}.tar.gz"
+          sha=$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: coilysiren/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Bump Formula
+        env:
+          NEW_URL: ${{ steps.sha.outputs.url }}
+          NEW_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          file=Formula/repo-recall.rb
+          # Use | as sed delimiter so the tarball URL's slashes don't trip
+          # the parser. NEW_URL/NEW_SHA come from earlier shell output, not
+          # from any external input, but keeping the quoting tight regardless.
+          sed -i "s|^  url \".*\"|  url \"${NEW_URL}\"|" "$file"
+          sed -i "s|^  sha256 \".*\"|  sha256 \"${NEW_SHA}\"|" "$file"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="bump/repo-recall-${TAG}"
+          git checkout -b "$branch"
+          git add "$file"
+          git commit -m "repo-recall: bump to ${TAG}"
+          git push -u origin "$branch"
+
+      - name: Open PR against homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          NEW_URL: ${{ steps.sha.outputs.url }}
+          NEW_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          body=$(printf 'Automated bump from coilysiren/repo-recall release %s.\n\nURL: %s\nsha256: `%s`\n' "$TAG" "$NEW_URL" "$NEW_SHA")
+          gh pr create \
+            --repo coilysiren/homebrew-tap \
+            --base main \
+            --head "bump/repo-recall-${TAG}" \
+            --title "repo-recall: bump to ${TAG}" \
+            --body "$body"
