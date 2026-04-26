@@ -2,10 +2,10 @@ name: release
 
 # Fully automatic release on every push to main:
 #
-# 1. Conventional-commit subjects since the last tag are scanned to compute
-#    the next semver bump. No conventional commits → no release.
-#      feat: …    → minor       fix: …     → patch
-#      feat!: …   → major       (also `BREAKING CHANGE:` in body)
+# 1. Every commit triggers at least a patch bump. Conventional-commit
+#    subjects bump higher:
+#      <plain>    → patch       fix: …     → patch
+#      feat: …    → minor       feat!: …   → major  (also `BREAKING CHANGE:`)
 # 2. Cargo.toml + Cargo.lock are bumped, committed back to main, and tagged.
 # 3. A GitHub Release is created with the auto-generated changelog.
 # 4. The new tarball sha256 is computed and pushed *directly* to
@@ -48,8 +48,9 @@ jobs:
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # Don't release on plain commits — only conventional ones bump.
-          default_bump: false
+          # Release on every commit. Plain commits get a patch bump;
+          # `feat:` bumps minor; `feat!:` / `BREAKING CHANGE:` bumps major.
+          default_bump: patch
           release_branches: main
           # Compute the version + changelog without yet creating the tag;
           # we'll create it ourselves after the Cargo.toml bump commit.
