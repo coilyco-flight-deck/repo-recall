@@ -20,9 +20,17 @@ name: release
 #
 # Loop safety:
 #   The bump commit is pushed with the workflow's GITHUB_TOKEN, which by
-#   GitHub policy does NOT re-trigger workflows — so this job won't recurse
-#   on itself. CI for the bump commit doesn't run for the same reason; the
-#   pre-bump commit already passed CI, and the bump only changes versions.
+#   GitHub policy does NOT re-trigger workflows - so this job will not
+#   recurse on itself. CI for the bump commit does not run for the same
+#   reason; the pre-bump commit already passed CI, and the bump only
+#   changes versions.
+#
+# Signed commits:
+#   main has required_signatures enabled, which rejects unsigned commits.
+#   git push from Actions produces unsigned commits and would fail the
+#   push. Instead, the bump goes through GitHub createCommitOnBranch
+#   GraphQL mutation - those commits are signed by GitHub Actions and
+#   pass the protection rule. See .github/scripts/signed-commit.py.
 
 on:
   push:
@@ -63,9 +71,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ steps.tag.outputs.new_tag != '' }}
 
-      - name: Bump Cargo.toml + lockfile, commit, tag, push
+      - name: Bump Cargo.toml + lockfile (signed via GraphQL), tag
         if: ${{ steps.tag.outputs.new_tag != '' }}
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           VER: ${{ steps.tag.outputs.new_version }}
           TAG: ${{ steps.tag.outputs.new_tag }}
         run: |
@@ -86,12 +96,16 @@ jobs:
           p.write_text(new)
           PY
           cargo update --workspace --quiet
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: release ${TAG}"
-          git tag -a "${TAG}" -m "${TAG}"
-          git push origin HEAD:main --follow-tags
+          PARENT=$(git rev-parse HEAD)
+          NEW_OID=$(.github/scripts/signed-commit.py \
+            "$REPO" main "chore: release ${TAG}" "$PARENT" \
+            Cargo.toml Cargo.lock)
+          echo "release commit: $NEW_OID"
+          # Tag objects do not require commit signing; pushing a
+          # lightweight tag at the API-signed commit is enough.
+          git fetch origin main
+          git tag -a "${TAG}" -m "${TAG}" "$NEW_OID"
+          git push origin "refs/tags/${TAG}"
 
       - name: Create GitHub Release
         if: ${{ steps.tag.outputs.new_tag != '' }}
@@ -124,6 +138,11 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout repo-recall (for signed-commit helper)
+        uses: actions/checkout@v4
+        with:
+          path: repo-recall
+
       - name: Checkout homebrew-tap
         uses: actions/checkout@v4
         with:
@@ -131,8 +150,9 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Bump Formula and push directly
+      - name: Bump Formula and push directly (signed via GraphQL)
         env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           NEW_URL: ${{ steps.sha.outputs.url }}
           NEW_SHA: ${{ steps.sha.outputs.sha }}
         run: |
@@ -141,8 +161,8 @@ jobs:
           file=Formula/repo-recall.rb
           sed -i "s|^  url \".*\"|  url \"${NEW_URL}\"|" "$file"
           sed -i "s|^  sha256 \".*\"|  sha256 \"${NEW_SHA}\"|" "$file"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$file"
-          git commit -m "repo-recall: bump to ${TAG}"
-          git push origin HEAD:main
+          PARENT=$(git rev-parse HEAD)
+          ../repo-recall/.github/scripts/signed-commit.py \
+            coilysiren/homebrew-tap main \
+            "repo-recall: bump to ${TAG}" "$PARENT" \
+            "$file"
