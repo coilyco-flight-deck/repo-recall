@@ -153,8 +153,7 @@ pub const PILL_ALERT: &str =
 /// Pill on the dark-purple action-required banner. Lighter outline for
 /// contrast against the dark background, white text, click-affordance from
 /// the underline-on-hover.
-pub const ACTION_PILL: &str =
-    "bg-white/10 text-white text-[11px] px-2 py-0.5 rounded-full \
+pub const ACTION_PILL: &str = "bg-white/10 text-white text-[11px] px-2 py-0.5 rounded-full \
      border border-white/30 hover:bg-white/20 hover:no-underline \
      transition-colors cursor-pointer";
 /// Faint variant for "in progress" / informational signals.

@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::routes::api::{derive_action_signals, ActionRequiredItem};
 use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
-    absolute_time, compact_count, display_name, page, page_with_banners, relative_time, ACTION_PILL,
-    H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW, SCAN_STATUS,
+    absolute_time, compact_count, display_name, page, page_with_banners, relative_time,
+    ACTION_PILL, H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW,
+    SCAN_STATUS,
 };
 use crate::{activity, db, AppState};
 
@@ -242,7 +243,8 @@ pub async fn index(
     // Order is deliberate: the noisier remote-state signals go first so the
     // user resolves the things that block teammates before sweeping local
     // dirt.
-    let action_groups: Vec<(&'static str, &'static str, Vec<(&db::Repo, String)>)> = {
+    type ActionGroup<'a> = (&'static str, &'static str, Vec<(&'a db::Repo, String)>);
+    let action_groups: Vec<ActionGroup> = {
         use std::collections::BTreeMap;
         let mut by_signal: BTreeMap<&'static str, Vec<(&db::Repo, String)>> = BTreeMap::new();
         for r in &repos {
