@@ -133,6 +133,20 @@ pub const ATTRS: &[Attr] = &[
         get: |r| r.issues_assigned_to_me,
     },
     Attr {
+        // Binary: 1 if the deploy workflow's last run on the default branch
+        // failed. Mirrors `ci_failing`.
+        key: "deploy_failing",
+        category: Category::RemoteState,
+        get: |r| i64::from(is_deploy_failing(r)),
+    },
+    Attr {
+        // Binary: 1 if the deploy workflow had a green run before going quiet
+        // and the most recent green run is more than 7 days old.
+        key: "deploy_stale",
+        category: Category::RemoteState,
+        get: |r| i64::from(is_deploy_stale(r)),
+    },
+    Attr {
         // Not included in action-required (open PRs are informational), but
         // contributes to activity scoring so repos with active PR flow rank.
         key: "open_prs",
@@ -197,6 +211,11 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 /// the ones that ought to pull attention. Add a check here when a new
 /// attribute carries the same "needs doing" weight.
 ///
+/// Threshold for the `deploy_stale` signal: if the deploy workflow had a
+/// successful run before going quiet *and* the most recent green run is
+/// older than this, the deploy path itself probably rotted.
+pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
+
 /// Current triggers:
 /// - Failing default-branch CI
 /// - Dirty working tree (untracked + modified)
@@ -204,6 +223,8 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 /// - Detached HEAD
 /// - PR awaiting my review
 /// - Issue assigned to me
+/// - Deploy workflow's last run failed
+/// - Deploy workflow has been silent for > 7d since its last green run
 pub fn is_action_required(r: &Repo) -> bool {
     r.ci_status.as_deref() == Some("failure")
         || (r.untracked_files + r.modified_files) > 0
@@ -211,6 +232,29 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.head_ref.as_deref() == Some("detached")
         || r.prs_awaiting_my_review > 0
         || r.issues_assigned_to_me > 0
+        || is_deploy_failing(r)
+        || is_deploy_stale(r)
+}
+
+/// Last run of the deploy workflow on the default branch failed.
+pub fn is_deploy_failing(r: &Repo) -> bool {
+    r.deploy_status.as_deref() == Some("failure")
+}
+
+/// Deploy workflow has gone quiet: there *was* a successful run, but the
+/// most recent green run is older than [`DEPLOY_STALE_SECS`]. Repos that
+/// have never deployed successfully don't count as "stale" - they're
+/// "never-deployed", a different (and not-this-signal) thing.
+pub fn is_deploy_stale(r: &Repo) -> bool {
+    let Some(last_success) = r.deploy_last_success_ts else {
+        return false;
+    };
+    // Already-failing supersedes stale - one signal at a time per repo.
+    if is_deploy_failing(r) {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp();
+    now - last_success > DEPLOY_STALE_SECS
 }
 
 /// In-place sort. First by action-required (true before false), then by
@@ -263,6 +307,9 @@ mod tests {
             prs_awaiting_my_review: 0,
             prs_mine_awaiting_review: 0,
             issues_assigned_to_me: 0,
+            deploy_workflow: None,
+            deploy_status: None,
+            deploy_last_success_ts: None,
             remote_url: None,
             default_branch: None,
         }

@@ -316,10 +316,11 @@ async fn ingest_ci_status(state: AppState) -> usize {
     let target_limit = state.remote_target_limit;
     let targets = {
         let db_path = state.db_path.clone();
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(i64, String, String)>> {
-            let conn = db::open(&db_path)?;
-            let sql = if target_limit == 0 {
-                "SELECT r.id, r.remote_url, r.default_branch
+        match tokio::task::spawn_blocking(
+            move || -> anyhow::Result<Vec<(i64, String, String, String)>> {
+                let conn = db::open(&db_path)?;
+                let sql = if target_limit == 0 {
+                    "SELECT r.id, r.remote_url, r.default_branch, r.path
                  FROM repos r
                  LEFT JOIN (
                      SELECT repo_id, MAX(timestamp) AS latest_ts
@@ -327,10 +328,10 @@ async fn ingest_ci_status(state: AppState) -> usize {
                  ) c ON c.repo_id = r.id
                  WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
                  ORDER BY COALESCE(c.latest_ts, 0) DESC"
-                    .to_string()
-            } else {
-                format!(
-                    "SELECT r.id, r.remote_url, r.default_branch
+                        .to_string()
+                } else {
+                    format!(
+                        "SELECT r.id, r.remote_url, r.default_branch, r.path
                      FROM repos r
                      LEFT JOIN (
                          SELECT repo_id, MAX(timestamp) AS latest_ts
@@ -339,22 +340,24 @@ async fn ingest_ci_status(state: AppState) -> usize {
                      WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
                      ORDER BY COALESCE(c.latest_ts, 0) DESC
                      LIMIT {target_limit}"
-                )
-            };
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-            let mut out = Vec::new();
-            for r in rows {
-                out.push(r?);
-            }
-            Ok(out)
-        })
+                    )
+                };
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                let mut out = Vec::new();
+                for r in rows {
+                    out.push(r?);
+                }
+                Ok(out)
+            },
+        )
         .await
         {
             Ok(Ok(v)) => v,
@@ -363,10 +366,15 @@ async fn ingest_ci_status(state: AppState) -> usize {
     };
 
     // Filter to repos we actually know how to query (GitHub-hosted only).
+    // Sniff the deploy workflow on disk up front so the gh subprocess block
+    // can fan out without re-touching the filesystem.
     let jobs: Vec<_> = targets
         .into_iter()
-        .filter_map(|(id, url, branch)| {
-            commits::github_owner_repo(&url).map(|slug| (id, slug, branch))
+        .filter_map(|(id, url, branch, path)| {
+            commits::github_owner_repo(&url).map(|slug| {
+                let deploy_wf = commits::find_deploy_workflow(std::path::Path::new(&path));
+                (id, slug, branch, deploy_wf)
+            })
         })
         .collect();
     let total = jobs.len();
@@ -378,26 +386,31 @@ async fn ingest_ci_status(state: AppState) -> usize {
     // hammering the rate limit or fork-bombing the laptop.
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
     let mut set = tokio::task::JoinSet::new();
-    for (id, slug, branch) in jobs {
+    for (id, slug, branch, deploy_wf) in jobs {
         let sem = semaphore.clone();
         let login = my_login.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
-            // Fan out CI + PRs + issues in one blocking block so the
-            // subprocess cost is sequential-per-repo but overlapping across
-            // repos (bounded by the semaphore). PRs and issues share one
-            // GraphQL call to halve the per-repo API spend.
+            // Fan out CI + PRs + issues + deploy health in one blocking
+            // block so the subprocess cost is sequential-per-repo but
+            // overlapping across repos (bounded by the semaphore). PRs +
+            // issues share one GraphQL call; deploy health is one extra
+            // `gh run list` only when a deploy workflow exists.
             tokio::task::spawn_blocking(move || {
                 let ci = commits::ci_status(&slug, &branch);
                 let (prs, issues) = match commits::fetch_pr_and_issue_counts(&slug, &login) {
                     Some((p, i)) => (Some(p), Some(i)),
                     None => (None, None),
                 };
+                let deploy = deploy_wf.as_ref().and_then(|wf| {
+                    commits::fetch_deploy_health(&slug, wf, &branch).map(|h| (wf.clone(), h))
+                });
                 RemoteSnapshot {
                     id,
                     ci,
                     prs,
                     issues,
+                    deploy,
                 }
             })
             .await
@@ -432,6 +445,10 @@ async fn ingest_ci_status(state: AppState) -> usize {
             // how `ci_status` is treated when the gh subprocess fails.
             let issues_total: Option<i64> = snap.issues.map(|i| i.open);
             let issues_assigned: Option<i64> = snap.issues.map(|_| issues.assigned_to_me);
+            let (deploy_wf, deploy_status, deploy_last_success) = match &snap.deploy {
+                Some((wf, h)) => (Some(wf.clone()), h.status.clone(), h.last_success_ts),
+                None => (None, None, None),
+            };
             tx_ins.execute(
                 "UPDATE repos
                  SET ci_status = COALESCE(?1, ci_status),
@@ -440,8 +457,11 @@ async fn ingest_ci_status(state: AppState) -> usize {
                      prs_awaiting_my_review = ?4,
                      prs_mine_awaiting_review = ?5,
                      open_issues = COALESCE(?6, open_issues),
-                     issues_assigned_to_me = COALESCE(?7, issues_assigned_to_me)
-                 WHERE id = ?8",
+                     issues_assigned_to_me = COALESCE(?7, issues_assigned_to_me),
+                     deploy_workflow = COALESCE(?8, deploy_workflow),
+                     deploy_status = COALESCE(?9, deploy_status),
+                     deploy_last_success_ts = COALESCE(?10, deploy_last_success_ts)
+                 WHERE id = ?11",
                 rusqlite::params![
                     snap.ci,
                     prs.open,
@@ -450,6 +470,9 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     prs.mine_awaiting_review,
                     issues_total,
                     issues_assigned,
+                    deploy_wf,
+                    deploy_status,
+                    deploy_last_success,
                     snap.id,
                 ],
             )?;
@@ -470,6 +493,7 @@ struct RemoteSnapshot {
     ci: Option<String>,
     prs: Option<commits::PrCounts>,
     issues: Option<commits::IssueCounts>,
+    deploy: Option<(String, commits::DeployHealth)>,
 }
 
 struct RefreshStats {

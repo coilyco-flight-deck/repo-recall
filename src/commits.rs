@@ -535,6 +535,120 @@ pub fn ci_status(owner_repo: &str, default_branch: &str) -> Option<String> {
     Some(out.to_string())
 }
 
+/// Locate the repo's deploy workflow on disk. We sniff
+/// `.github/workflows/*.{yml,yaml}` for a basename containing "deploy"
+/// (case-insensitive), first match wins. Returns the *filename* (not the
+/// full path) since `gh run list --workflow=<file>` accepts either the
+/// filename or the workflow name. None when nothing matches; the deploy
+/// signals stay silent in that case (not every repo deploys).
+///
+/// Deliberate divergence from the original repo-recall#7 sketch: we don't
+/// read a `.repo-recall/config.yaml` override here. Repo-recall is "no
+/// config file" by convention (see AGENTS.md). If the filename sniff
+/// misses a real deploy workflow, the fix is renaming the workflow file
+/// or extending this sniffer, not introducing a config surface.
+pub fn find_deploy_workflow(repo_path: &Path) -> Option<String> {
+    let dir = repo_path.join(".github").join("workflows");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut matches: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let lower = name.to_lowercase();
+            if (lower.ends_with(".yml") || lower.ends_with(".yaml")) && lower.contains("deploy") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    matches.sort();
+    matches.into_iter().next()
+}
+
+/// Latest-deploy health for a repo. `status` is the *last* run's outcome,
+/// `last_success_ts` is the unix-seconds timestamp of the most recent
+/// successful run (None when there's never been a green run). Together
+/// they distinguish "broken right now" from "rotted, last green is old"
+/// from "never deployed."
+#[derive(Debug, Clone, Default)]
+pub struct DeployHealth {
+    pub status: Option<String>,
+    pub last_success_ts: Option<i64>,
+}
+
+/// `gh run list --workflow=<wf> --branch=<branch> -L 30` and reduce to a
+/// `DeployHealth`. We pull 30 runs so a recent burst of cancelled /
+/// in-progress runs doesn't push the last successful one out of the
+/// window. None on any gh failure (network, auth, parse, no-such-workflow).
+pub fn fetch_deploy_health(
+    owner_repo: &str,
+    workflow: &str,
+    default_branch: &str,
+) -> Option<DeployHealth> {
+    let output = Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            workflow,
+            "--branch",
+            default_branch,
+            "-R",
+            owner_repo,
+            "-L",
+            "30",
+            "--json",
+            "status,conclusion,createdAt",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        tracing::debug!(
+            "gh run list deploy-workflow failed for {owner_repo}@{workflow}@{default_branch}: {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let runs: Vec<serde_json::Value> = serde_json::from_str(stdout.trim()).ok()?;
+    if runs.is_empty() {
+        return Some(DeployHealth::default());
+    }
+    let normalize = |status: &str, conclusion: &str| -> Option<&'static str> {
+        match (status, conclusion) {
+            ("completed", "success") => Some("success"),
+            ("completed", "failure" | "startup_failure" | "timed_out") => Some("failure"),
+            ("completed", _) => Some("success"), // cancelled / skipped / neutral: not urgent
+            ("in_progress", _) => Some("running"),
+            ("queued" | "pending" | "requested" | "waiting", _) => Some("pending"),
+            _ => None,
+        }
+    };
+    let first = &runs[0];
+    let first_status = first.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let first_conclusion = first
+        .get("conclusion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let status = normalize(first_status, first_conclusion).map(|s| s.to_string());
+
+    let last_success_ts = runs.iter().find_map(|r| {
+        let conclusion = r.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+        if conclusion != "success" {
+            return None;
+        }
+        let created = r.get("createdAt").and_then(|v| v.as_str())?;
+        chrono::DateTime::parse_from_rfc3339(created)
+            .ok()
+            .map(|dt| dt.timestamp())
+    });
+    Some(DeployHealth {
+        status,
+        last_success_ts,
+    })
+}
+
 /// Aggregated open-PR counts for one repo. Derived client-side from a
 /// single `gh pr list --json` call so we only pay one subprocess per repo
 /// for the PR view.

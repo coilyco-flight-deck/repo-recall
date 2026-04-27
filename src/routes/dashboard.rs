@@ -65,6 +65,8 @@ pub struct BannerCounts {
     pub detached_heads: usize,
     pub review_requested: i64,
     pub issue_assigned: i64,
+    pub deploy_failing: usize,
+    pub deploy_stale: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,12 +164,22 @@ pub async fn index(
         .count();
     let review_requested_count: i64 = repos.iter().map(|r| r.prs_awaiting_my_review).sum();
     let issue_assigned_count: i64 = repos.iter().map(|r| r.issues_assigned_to_me).sum();
+    let deploy_failing_count = repos
+        .iter()
+        .filter(|r| activity::is_deploy_failing(r))
+        .count();
+    let deploy_stale_count = repos
+        .iter()
+        .filter(|r| activity::is_deploy_stale(r))
+        .count();
     let has_action = ci_failing_count
         + dirty_count
         + in_progress_count
         + detached_count
         + (review_requested_count as usize)
         + (issue_assigned_count as usize)
+        + deploy_failing_count
+        + deploy_stale_count
         > 0;
 
     if wants_json(&headers, params.format.as_deref()) {
@@ -215,6 +227,8 @@ pub async fn index(
                 detached_heads: detached_count,
                 review_requested: review_requested_count,
                 issue_assigned: issue_assigned_count,
+                deploy_failing: deploy_failing_count,
+                deploy_stale: deploy_stale_count,
             },
             counts: DashboardCounts {
                 repos: repos_n,
@@ -261,6 +275,8 @@ pub async fn index(
         }
         let order: &[(&'static str, &'static str)] = &[
             ("ci_failing", "failing CI"),
+            ("deploy_failing", "failing deploy"),
+            ("deploy_stale", "stale deploy"),
             ("review_requested", "awaiting your review"),
             ("issue_assigned", "issues assigned to you"),
             ("in_progress_op", "mid-op"),
@@ -310,6 +326,18 @@ pub async fn index(
                         a class=(ACTION_PILL) data-action-pill href="#action-issue_assigned" {
                             (issue_assigned_count) " issue" @if issue_assigned_count != 1 { "s" }
                             " assigned to you"
+                        }
+                    }
+                    @if deploy_failing_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-deploy_failing" {
+                            (deploy_failing_count) " failing deploy"
+                            @if deploy_failing_count != 1 { "s" }
+                        }
+                    }
+                    @if deploy_stale_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-deploy_stale" {
+                            (deploy_stale_count) " stale deploy"
+                            @if deploy_stale_count != 1 { "s" }
                         }
                     }
                 }
@@ -706,6 +734,16 @@ fn action_sentence(signal: &str, r: &db::Repo, detail: &str) -> Markup {
             "Triage each one — close, comment, or pick the next action — so the queue reflects what's actually live."
             (remote_link("/issues/assigned/@me", "issue queue"))
         },
+        "deploy_failing" => html! {
+            (detail) " in " (repo_link) ". "
+            "Open the failing run, fix the breakage, and push a green commit before merging anything else."
+            (remote_link("/actions", "actions"))
+        },
+        "deploy_stale" => html! {
+            (detail) " in " (repo_link) ". "
+            "The deploy path itself may have rotted — kick a manual run or check for missing triggers."
+            (remote_link("/actions", "actions"))
+        },
         "in_progress_op" => html! {
             (repo_link) " has " (detail) ". "
             "Finish it (`git "
@@ -841,6 +879,30 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                                     (r.issues_assigned_to_me) " issue"
                                     @if r.issues_assigned_to_me != 1 { "s" }
                                     " assigned"
+                                }
+                            }
+                            @if activity::is_deploy_failing(r) {
+                                span class=(PILL_ALERT)
+                                     data-flag="deploy_failing"
+                                     title={
+                                        "deploy workflow `"
+                                        (r.deploy_workflow.as_deref().unwrap_or("deploy"))
+                                        "` last run failed"
+                                     } {
+                                    "deploy failing"
+                                }
+                            } @else if activity::is_deploy_stale(r) {
+                                @let days = r.deploy_last_success_ts
+                                    .map(|ts| (chrono::Utc::now().timestamp() - ts) / 86_400)
+                                    .unwrap_or(0);
+                                span class=(PILL_ALERT)
+                                     data-flag="deploy_stale"
+                                     title={
+                                        "deploy workflow `"
+                                        (r.deploy_workflow.as_deref().unwrap_or("deploy"))
+                                        "` last green " (days) "d ago"
+                                     } {
+                                    "deploy stale " (days) "d"
                                 }
                             }
                             @if r.prs_mine_awaiting_review > 0 {

@@ -193,6 +193,23 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             detail: format!("{n} issue{} assigned to you", if n == 1 { "" } else { "s" },),
         });
     }
+    if activity::is_deploy_failing(r) {
+        let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
+        out.push(DerivedSignal {
+            signal: "deploy_failing",
+            detail: format!("last `{wf}` run on the default branch failed"),
+        });
+    } else if activity::is_deploy_stale(r) {
+        let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
+        let days = r
+            .deploy_last_success_ts
+            .map(|ts| (chrono::Utc::now().timestamp() - ts) / 86_400)
+            .unwrap_or(0);
+        out.push(DerivedSignal {
+            signal: "deploy_stale",
+            detail: format!("`{wf}` last green {days}d ago"),
+        });
+    }
     let _ = activity::is_action_required;
     out
 }
