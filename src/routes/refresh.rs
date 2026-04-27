@@ -426,6 +426,12 @@ async fn ingest_ci_status(state: AppState) -> usize {
         let mut n = 0usize;
         for snap in results {
             let prs = snap.prs.unwrap_or_default();
+            let issues = snap.issues.unwrap_or_default();
+            // Pass the totals as Option<i64> so a `None` from the GraphQL
+            // call leaves the existing column untouched (COALESCE), matching
+            // how `ci_status` is treated when the gh subprocess fails.
+            let issues_total: Option<i64> = snap.issues.map(|i| i.open);
+            let issues_assigned: Option<i64> = snap.issues.map(|_| issues.assigned_to_me);
             tx_ins.execute(
                 "UPDATE repos
                  SET ci_status = COALESCE(?1, ci_status),
@@ -433,15 +439,17 @@ async fn ingest_ci_status(state: AppState) -> usize {
                      draft_prs = ?3,
                      prs_awaiting_my_review = ?4,
                      prs_mine_awaiting_review = ?5,
-                     open_issues = COALESCE(?6, open_issues)
-                 WHERE id = ?7",
+                     open_issues = COALESCE(?6, open_issues),
+                     issues_assigned_to_me = COALESCE(?7, issues_assigned_to_me)
+                 WHERE id = ?8",
                 rusqlite::params![
                     snap.ci,
                     prs.open,
                     prs.draft,
                     prs.awaiting_my_review,
                     prs.mine_awaiting_review,
-                    snap.issues,
+                    issues_total,
+                    issues_assigned,
                     snap.id,
                 ],
             )?;
@@ -461,7 +469,7 @@ struct RemoteSnapshot {
     id: i64,
     ci: Option<String>,
     prs: Option<commits::PrCounts>,
-    issues: Option<i64>,
+    issues: Option<commits::IssueCounts>,
 }
 
 struct RefreshStats {

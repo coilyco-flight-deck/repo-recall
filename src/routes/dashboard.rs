@@ -64,6 +64,7 @@ pub struct BannerCounts {
     pub in_progress_ops: usize,
     pub detached_heads: usize,
     pub review_requested: i64,
+    pub issue_assigned: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,11 +161,13 @@ pub async fn index(
         .filter(|r| r.head_ref.as_deref() == Some("detached"))
         .count();
     let review_requested_count: i64 = repos.iter().map(|r| r.prs_awaiting_my_review).sum();
+    let issue_assigned_count: i64 = repos.iter().map(|r| r.issues_assigned_to_me).sum();
     let has_action = ci_failing_count
         + dirty_count
         + in_progress_count
         + detached_count
         + (review_requested_count as usize)
+        + (issue_assigned_count as usize)
         > 0;
 
     if wants_json(&headers, params.format.as_deref()) {
@@ -211,6 +214,7 @@ pub async fn index(
                 in_progress_ops: in_progress_count,
                 detached_heads: detached_count,
                 review_requested: review_requested_count,
+                issue_assigned: issue_assigned_count,
             },
             counts: DashboardCounts {
                 repos: repos_n,
@@ -258,6 +262,7 @@ pub async fn index(
         let order: &[(&'static str, &'static str)] = &[
             ("ci_failing", "failing CI"),
             ("review_requested", "awaiting your review"),
+            ("issue_assigned", "issues assigned to you"),
             ("in_progress_op", "mid-op"),
             ("detached_head", "detached HEAD"),
             ("dirty_tree", "dirty tree"),
@@ -299,6 +304,12 @@ pub async fn index(
                     @if review_requested_count > 0 {
                         a class=(ACTION_PILL) data-action-pill href="#action-review_requested" {
                             (review_requested_count) " awaiting your review"
+                        }
+                    }
+                    @if issue_assigned_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-issue_assigned" {
+                            (issue_assigned_count) " issue" @if issue_assigned_count != 1 { "s" }
+                            " assigned to you"
                         }
                     }
                 }
@@ -690,6 +701,11 @@ fn action_sentence(signal: &str, r: &db::Repo, detail: &str) -> Markup {
             "Read each PR and approve, request changes, or comment so the author isn't blocked on you."
             (remote_link("/pulls/review-requested/@me", "review queue"))
         },
+        "issue_assigned" => html! {
+            (detail) " in " (repo_link) ". "
+            "Triage each one — close, comment, or pick the next action — so the queue reflects what's actually live."
+            (remote_link("/issues/assigned/@me", "issue queue"))
+        },
         "in_progress_op" => html! {
             (repo_link) " has " (detail) ". "
             "Finish it (`git "
@@ -816,6 +832,15 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                                      data-flag="review_requested"
                                      title="PRs where you're a requested reviewer" {
                                     (r.prs_awaiting_my_review) " awaiting your review"
+                                }
+                            }
+                            @if r.issues_assigned_to_me > 0 {
+                                span class=(PILL_ALERT)
+                                     data-flag="issue_assigned"
+                                     title="open issues assigned to you" {
+                                    (r.issues_assigned_to_me) " issue"
+                                    @if r.issues_assigned_to_me != 1 { "s" }
+                                    " assigned"
                                 }
                             }
                             @if r.prs_mine_awaiting_review > 0 {

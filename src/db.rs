@@ -68,7 +68,11 @@ pub fn init(path: &Path) -> Result<()> {
             draft_prs INTEGER NOT NULL DEFAULT 0,
             open_issues INTEGER NOT NULL DEFAULT 0,
             prs_awaiting_my_review INTEGER NOT NULL DEFAULT 0,
-            prs_mine_awaiting_review INTEGER NOT NULL DEFAULT 0
+            prs_mine_awaiting_review INTEGER NOT NULL DEFAULT 0,
+            -- Open issues assigned to the authenticated `gh` user. Distinct
+            -- from `open_issues` (the repo total) so a repo can have many
+            -- issues without dragging this signal up. Action-required when > 0.
+            issues_assigned_to_me INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE sessions (
@@ -306,6 +310,7 @@ pub struct Repo {
     pub open_issues: i64,
     pub prs_awaiting_my_review: i64,
     pub prs_mine_awaiting_review: i64,
+    pub issues_assigned_to_me: i64,
     pub remote_url: Option<String>,
     pub default_branch: Option<String>,
 }
@@ -368,6 +373,7 @@ pub fn list_repos_with_counts(conn: &Connection) -> Result<Vec<Repo>> {
                r.head_ref, r.in_progress_op,
                r.open_prs, r.draft_prs, r.open_issues,
                r.prs_awaiting_my_review, r.prs_mine_awaiting_review,
+               r.issues_assigned_to_me,
                (SELECT COUNT(*) FROM session_repos sr WHERE sr.repo_id = r.id) AS session_count,
                (SELECT COUNT(*) FROM commits c
                 WHERE c.repo_id = r.id AND c.timestamp >= ?1) AS commits_30d,
@@ -400,9 +406,10 @@ pub fn list_repos_with_counts(conn: &Connection) -> Result<Vec<Repo>> {
             open_issues: row.get(16)?,
             prs_awaiting_my_review: row.get(17)?,
             prs_mine_awaiting_review: row.get(18)?,
-            session_count: row.get(19)?,
-            commits_30d: row.get(20)?,
-            authors_30d: row.get(21)?,
+            issues_assigned_to_me: row.get(19)?,
+            session_count: row.get(20)?,
+            commits_30d: row.get(21)?,
+            authors_30d: row.get(22)?,
         })
     })?;
     let mut out = Vec::new();
@@ -422,6 +429,7 @@ pub fn get_repo(conn: &Connection, id: i64) -> Result<Option<Repo>> {
                r.head_ref, r.in_progress_op,
                r.open_prs, r.draft_prs, r.open_issues,
                r.prs_awaiting_my_review, r.prs_mine_awaiting_review,
+               r.issues_assigned_to_me,
                (SELECT COUNT(*) FROM session_repos sr WHERE sr.repo_id = r.id) AS session_count,
                (SELECT COUNT(*) FROM commits c
                 WHERE c.repo_id = r.id AND c.timestamp >= ?2) AS commits_30d,
@@ -452,9 +460,10 @@ pub fn get_repo(conn: &Connection, id: i64) -> Result<Option<Repo>> {
             open_issues: row.get(16)?,
             prs_awaiting_my_review: row.get(17)?,
             prs_mine_awaiting_review: row.get(18)?,
-            session_count: row.get(19)?,
-            commits_30d: row.get(20)?,
-            authors_30d: row.get(21)?,
+            issues_assigned_to_me: row.get(19)?,
+            session_count: row.get(20)?,
+            commits_30d: row.get(21)?,
+            authors_30d: row.get(22)?,
         })
     })?;
     Ok(rows.next().transpose()?)

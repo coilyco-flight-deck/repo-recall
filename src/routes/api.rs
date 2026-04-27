@@ -186,6 +186,13 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             ),
         });
     }
+    if r.issues_assigned_to_me > 0 {
+        let n = r.issues_assigned_to_me;
+        out.push(DerivedSignal {
+            signal: "issue_assigned",
+            detail: format!("{n} issue{} assigned to you", if n == 1 { "" } else { "s" },),
+        });
+    }
     let _ = activity::is_action_required;
     out
 }

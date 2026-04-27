@@ -126,6 +126,13 @@ pub const ATTRS: &[Attr] = &[
         get: |r| r.prs_awaiting_my_review,
     },
     Attr {
+        // Open issues assigned to the authenticated user — the "what's on my
+        // plate today" signal. Action-required when > 0.
+        key: "issues_assigned_to_me",
+        category: Category::RemoteState,
+        get: |r| r.issues_assigned_to_me,
+    },
+    Attr {
         // Not included in action-required (open PRs are informational), but
         // contributes to activity scoring so repos with active PR flow rank.
         key: "open_prs",
@@ -195,12 +202,15 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 /// - Dirty working tree (untracked + modified)
 /// - In-progress git operation (rebase / merge / cherry-pick / revert / bisect)
 /// - Detached HEAD
+/// - PR awaiting my review
+/// - Issue assigned to me
 pub fn is_action_required(r: &Repo) -> bool {
     r.ci_status.as_deref() == Some("failure")
         || (r.untracked_files + r.modified_files) > 0
         || r.in_progress_op.is_some()
         || r.head_ref.as_deref() == Some("detached")
         || r.prs_awaiting_my_review > 0
+        || r.issues_assigned_to_me > 0
 }
 
 /// In-place sort. First by action-required (true before false), then by
@@ -252,6 +262,7 @@ mod tests {
             open_issues: 0,
             prs_awaiting_my_review: 0,
             prs_mine_awaiting_review: 0,
+            issues_assigned_to_me: 0,
             remote_url: None,
             default_branch: None,
         }

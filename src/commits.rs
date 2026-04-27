@@ -546,22 +546,39 @@ pub struct PrCounts {
     pub mine_awaiting_review: i64,
 }
 
+/// Issue counts for one repo. `open` is the repo total; `assigned_to_me` is
+/// the subset assigned to the authenticated viewer (matched on `gh` login).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IssueCounts {
+    pub open: i64,
+    pub assigned_to_me: i64,
+}
+
 /// Fetch PR counts + open-issue total for a GitHub repo in one GraphQL
 /// call. Replaces the previous pair (`gh pr list` + `gh issue list`),
 /// halving the per-repo gh subprocess + API cost on the remote pass.
 ///
 /// `my_login` is the viewer's GitHub handle. Empty string is fine — the
-/// reviewer-split fields just stay zero. Returns `None` on any gh failure
-/// (network, auth, parse) so one repo can't break the refresh.
+/// reviewer-split + assignee fields just stay zero. Returns `None` on any
+/// gh failure (network, auth, parse) so one repo can't break the refresh.
 ///
 /// PRs are capped at 100 (GraphQL's hard `first` limit on connection
 /// fields). Plenty of headroom for our usage; if some future repo opens
 /// over 100 simultaneous PRs, the counts saturate but the dashboard
-/// still functions. Issues use GraphQL `totalCount`, which is exact
+/// still functions. Issue totals use GraphQL `totalCount`, which is exact
 /// regardless of how many open issues a repo has — no client-side cap.
-pub fn fetch_pr_and_issue_counts(owner_repo: &str, my_login: &str) -> Option<(PrCounts, i64)> {
+pub fn fetch_pr_and_issue_counts(
+    owner_repo: &str,
+    my_login: &str,
+) -> Option<(PrCounts, IssueCounts)> {
     let (owner, name) = owner_repo.split_once('/')?;
-    let query = r#"
+    // `assigned_to_me` rides the same GraphQL call as the rest of the remote
+    // pass — `filterBy: { assignee: $login }` returns a separate connection
+    // with its own `totalCount`, so no client-side iteration. Empty `my_login`
+    // means we couldn't resolve the viewer; we skip the second connection in
+    // that case so the GraphQL call doesn't 422 on a null assignee filter.
+    let query = if my_login.is_empty() {
+        r#"
         query($owner: String!, $name: String!) {
           repository(owner: $owner, name: $name) {
             issues(states: OPEN) { totalCount }
@@ -580,20 +597,45 @@ pub fn fetch_pr_and_issue_counts(owner_repo: &str, my_login: &str) -> Option<(Pr
             }
           }
         }
-    "#;
-    let output = Command::new("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("owner={owner}"),
-            "-F",
-            &format!("name={name}"),
-        ])
-        .output()
-        .ok()?;
+    "#
+    } else {
+        r#"
+        query($owner: String!, $name: String!, $login: String!) {
+          repository(owner: $owner, name: $name) {
+            issues(states: OPEN) { totalCount }
+            assignedIssues: issues(states: OPEN, filterBy: { assignee: $login }) { totalCount }
+            pullRequests(first: 100, states: OPEN) {
+              nodes {
+                isDraft
+                author { login }
+                reviewRequests(first: 50) {
+                  nodes {
+                    requestedReviewer {
+                      ... on User { login }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+    "#
+    };
+    let mut args: Vec<String> = vec![
+        "api".into(),
+        "graphql".into(),
+        "-f".into(),
+        format!("query={query}"),
+        "-F".into(),
+        format!("owner={owner}"),
+        "-F".into(),
+        format!("name={name}"),
+    ];
+    if !my_login.is_empty() {
+        args.push("-F".into());
+        args.push(format!("login={my_login}"));
+    }
+    let output = Command::new("gh").args(&args).output().ok()?;
     if !output.status.success() {
         tracing::debug!(
             "gh api graphql failed for {owner_repo}: {}",
@@ -605,11 +647,18 @@ pub fn fetch_pr_and_issue_counts(owner_repo: &str, my_login: &str) -> Option<(Pr
     let body: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
     let repo = body.get("data")?.get("repository")?;
 
-    let issues = repo
-        .get("issues")
-        .and_then(|i| i.get("totalCount"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let issues = IssueCounts {
+        open: repo
+            .get("issues")
+            .and_then(|i| i.get("totalCount"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        assigned_to_me: repo
+            .get("assignedIssues")
+            .and_then(|i| i.get("totalCount"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+    };
 
     let prs = repo
         .get("pullRequests")
