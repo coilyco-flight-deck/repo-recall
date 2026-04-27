@@ -41,9 +41,17 @@ async fn main() -> anyhow::Result<()> {
     };
     let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
 
+    let port: u16 = std::env::var("REPO_RECALL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7777);
+
+    // Default DB path is per-port so two instances (e.g. launchd-managed on
+    // 7777 and a dev binary on 7778) don't share state and wipe each other's
+    // tables during their periodic refreshes. Override with REPO_RECALL_DB.
     let db_path = std::env::var("REPO_RECALL_DB")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("repo-recall.sqlite"));
+        .unwrap_or_else(|_| std::env::temp_dir().join(format!("repo-recall-{port}.sqlite")));
 
     tracing::info!("cwd: {}", cwd.display());
     tracing::info!("db:  {}", db_path.display());
@@ -97,10 +105,6 @@ async fn main() -> anyhow::Result<()> {
 
     let app: Router = routes::router(state.clone());
 
-    let port: u16 = std::env::var("REPO_RECALL_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7777);
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     // Bind before launching any scan work. run_refresh wipes the SQLite file
     // as its first step, so a doomed boot that loses the port race must not
