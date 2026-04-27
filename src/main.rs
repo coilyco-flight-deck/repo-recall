@@ -95,6 +95,19 @@ async fn main() -> anyhow::Result<()> {
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
+    let app: Router = routes::router(state.clone());
+
+    let port: u16 = std::env::var("REPO_RECALL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7777);
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    // Bind before launching any scan work. run_refresh wipes the SQLite file
+    // as its first step, so a doomed boot that loses the port race must not
+    // be allowed to touch the DB another instance is already serving from.
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("listening on http://{}", addr);
+
     // Kick off initial scan in the background so the dashboard has data
     // by the time the user finishes typing the URL.
     {
@@ -128,15 +141,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("periodic refresh disabled (REPO_RECALL_REFRESH_INTERVAL_SECS=0)");
     }
 
-    let app: Router = routes::router(state.clone());
-
-    let port: u16 = std::env::var("REPO_RECALL_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7777);
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("listening on http://{}", addr);
     axum::serve(listener, app).await?;
     Ok(())
 }
