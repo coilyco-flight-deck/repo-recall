@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::routes::api::{derive_action_signals, ActionRequiredItem};
 use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
-    absolute_time, compact_count, display_name, page, page_with_banners, relative_time, H2, LI,
-    LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW, SCAN_STATUS,
+    absolute_time, compact_count, display_name, page, page_with_banners, relative_time, ACTION_PILL,
+    H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW, SCAN_STATUS,
 };
 use crate::{activity, db, AppState};
 
@@ -237,27 +237,95 @@ pub async fn index(
         })
         .unwrap_or_else(|| "—".into());
 
+    // Group per-repo action signals by signal type so the expanded panel can
+    // list "every dirty repo" together, "every failing CI" together, etc.
+    // Order is deliberate: the noisier remote-state signals go first so the
+    // user resolves the things that block teammates before sweeping local
+    // dirt.
+    let action_groups: Vec<(&'static str, &'static str, Vec<(&db::Repo, String)>)> = {
+        use std::collections::BTreeMap;
+        let mut by_signal: BTreeMap<&'static str, Vec<(&db::Repo, String)>> = BTreeMap::new();
+        for r in &repos {
+            for sig in derive_action_signals(r) {
+                by_signal
+                    .entry(sig.signal)
+                    .or_default()
+                    .push((r, sig.detail));
+            }
+        }
+        let order: &[(&'static str, &'static str)] = &[
+            ("ci_failing", "failing CI"),
+            ("review_requested", "awaiting your review"),
+            ("in_progress_op", "mid-op"),
+            ("detached_head", "detached HEAD"),
+            ("dirty_tree", "dirty tree"),
+        ];
+        order
+            .iter()
+            .filter_map(|(k, label)| by_signal.remove(k).map(|v| (*k, *label, v)))
+            .collect()
+    };
+
     let body = html! {
         @if has_action {
-            section class="mb-4 px-3 py-2 rounded-md bg-[#574f7d] text-white text-xs
-                           flex items-baseline gap-x-3 gap-y-1 flex-wrap" {
-                span class="text-base leading-none" { "⚠" }
-                span class="font-bold uppercase tracking-[0.08em]" { "action required" }
-                @if ci_failing_count > 0 {
-                    span { (ci_failing_count) " failing CI" @if ci_failing_count != 1 { "s" } }
+            details class="mb-4 rounded-md bg-[#574f7d] text-white overflow-hidden shadow-sm" {
+                summary class="cursor-pointer select-none px-3 py-2 text-xs
+                               flex items-baseline gap-x-3 gap-y-1 flex-wrap
+                               hover:bg-[#3e375d] transition-colors" {
+                    span class="text-base leading-none" { "⚠" }
+                    span class="font-bold uppercase tracking-[0.08em]" { "action required" }
+                    @if ci_failing_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-ci_failing" {
+                            (ci_failing_count) " failing CI" @if ci_failing_count != 1 { "s" }
+                        }
+                    }
+                    @if dirty_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-dirty_tree" {
+                            (dirty_count) " dirty " @if dirty_count == 1 { "repo" } @else { "repos" }
+                        }
+                    }
+                    @if in_progress_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-in_progress_op" {
+                            (in_progress_count) " mid-op"
+                        }
+                    }
+                    @if detached_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-detached_head" {
+                            (detached_count) " detached HEAD" @if detached_count != 1 { "s" }
+                        }
+                    }
+                    @if review_requested_count > 0 {
+                        a class=(ACTION_PILL) data-action-pill href="#action-review_requested" {
+                            (review_requested_count) " awaiting your review"
+                        }
+                    }
                 }
-                @if dirty_count > 0 {
-                    span { (dirty_count) " dirty " @if dirty_count == 1 { "repo" } @else { "repos" } }
+                div class="px-3 pb-3 pt-1 text-xs flex flex-col gap-3
+                           border-t border-white/15" {
+                    @for (signal, label, items) in &action_groups {
+                        section id={ "action-" (signal) } class="scroll-mt-4" {
+                            div class="font-bold uppercase tracking-[0.08em] mb-1 text-white/80" {
+                                (label) " (" (items.len()) ")"
+                            }
+                            ul class="list-none p-0 m-0 flex flex-col gap-1" {
+                                @for (r, detail) in items {
+                                    li class="flex gap-2 items-baseline flex-wrap" {
+                                        a class="font-semibold underline decoration-white/40
+                                                 hover:decoration-white text-white"
+                                          href={ "/repos/" (r.id) } { (r.name) }
+                                        span class="text-white/80" { (detail) }
+                                        @if let Some(url) = &r.remote_url {
+                                            a class="text-white/70 hover:text-white"
+                                              target="_blank" rel="noopener" href=(url)
+                                              title="open remote" { "↗" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                @if in_progress_count > 0 {
-                    span { (in_progress_count) " mid-op" }
-                }
-                @if detached_count > 0 {
-                    span { (detached_count) " detached HEAD" @if detached_count != 1 { "s" } }
-                }
-                @if review_requested_count > 0 {
-                    span { (review_requested_count) " awaiting your review" }
-                }
+                script src="/static/action-required.js" defer {}
             }
         }
 
