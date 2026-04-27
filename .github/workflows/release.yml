@@ -101,10 +101,11 @@ jobs:
             "$REPO" main "chore: release ${TAG}" "$PARENT" \
             Cargo.toml Cargo.lock)
           echo "release commit: $NEW_OID"
-          # Tag objects do not require commit signing; pushing a
-          # lightweight tag at the API-signed commit is enough.
+          # Lightweight tag at the API-signed commit. Annotated tags
+          # need a committer identity (which we deliberately don't set,
+          # since the bump commit goes through the API and not git).
           git fetch origin main
-          git tag -a "${TAG}" -m "${TAG}" "$NEW_OID"
+          git tag "${TAG}" "$NEW_OID"
           git push origin "refs/tags/${TAG}"
 
       - name: Create GitHub Release
