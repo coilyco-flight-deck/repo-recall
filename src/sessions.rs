@@ -385,6 +385,129 @@ pub fn mentions_in_file(path: &Path, needles: &[(i64, String)]) -> Vec<i64> {
     hit_set.into_iter().collect()
 }
 
+/// Like `mentions_in_file`, but also returns a short text snippet around the
+/// first valid match per repo. Used by the session detail view to show *why*
+/// a fuzzy content-mention fired — the bare-word context, not just the repo
+/// name. Returns `repo_id -> (matched_text, snippet_with_match_marker)`. The
+/// matched text is sliced from the original (case-preserving) content; the
+/// snippet replaces the match span with `\u{1}MATCH\u{1}` sentinels so the
+/// renderer can highlight without re-searching.
+pub fn mention_snippets_in_file(
+    path: &Path,
+    needles: &[(i64, String)],
+) -> std::collections::HashMap<i64, MentionSnippet> {
+    let mut out: std::collections::HashMap<i64, MentionSnippet> =
+        std::collections::HashMap::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    let haystack = content.to_ascii_lowercase();
+    debug_assert_eq!(haystack.len(), content.len());
+
+    let mut pat_owners: Vec<i64> = Vec::with_capacity(needles.len());
+    let mut patterns: Vec<String> = Vec::with_capacity(needles.len());
+    for (id, name) in needles {
+        if name.len() < 3 {
+            continue;
+        }
+        patterns.push(name.to_ascii_lowercase());
+        pat_owners.push(*id);
+    }
+    if patterns.is_empty() {
+        return out;
+    }
+    let Ok(ac) = aho_corasick::AhoCorasick::new(&patterns) else {
+        return out;
+    };
+    let bytes = haystack.as_bytes();
+    for m in ac.find_iter(&haystack) {
+        let start = m.start();
+        let end = m.end();
+        let left_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let right_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if !(left_ok && right_ok) {
+            continue;
+        }
+        let id = pat_owners[m.pattern().as_usize()];
+        if out.contains_key(&id) {
+            continue;
+        }
+        out.insert(id, build_snippet(&content, start, end, 60));
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+pub struct MentionSnippet {
+    /// The matched text exactly as it appeared in the source (case preserved).
+    pub matched: String,
+    /// Whitespace-collapsed context surrounding the match. The match itself is
+    /// at byte offsets `[match_start, match_end)` within this string.
+    pub context: String,
+    pub match_start: usize,
+    pub match_end: usize,
+}
+
+fn build_snippet(s: &str, start: usize, end: usize, ctx: usize) -> MentionSnippet {
+    let lo = floor_char_boundary(s, start.saturating_sub(ctx));
+    let hi = ceil_char_boundary(s, end.saturating_add(ctx).min(s.len()));
+    let prefix_raw = &s[lo..start];
+    let match_raw = &s[start..end];
+    let suffix_raw = &s[end..hi];
+
+    let mut context = String::new();
+    if lo > 0 {
+        context.push('…');
+    }
+    let prefix = collapse_ws(prefix_raw);
+    context.push_str(&prefix);
+    let match_start = context.len();
+    context.push_str(match_raw);
+    let match_end = context.len();
+    context.push_str(&collapse_ws(suffix_raw));
+    if hi < s.len() {
+        context.push('…');
+    }
+    MentionSnippet {
+        matched: match_raw.to_string(),
+        context,
+        match_start,
+        match_end,
+    }
+}
+
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_ws = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(ch);
+            prev_ws = false;
+        }
+    }
+    out
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    let n = s.len();
+    while i < n && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 fn walk_content(v: &serde_json::Value, turn: &mut Turn) {
     match v {
         serde_json::Value::String(s) if !s.trim().is_empty() => {

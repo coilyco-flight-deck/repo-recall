@@ -32,6 +32,10 @@ struct RepoRef {
     id: i64,
     name: String,
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_text: Option<String>,
 }
 
 /// Rough cost estimate for a session's token usage in USD. Prices are the
@@ -169,12 +173,30 @@ pub async fn detail(
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        Ok::<_, anyhow::Error>((sr, turns, partitioned))
+        // Re-scan the source file for snippets around each content-mention
+        // match. Cheap (one pass with the same Aho-Corasick automaton the
+        // ingest used) and avoids storing snippets in the DB, where they'd
+        // go stale on transcript rewrite.
+        let content_snippets = match sr.as_ref() {
+            Some(s) if !partitioned.1.is_empty() => {
+                let needles: Vec<(i64, String)> = partitioned
+                    .1
+                    .iter()
+                    .map(|(rid, name, _)| (*rid, name.clone()))
+                    .collect();
+                sess::mention_snippets_in_file(
+                    std::path::Path::new(&s.session.source_file),
+                    &needles,
+                )
+            }
+            _ => std::collections::HashMap::new(),
+        };
+        Ok::<_, anyhow::Error>((sr, turns, partitioned, content_snippets))
     })
     .await
     .unwrap();
 
-    let (session, turns, (cwd_matches, content_matches)) = match data {
+    let (session, turns, (cwd_matches, content_matches), content_snippets) = match data {
         Ok(p) => p,
         Err(e) => {
             return (
@@ -210,14 +232,21 @@ pub async fn detail(
                     id: *id,
                     name: name.clone(),
                     path: path.clone(),
+                    snippet: None,
+                    matched_text: None,
                 })
                 .collect(),
             content_matches: content_matches
                 .iter()
-                .map(|(id, name, path)| RepoRef {
-                    id: *id,
-                    name: name.clone(),
-                    path: path.clone(),
+                .map(|(id, name, path)| {
+                    let s = content_snippets.get(id);
+                    RepoRef {
+                        id: *id,
+                        name: name.clone(),
+                        path: path.clone(),
+                        snippet: s.map(|m| m.context.clone()),
+                        matched_text: s.map(|m| m.matched.clone()),
+                    }
                 })
                 .collect(),
             estimated_cost_usd: est,
@@ -314,6 +343,15 @@ pub async fn detail(
                                   href={ "/repos/" (rid) } { (name) }
                             }
                             div class=(PATH) { (path) }
+                            @if let Some(snip) = content_snippets.get(rid) {
+                                div class="text-[11px] font-mono text-[#574f7d]/80 mt-1 break-words" {
+                                    (snip.context[..snip.match_start])
+                                    mark class="bg-[#fde68a] text-[#574f7d] rounded px-0.5" {
+                                        (snip.context[snip.match_start..snip.match_end])
+                                    }
+                                    (snip.context[snip.match_end..])
+                                }
+                            }
                         }
                     }
                 }
