@@ -300,26 +300,17 @@ pub async fn index(
                         }
                     }
                 }
-                div class="px-3 pb-3 pt-1 text-xs flex flex-col gap-3
+                div class="px-3 pb-3 pt-1 text-sm leading-relaxed flex flex-col gap-3
                            border-t border-white/15" {
                     @for (signal, label, items) in &action_groups {
                         section id={ "action-" (signal) } class="scroll-mt-4" {
-                            div class="font-bold uppercase tracking-[0.08em] mb-1 text-white/80" {
+                            div class="font-bold uppercase tracking-[0.08em] mb-1
+                                       text-[11px] text-white/80" {
                                 (label) " (" (items.len()) ")"
                             }
-                            ul class="list-none p-0 m-0 flex flex-col gap-1" {
+                            ul class="list-none p-0 m-0 flex flex-col gap-1.5" {
                                 @for (r, detail) in items {
-                                    li class="flex gap-2 items-baseline flex-wrap" {
-                                        a class="font-semibold underline decoration-white/40
-                                                 hover:decoration-white text-white"
-                                          href={ "/repos/" (r.id) } { (r.name) }
-                                        span class="text-white/80" { (detail) }
-                                        @if let Some(url) = &r.remote_url {
-                                            a class="text-white/70 hover:text-white"
-                                              target="_blank" rel="noopener" href=(url)
-                                              title="open remote" { "↗" }
-                                        }
-                                    }
+                                    li { (action_sentence(signal, r, detail)) }
                                 }
                             }
                         }
@@ -660,6 +651,64 @@ fn format_secs(s: u64) -> String {
         format!("{m}m")
     } else {
         format!("{m}m {r}s")
+    }
+}
+
+/// Prose form of one action-required item. The format is "what's wrong"
+/// followed by "what to do about it" and a couple of pointer links - the
+/// repo's dashboard page (always) plus a context-appropriate remote deep
+/// link (Actions tab for CI, PR review queue for review-requested, etc.).
+/// Kept verbose-on-purpose: the collapsed pill row is the at-a-glance view,
+/// this is the "I expanded it because I want to actually act on something"
+/// view.
+fn action_sentence(signal: &str, r: &db::Repo, detail: &str) -> Markup {
+    let repo_link = html! {
+        a class="font-semibold underline decoration-white/40 hover:decoration-white text-white"
+          href={ "/repos/" (r.id) } { (r.name) }
+    };
+    let remote_link = |suffix: &str, label: &str| -> Markup {
+        match &r.remote_url {
+            Some(url) => html! {
+                " "
+                a class="text-white/80 underline decoration-white/30 hover:decoration-white
+                         hover:text-white"
+                  target="_blank" rel="noopener" href={ (url) (suffix) } { (label) " ↗" }
+            },
+            None => html! {},
+        }
+    };
+    match signal {
+        "ci_failing" => html! {
+            "CI is failing on the default branch of " (repo_link) ". "
+            "Open the failing run, fix the breakage, and push a green commit before merging anything else."
+            (remote_link("/actions", "actions"))
+        },
+        "review_requested" => html! {
+            (detail) " in " (repo_link) ". "
+            "Read each PR and approve, request changes, or comment so the author isn't blocked on you."
+            (remote_link("/pulls/review-requested/@me", "review queue"))
+        },
+        "in_progress_op" => html! {
+            (repo_link) " has " (detail) ". "
+            "Finish it (`git "
+            (r.in_progress_op.as_deref().unwrap_or("op"))
+            " --continue`) or abort it (`git "
+            (r.in_progress_op.as_deref().unwrap_or("op"))
+            " --abort`) before starting any new git work in this repo."
+        },
+        "detached_head" => html! {
+            (repo_link) " is on a detached HEAD. "
+            "Pick a branch (`git switch <branch>`) or create one (`git switch -c <name>`) "
+            "before committing, otherwise any new commits will be unreachable."
+        },
+        "dirty_tree" => html! {
+            (repo_link) " has " (detail) ". "
+            "Review the diff, then commit, stash, or discard before the next refresh or deploy. "
+            "Path: " code class="font-mono text-[11px] text-white/80 bg-white/10 px-1 rounded" {
+                (r.path)
+            }
+        },
+        _ => html! { (repo_link) " - " (detail) },
     }
 }
 
