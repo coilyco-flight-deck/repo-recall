@@ -396,8 +396,7 @@ pub fn mention_snippets_in_file(
     path: &Path,
     needles: &[(i64, String)],
 ) -> std::collections::HashMap<i64, MentionSnippet> {
-    let mut out: std::collections::HashMap<i64, MentionSnippet> =
-        std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<i64, MentionSnippet> = std::collections::HashMap::new();
     let Ok(content) = std::fs::read_to_string(path) else {
         return out;
     };
