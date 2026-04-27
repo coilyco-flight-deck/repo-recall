@@ -15,11 +15,11 @@ class RepoRecall < Formula
   service do
     run [opt_bin/"repo-recall"]
     keep_alive true
-    working_dir Dir.home
+    working_dir "#{Dir.home}/projects/coilysiren"
     log_path var/"log/repo-recall.log"
     error_log_path var/"log/repo-recall.err.log"
     environment_variables(
-      REPO_RECALL_CWD: Dir.home,
+      REPO_RECALL_CWD: "#{Dir.home}/projects/coilysiren",
       REPO_RECALL_PORT: "7777",
       REPO_RECALL_DEPTH: "4",
       PATH: "#{HOMEBREW_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
