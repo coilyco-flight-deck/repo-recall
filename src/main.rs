@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -45,6 +45,15 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(7777);
+
+    // Default is loopback. Override only when fronted by something that gates
+    // access at a different layer (e.g. `tailscale serve` on a tailnet-only
+    // host). Setting this to a non-loopback address on a shared or public-facing
+    // box would expose session metadata.
+    let host: IpAddr = std::env::var("REPO_RECALL_HOST")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
 
     // Default DB path is per-port so two instances (e.g. launchd-managed on
     // 7777 and a dev binary on 7778) don't share state and wipe each other's
@@ -105,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app: Router = routes::router(state.clone());
 
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let addr: SocketAddr = SocketAddr::new(host, port);
     // Bind before launching any scan work. run_refresh wipes the SQLite file
     // as its first step, so a doomed boot that loses the port race must not
     // be allowed to touch the DB another instance is already serving from.
@@ -155,12 +164,12 @@ fn print_help() {
 Local dev dashboard that indexes Claude Code session history against your repos.
 
 Usage:
-  repo-recall              start the server (binds 127.0.0.1:$REPO_RECALL_PORT)
+  repo-recall              start the server (binds $REPO_RECALL_HOST:$REPO_RECALL_PORT, default 127.0.0.1:7777)
   repo-recall --version    print version and exit
   repo-recall --help       print this help and exit
 
 Config is via env vars (or a .env file in cwd). See the README for the full list.
-Common ones: REPO_RECALL_PORT, REPO_RECALL_CWD, REPO_RECALL_DEPTH.
+Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD, REPO_RECALL_DEPTH.
 ",
         ver = env!("CARGO_PKG_VERSION"),
     );

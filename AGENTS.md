@@ -64,7 +64,8 @@ Environment variables:
 
 | Var                 | Default                                    | Purpose                                                                      |
 |---------------------|--------------------------------------------|------------------------------------------------------------------------------|
-| `REPO_RECALL_PORT`  | `7777`                                     | HTTP port (always bound to `127.0.0.1`)                                      |
+| `REPO_RECALL_PORT`  | `7777`                                     | HTTP port.                                                                   |
+| `REPO_RECALL_HOST`  | `127.0.0.1`                                | Bind address. Default is loopback. Override only when something else gates access (e.g. `tailscale serve` on a tailnet-only host). Never set to `0.0.0.0` on a shared or public-facing box. |
 | `REPO_RECALL_CWD`   | process cwd                                | Directory to scan for repos. Useful under `cargo watch`, where the process cwd is the Cargo project root, not the directory you actually want indexed. |
 | `REPO_RECALL_DEPTH` | `4`                                        | How many directory levels below cwd to walk before giving up. Raise cautiously — a wide tree can blow up both scan time and the repo count. |
 | `REPO_RECALL_COMMITS_PER_REPO` | `500`                           | How many commits to pull per repo via `git log --all --no-merges`. Higher = longer history at the cost of scan time and DB size. |
@@ -98,7 +99,7 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 Claude Code session files can contain code, pasted credentials, and internal discussion. This project:
 
 - Stores **only metadata and a truncated 200-char summary** — not full transcripts.
-- Binds the web server to **loopback only** (`127.0.0.1`). Never `0.0.0.0`, never a socket on a shared box.
+- Binds the web server to **loopback by default** (`127.0.0.1`). The `REPO_RECALL_HOST` env var can override this to bind a non-loopback address - only do this when access is gated at a different layer (e.g. `tailscale serve` on a tailnet-only host). Never bind a non-loopback address on a shared or public-facing box.
 - Writes the SQLite cache to `$TMPDIR` by default, which most OSes wipe on reboot.
 - **Outbound network calls only for the `RemoteState` category.** `gh run list` (for CI status) is the only outbound call today. It reuses the user's existing `gh` auth — we never store tokens. If `gh` isn't installed or authenticated, the remote-state column stays blank; nothing else breaks. Add new remote calls only when a new `RemoteState` attribute genuinely needs them, and keep them best-effort.
 
