@@ -442,6 +442,32 @@ pub async fn index(
                         (render_uncloned(&uncloned))
                     }
                 }
+                @let needs_push: Vec<&db::Repo> = repos.iter()
+                    .filter(|r| r.commits_ahead > 0).collect();
+                @if !needs_push.is_empty() {
+                    section class=(PANEL) {
+                        h2 class=(H2) {
+                            "needs push"
+                            span class="text-[#574f7d]/70 normal-case tracking-normal font-normal" {
+                                " (" (needs_push.len()) ")"
+                            }
+                        }
+                        (render_needs_action(&needs_push, "push"))
+                    }
+                }
+                @let needs_pull: Vec<&db::Repo> = repos.iter()
+                    .filter(|r| r.commits_behind > 0).collect();
+                @if !needs_pull.is_empty() {
+                    section class=(PANEL) {
+                        h2 class=(H2) {
+                            "needs pull"
+                            span class="text-[#574f7d]/70 normal-case tracking-normal font-normal" {
+                                " (" (needs_pull.len()) ")"
+                            }
+                        }
+                        (render_needs_action(&needs_pull, "pull"))
+                    }
+                }
             }
             div class="flex flex-col gap-4 min-w-0" {
                 section class=(uncommitted_panel) {
@@ -999,6 +1025,51 @@ fn render_uncloned(repos: &[db::ActiveRemoteRepo]) -> Markup {
                     }
                     @if let Some(d) = &r.description {
                         p class={ (META) " mt-0.5" } { (d) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// "needs push" / "needs pull" panel rows. One row per repo with an inline
+/// button that posts to `/api/repos/{id}/{action}`. Mirrors the clone panel:
+/// the button's container has a stable id so the htmx swap can replace just
+/// that cell with the result fragment from `actions.rs`.
+fn render_needs_action(repos: &[&db::Repo], action: &str) -> Markup {
+    let arrow = if action == "push" { "↑" } else { "↓" };
+    html! {
+        ul class="list-none p-0 m-0" {
+            @for r in repos {
+                @let count = if action == "push" { r.commits_ahead } else { r.commits_behind };
+                @let target_id = format!("repo-action-{action}-{}", r.id);
+                li class=(LI) {
+                    div class=(ROW) {
+                        div id=(target_id) class="flex items-baseline gap-2 shrink-0" {
+                            form hx-post={ "/api/repos/" (r.id) "/" (action) }
+                                 hx-target={ "#" (target_id) }
+                                 hx-swap="outerHTML"
+                                 class="contents" {
+                                button type="submit"
+                                    class="bg-[#574f7d] text-white px-2 py-0.5 rounded text-[10px]
+                                           font-bold tracking-wide hover:bg-[#3e375d]
+                                           transition-colors cursor-pointer shadow-sm" {
+                                    (action) " " (arrow)
+                                }
+                            }
+                        }
+                        a class={ (LINK) " font-semibold" } href={ "/repos/" (r.id) } {
+                            (r.name)
+                        }
+                        span class=(PILL) {
+                            (arrow) " " (count)
+                            @if action == "push" { " unpushed" } @else { " behind" }
+                        }
+                        @if let Some(branch) = &r.head_ref {
+                            @if branch != "detached" {
+                                span class={ (META) " font-mono" } { (branch) }
+                            }
+                        }
                     }
                 }
             }
