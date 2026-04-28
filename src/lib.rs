@@ -51,4 +51,9 @@ pub struct AppState {
     /// cache DB: VAPID keypair, push subscriptions, deduplication set of
     /// already-notified action-required signal ids.
     pub state_db: state::StateDb,
+    /// Public-demo mode (`REPO_RECALL_DEMO=true`). When true, host-mutating
+    /// endpoints (push, pull, clone, push-notification subscribe/unsubscribe)
+    /// return 403, and the page layout renders a "DEMO INSTANCE" banner.
+    /// Re-scans, dashboards, and read endpoints stay live.
+    pub demo_mode: bool,
 }

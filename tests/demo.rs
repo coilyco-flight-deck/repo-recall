@@ -243,6 +243,7 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
         my_git_email: Arc::new(TokioMutex::new(None)),
         scan_version: Arc::new(AtomicU64::new(0)),
         state_db,
+        demo_mode: false,
     };
 
     // Drive session parsing at our rendered fixtures, not ~/.claude/projects.
@@ -309,6 +310,170 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
     );
 
     let _ = std::fs::remove_dir_all(&workdir);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&state_dir);
+}
+
+// ----- demo flag: banner + write-disable ------------------------------- //
+
+fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
+    let db_path = unique_tmp("repo-recall-demo-flag-cache").with_extension("sqlite");
+    let _ = std::fs::remove_file(&db_path);
+    db::init(&db_path).unwrap();
+    let state_dir = unique_tmp("repo-recall-demo-flag-state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = StateDb::open_at(state_dir.join("state.sqlite")).unwrap();
+
+    let (progress_tx, _) = broadcast::channel::<String>(16);
+    let state = AppState {
+        db_path: db_path.clone(),
+        cwd: std::env::temp_dir(),
+        scan_depth: 0,
+        commits_per_repo: 50,
+        refresh_interval_secs: 0,
+        remote_target_limit: 0,
+        progress_tx,
+        refresh_lock: Arc::new(TokioMutex::new(())),
+        last_scan: Arc::new(TokioMutex::new(None)),
+        gh_health: Arc::new(TokioMutex::new(repo_recall::commits::GhHealth::Missing)),
+        my_gh_login: Arc::new(TokioMutex::new(None)),
+        my_git_email: Arc::new(TokioMutex::new(None)),
+        scan_version: Arc::new(AtomicU64::new(0)),
+        state_db,
+        demo_mode,
+    };
+    (state, db_path, state_dir)
+}
+
+async fn serve(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+    let app = routes::router(state);
+    let addr: SocketAddr = ([127, 0, 0, 1], 0).into();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    let h = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{bound}"), h)
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn demo_mode_banner_shows_in_layout() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("REPO_RECALL_DEMO", "true");
+
+    let (state, db_path, state_dir) = boot_minimal(true);
+    let (base, h) = serve(state).await;
+
+    let body = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    std::env::remove_var("REPO_RECALL_DEMO");
+    h.abort();
+
+    assert!(
+        body.contains("DEMO INSTANCE"),
+        "demo banner missing from layout"
+    );
+    assert!(
+        body.contains("github.com/coilysiren/repo-recall"),
+        "demo banner should link back to the source"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&state_dir);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn demo_mode_blocks_mutating_endpoints() {
+    let _g = ENV_LOCK.lock().unwrap();
+    // No env var needed for the gating itself - the handlers branch on
+    // state.demo_mode. The env var only drives the banner.
+
+    let (state, db_path, state_dir) = boot_minimal(true);
+    let (base, h) = serve(state).await;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    // git push and git pull
+    for action in ["push", "pull"] {
+        let res = client
+            .post(format!("{base}/api/repos/1/{action}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            403,
+            "{action} should 403 in demo mode, got {}",
+            res.status()
+        );
+    }
+
+    // gh repo clone
+    let res = client
+        .post(format!("{base}/api/clone"))
+        .form(&[("full_name", "owner/repo")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403, "clone should 403 in demo mode");
+
+    // push-notification subscribe
+    let res = client
+        .post(format!("{base}/api/push/subscribe"))
+        .json(&serde_json::json!({
+            "endpoint": "https://example.invalid/p",
+            "keys": {"p256dh": "x", "auth": "y"}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403, "push subscribe should 403 in demo mode");
+
+    // refresh stays open: re-scanning fixtures is harmless.
+    let res = client.post(format!("{base}/refresh")).send().await.unwrap();
+    assert_eq!(
+        res.status(),
+        202,
+        "refresh should still work in demo mode (it just re-reads fixtures)"
+    );
+
+    h.abort();
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&state_dir);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn non_demo_mode_has_no_banner() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("REPO_RECALL_DEMO");
+
+    let (state, db_path, state_dir) = boot_minimal(false);
+    let (base, h) = serve(state).await;
+
+    let body = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    h.abort();
+
+    assert!(
+        !body.contains("DEMO INSTANCE"),
+        "non-demo layout should not show the demo banner"
+    );
+
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_dir_all(&state_dir);
 }

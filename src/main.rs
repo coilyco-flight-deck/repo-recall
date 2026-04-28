@@ -105,6 +105,16 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(25);
 
+    // Public demo: turns the layout banner on and 403s host-mutating endpoints.
+    // Off by default; only set to `true` for the public Docker image.
+    let demo_mode = matches!(
+        std::env::var("REPO_RECALL_DEMO").as_deref(),
+        Ok("true") | Ok("TRUE") | Ok("True")
+    );
+    if demo_mode {
+        tracing::info!("REPO_RECALL_DEMO=true: banner on, mutating endpoints disabled");
+    }
+
     let state = AppState {
         db_path,
         cwd,
@@ -120,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         state_db,
+        demo_mode,
     };
 
     let app: Router = routes::router(state.clone());

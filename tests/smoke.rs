@@ -46,6 +46,7 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         state_db,
+        demo_mode: false,
     };
 
     let app = routes::router(state);

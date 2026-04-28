@@ -69,6 +69,9 @@ pub async fn subscribe(
     headers: HeaderMap,
     Json(body): Json<SubscribeBody>,
 ) -> Response {
+    if state.demo_mode {
+        return (StatusCode::FORBIDDEN, "disabled in demo mode\n").into_response();
+    }
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -97,6 +100,9 @@ pub async fn unsubscribe(
     State(state): State<AppState>,
     Json(body): Json<UnsubscribeBody>,
 ) -> Response {
+    if state.demo_mode {
+        return (StatusCode::FORBIDDEN, "disabled in demo mode\n").into_response();
+    }
     match state.state_db.remove_subscription(&body.endpoint) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => {

@@ -93,22 +93,24 @@ pub async fn detail(
         h1 class="text-lg font-semibold mb-1" { (repo.name) }
         p class=(PATH) { (repo.path) }
         section class="mt-3 flex items-center gap-2 flex-wrap" {
-            form hx-post={ "/api/repos/" (repo.id) "/pull" }
-                 hx-target={ "#repo-action-pull-" (repo.id) }
-                 hx-swap="outerHTML" {
-                button type="submit"
-                    class="bg-[#574f7d] text-white px-3 py-1.5 rounded-md text-xs font-bold tracking-wide
-                           hover:bg-[#3e375d] transition-colors cursor-pointer shadow-sm" {
-                    "↓ git pull"
+            @if !crate::routes::templates::is_demo_mode() {
+                form hx-post={ "/api/repos/" (repo.id) "/pull" }
+                     hx-target={ "#repo-action-pull-" (repo.id) }
+                     hx-swap="outerHTML" {
+                    button type="submit"
+                        class="bg-[#574f7d] text-white px-3 py-1.5 rounded-md text-xs font-bold tracking-wide
+                               hover:bg-[#3e375d] transition-colors cursor-pointer shadow-sm" {
+                        "↓ git pull"
+                    }
                 }
-            }
-            form hx-post={ "/api/repos/" (repo.id) "/push" }
-                 hx-target={ "#repo-action-push-" (repo.id) }
-                 hx-swap="outerHTML" {
-                button type="submit"
-                    class="bg-[#574f7d] text-white px-3 py-1.5 rounded-md text-xs font-bold tracking-wide
-                           hover:bg-[#3e375d] transition-colors cursor-pointer shadow-sm" {
-                    "↑ git push"
+                form hx-post={ "/api/repos/" (repo.id) "/push" }
+                     hx-target={ "#repo-action-push-" (repo.id) }
+                     hx-swap="outerHTML" {
+                    button type="submit"
+                        class="bg-[#574f7d] text-white px-3 py-1.5 rounded-md text-xs font-bold tracking-wide
+                               hover:bg-[#3e375d] transition-colors cursor-pointer shadow-sm" {
+                        "↑ git push"
+                    }
                 }
             }
             div id={ "repo-action-pull-" (repo.id) } {}
