@@ -966,9 +966,27 @@ fn render_uncloned(repos: &[db::ActiveRemoteRepo]) -> Markup {
             @for r in repos {
                 li class=(LI) {
                     div class=(ROW) {
+                        div id={ "clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                            class="flex items-baseline gap-2 shrink-0" {
+                            form hx-post="/api/clone"
+                                 hx-target={ "#clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                                 hx-swap="outerHTML"
+                                 class="contents" {
+                                input type="hidden" name="full_name" value=(r.full_name);
+                                button type="submit"
+                                    class="bg-[#574f7d] text-white px-2 py-0.5 rounded text-[10px]
+                                           font-bold tracking-wide hover:bg-[#3e375d]
+                                           transition-colors cursor-pointer shadow-sm" {
+                                    "clone ↓"
+                                }
+                            }
+                        }
                         a class={ (LINK) " font-semibold" }
                           href=(r.https_url) target="_blank" rel="noopener" {
                             (r.full_name)
+                        }
+                        @if let Some(branch) = &r.default_branch {
+                            span class={ (META) " font-mono" } { (branch) }
                         }
                         @if r.is_fork {
                             span class=(PILL) { "fork" }
@@ -981,24 +999,6 @@ fn render_uncloned(repos: &[db::ActiveRemoteRepo]) -> Markup {
                     }
                     @if let Some(d) = &r.description {
                         p class={ (META) " mt-0.5" } { (d) }
-                    }
-                    div id={ "clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
-                        class="mt-1.5" {
-                        form hx-post="/api/clone"
-                             hx-target={ "#clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
-                             hx-swap="outerHTML"
-                             class="flex items-baseline gap-2" {
-                            input type="hidden" name="full_name" value=(r.full_name);
-                            button type="submit"
-                                class="bg-[#574f7d] text-white px-2.5 py-1 rounded-md text-[11px]
-                                       font-bold tracking-wide hover:bg-[#3e375d]
-                                       transition-colors cursor-pointer shadow-sm" {
-                                "clone ↓"
-                            }
-                            @if let Some(branch) = &r.default_branch {
-                                span class={ (META) " font-mono" } { (branch) }
-                            }
-                        }
                     }
                 }
             }
