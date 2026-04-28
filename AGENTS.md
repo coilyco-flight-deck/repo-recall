@@ -140,3 +140,14 @@ For repo-recall as a tool, a future `LocalState` (or `RemoteState`) attribute ca
 - [Claude Code session file format](https://docs.claude.com/en/docs/claude-code/settings) — sessions live in `~/.claude/projects/<encoded-project-dir>/*.jsonl`. Each line is an independent JSON record. Record shapes vary: `queue-operation` lines, `user`/`assistant` message lines, etc. `sessions.rs` ignores unknown shapes rather than failing.
 - [htmx WebSocket extension](https://htmx.org/extensions/ws/) — how the server's OOB HTML fragments make it into the DOM without any client JS of our own.
 - [axum 0.8 migration notes](https://github.com/tokio-rs/axum/blob/main/axum/CHANGELOG.md) — path params use `{id}` syntax, not `:id`. This is the most common thing that breaks when copying axum snippets from the internet.
+
+---
+
+## Post-push follow-up (auto-schedule)
+
+Per the workspace "Default to proactive scheduling" rule: after pushing to `main`, schedule a wake-up to upgrade the local install. Same shape as coily — release.yml tags, cuts a GitHub Release, and pushes the formula to `coilysiren/homebrew-tap` within ~1-3 min.
+
+- **Cadence**: 300-360s after push.
+- **Verify CI**: `coily gh run list --repo coilysiren/repo-recall --limit 1` should show `completed/success`. Re-schedule once at +180s if in progress; stop on failure.
+- **Upgrade**: `brew outdated coilysiren/tap/repo-recall` - if upgradeable, `brew upgrade coilysiren/tap/repo-recall`. No sudo.
+- **Skip** for docs-only pushes.
