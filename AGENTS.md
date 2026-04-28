@@ -7,7 +7,7 @@
 - *What Claude Code sessions have I had about this repo?*
 - *What repos has this session touched?*
 
-Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. The only outbound call is `gh run list` for CI status, best-effort.
+Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort) and, when push notifications are enabled, signed Web Push deliveries to `fcm.googleapis.com`.
 
 - **Language**: Rust (edition 2021, stable toolchain)
 - **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [rusqlite](https://docs.rs/rusqlite) (bundled SQLite), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN)
@@ -104,7 +104,7 @@ Claude Code session files can contain code, pasted credentials, and internal dis
 - Stores **only metadata and a truncated 200-char summary** — not full transcripts.
 - Binds the web server to **loopback by default** (`127.0.0.1`). The `REPO_RECALL_HOST` env var can override this to bind a non-loopback address - only do this when access is gated at a different layer (e.g. `tailscale serve` on a tailnet-only host). Never bind a non-loopback address on a shared or public-facing box.
 - Writes the SQLite cache to `$TMPDIR` by default, which most OSes wipe on reboot.
-- **Outbound network calls only for the `RemoteState` category.** `gh run list` (for CI status) is the only outbound call today. It reuses the user's existing `gh` auth — we never store tokens. If `gh` isn't installed or authenticated, the remote-state column stays blank; nothing else breaks. Add new remote calls only when a new `RemoteState` attribute genuinely needs them, and keep them best-effort.
+- **Outbound network calls** are limited to `RemoteState` refresh (`gh run list` for CI status, reusing the user's existing `gh` auth) and Web Push delivery to `fcm.googleapis.com` when the user has opted in to PWA notifications. `gh` not installed or not authenticated leaves the remote-state column blank; nothing else breaks. Add new remote calls only when a new `RemoteState` attribute genuinely needs them, and keep them best-effort.
 
 The 200-char summary can still leak sensitive content. Redaction is future work.
 

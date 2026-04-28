@@ -7,7 +7,7 @@ You've got dozens of repos on disk, hundreds of [Claude Code](https://claude.com
 - **Which sessions touched this repo?** — open the repo, see every session that had it as `cwd`.
 - **Which repos did this session touch?** — open the session, see every repo it crossed.
 
-Everything is local. The server binds `127.0.0.1` only, the cache lives in `$TMPDIR`, and the only outbound call is `gh run list` for CI status.
+Everything is local. The server binds `127.0.0.1` only, and the cache lives in `$TMPDIR`. Outbound calls are limited to `gh run list` for CI status and (if you opt into push notifications) signed Web Push deliveries to FCM.
 
 ![Dashboard — repos, sessions, commits, CI status, uncommitted work](docs/dashboard.png)
 
@@ -140,7 +140,7 @@ Each source gets its own SQLite table. No unified "events" table — cross-sourc
 - Stores **metadata + a truncated 200-char summary only** — not full transcripts on disk. The transcript page re-reads the JSONL at request time.
 - Loopback only. Never listens on `0.0.0.0`, never on a shared-box socket.
 - Tailwind ships as a same-origin compiled CSS file; htmx still loads from a CDN in the browser, not from the server process.
-- One outbound call: `gh run list` for CI status. Reuses your existing `gh` auth — no tokens stored, no tokens read from env. No `gh`? The CI column stays blank.
+- Outbound calls: `gh run list` for CI status (reuses your existing `gh` auth, no tokens stored, no tokens read from env; no `gh` and the CI column stays blank), and Web Push deliveries to `fcm.googleapis.com` if you opt into PWA notifications. Push is off until you grant permission and subscribe; the VAPID keypair lives in `~/.local/share/repo-recall/state.sqlite`.
 
 The 200-char summary can still contain pasted credentials or sensitive text. Treat the SQLite cache as sensitive (it defaults to `$TMPDIR/repo-recall.sqlite`, which most OSes wipe on reboot).
 
