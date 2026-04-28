@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::params;
 
 use crate::AppState;
-use crate::{commits, db, join, scanner, sessions};
+use crate::{commits, db, join, push, scanner, sessions};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -198,18 +198,29 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     // best-effort, so overcounting is OK and users see a "fuzzy" admission.
     let content_matches = ingest_content_mentions(state.clone()).await;
 
+    // Fourth pass: push-notify newly-appeared action-required signals.
+    // Best-effort. Failures (no subscriptions, no openssl, FCM hiccup,
+    // network down) are logged and swallowed. The diff_and_record_signals
+    // call in dispatch_pending_pushes is the source of truth for "new since
+    // last scan" so a server restart does not re-fire every broken repo.
+    let push_outcome = dispatch_pending_pushes(state.clone()).await;
+
     *state.last_scan.lock().await = Some(Utc::now());
     state
         .scan_version
         .fetch_add(1, std::sync::atomic::Ordering::Release);
     let msg = format!(
-        "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches ({} skipped)",
+        "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches, {} push (sent {}, gone {}, fail {}) ({} skipped)",
         stats.repos,
         stats.sessions,
         stats.links,
         stats.commits,
         ci_updated,
         content_matches,
+        push_outcome.new_signals,
+        push_outcome.pushes_sent,
+        push_outcome.gone_subscriptions,
+        push_outcome.pushes_failed,
         stats.skipped,
     );
     let _ = state.progress_tx.send(status_fragment(&msg));
@@ -486,6 +497,58 @@ async fn ingest_ci_status(state: AppState) -> usize {
     .and_then(|r| r.ok())
     .unwrap_or(0);
     updated
+}
+
+/// Reconcile the persistent seen-signals set with this scan's
+/// action-required ids and fire one push per stored subscription for
+/// each genuinely-new id. Always returns an outcome (never errors out
+/// of the refresh) — push is best-effort.
+async fn dispatch_pending_pushes(state: AppState) -> push::DispatchOutcome {
+    // Pull the repo list off one blocking DB read; building the
+    // ActionRequiredItem-equivalent in-thread keeps SQLite I/O off the
+    // async runtime.
+    let repos = {
+        let db_path = state.db_path.clone();
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::Repo>> {
+            let conn = db::open(&db_path)?;
+            db::list_repos_with_counts(&conn)
+        })
+        .await
+        {
+            Ok(Ok(rs)) => rs,
+            _ => return push::DispatchOutcome::default(),
+        }
+    };
+
+    // Flatten (repo, signal, detail) into a parallel pair of (id, payload).
+    // Keep them aligned so diff_and_record_signals can return ids and we
+    // can look the matching payload back up by index.
+    let mut all_ids: Vec<String> = Vec::new();
+    let mut all_payloads: Vec<push::PushPayload> = Vec::new();
+    for r in &repos {
+        for sig in crate::routes::api::derive_action_signals(r) {
+            let payload = push::payload_for(r.id, &r.name, sig.signal, &sig.detail);
+            all_ids.push(payload.signal_id.clone());
+            all_payloads.push(payload);
+        }
+    }
+
+    let new_ids = match state.state_db.diff_and_record_signals(&all_ids) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("diff_and_record_signals failed: {e:?}");
+            return push::DispatchOutcome::default();
+        }
+    };
+
+    // Map the returned new ids back to their payloads, preserving order.
+    let new_set: std::collections::HashSet<&String> = new_ids.iter().collect();
+    let new_payloads: Vec<push::PushPayload> = all_payloads
+        .into_iter()
+        .filter(|p| new_set.contains(&p.signal_id))
+        .collect();
+
+    push::dispatch_for_signals(&state.state_db, new_payloads).await
 }
 
 struct RemoteSnapshot {

@@ -6,7 +6,7 @@ use axum::Router;
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{commits, db, routes, AppState};
+use repo_recall::{commits, db, routes, state::StateDb, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -68,6 +68,15 @@ async fn main() -> anyhow::Result<()> {
     // Initialize schema (wiping any prior data).
     db::init(&db_path)?;
 
+    // Persistent state DB: lives separately from the wipe-on-restart cache DB
+    // so the VAPID keypair and push subscriptions survive every reboot.
+    // Eagerly init the VAPID keypair so any "openssl not on PATH" failure
+    // surfaces at boot rather than on first /api/push/subscribe.
+    let state_db = StateDb::open_default()?;
+    if let Err(e) = state_db.get_or_init_vapid() {
+        tracing::warn!("VAPID keypair init failed; push notifications disabled: {e:?}");
+    }
+
     let (progress_tx, _) = broadcast::channel::<String>(128);
 
     let scan_depth: usize = std::env::var("REPO_RECALL_DEPTH")
@@ -110,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         my_gh_login: Arc::new(Mutex::new(my_gh_login)),
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        state_db,
     };
 
     let app: Router = routes::router(state.clone());

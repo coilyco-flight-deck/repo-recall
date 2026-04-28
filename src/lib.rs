@@ -8,6 +8,7 @@ pub mod activity;
 pub mod commits;
 pub mod db;
 pub mod join;
+pub mod push;
 pub mod routes;
 pub mod scanner;
 pub mod sessions;
@@ -46,4 +47,8 @@ pub struct AppState {
     /// on cacheable endpoints, so a polling orchestrator can short-circuit
     /// with `304 Not Modified` between scans.
     pub scan_version: Arc<AtomicU64>,
+    /// Persistent state for things that must outlive the wipe-on-restart
+    /// cache DB: VAPID keypair, push subscriptions, deduplication set of
+    /// already-notified action-required signal ids.
+    pub state_db: state::StateDb,
 }

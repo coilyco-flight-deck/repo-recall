@@ -8,6 +8,7 @@ pub mod api;
 pub mod dashboard;
 pub mod fallback;
 pub mod negotiate;
+pub mod push;
 pub mod refresh;
 pub mod repos;
 pub mod search;
@@ -28,6 +29,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/action-required", get(api::action_required))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
+        .route("/api/push/vapid-key", get(push::vapid_key))
+        .route("/api/push/subscribe", post(push::subscribe))
+        .route("/api/push/unsubscribe", post(push::unsubscribe))
         .route("/ws", get(ws::ws_handler))
         .route("/livereload", get(ws::livereload_handler))
         .nest_service("/static", ServeDir::new(static_dir))
