@@ -1,3 +1,5 @@
+use axum::http::{header, HeaderValue, Response};
+use axum::middleware::{self, Next};
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::services::ServeDir;
@@ -9,6 +11,7 @@ pub mod api;
 pub mod dashboard;
 pub mod fallback;
 pub mod negotiate;
+pub mod openapi;
 pub mod push;
 pub mod refresh;
 pub mod repos;
@@ -27,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(sessions::detail))
         .route("/search", get(search::search))
         .route("/refresh", post(refresh::trigger))
+        .route("/openapi.json", get(openapi::spec))
         .route("/api/action-required", get(api::action_required))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
@@ -41,5 +45,30 @@ pub fn router(state: AppState) -> Router {
         .route("/livereload", get(ws::livereload_handler))
         .nest_service("/static", ServeDir::new(static_dir))
         .fallback(fallback::not_found)
+        .layer(middleware::from_fn(advertise_json_alternate))
         .with_state(state)
+}
+
+/// Advertise the JSON content-negotiation surface to discovering clients.
+///
+/// `Vary: Accept` is correctness: the same URL serves HTML or JSON depending
+/// on the request, so any cache between us and the client must key on it.
+/// The `Link` header points an agent at the dashboard's JSON variant without
+/// requiring it to parse HTML for the `<link rel="alternate">` hint. Both
+/// land on every response so a cold-start probe at any path finds the trail.
+async fn advertise_json_alternate(
+    req: axum::extract::Request,
+    next: Next,
+) -> Response<axum::body::Body> {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.append(header::VARY, HeaderValue::from_static("Accept"));
+    h.append(
+        header::LINK,
+        HeaderValue::from_static(
+            "</?format=json>; rel=\"alternate\"; type=\"application/json\", \
+             </openapi.json>; rel=\"service-desc\"; type=\"application/json\"",
+        ),
+    );
+    res
 }

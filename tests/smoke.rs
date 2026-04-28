@@ -322,3 +322,58 @@ async fn git_log_parses_commits() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[tokio::test]
+async fn json_surface_is_discoverable() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    // Mechanism 1: <link rel="alternate"> in the HTML head.
+    let html = client.get(format!("{base}/")).send().await.unwrap();
+    let html_headers = html.headers().clone();
+    let body = html.text().await.unwrap();
+    assert!(
+        body.contains("rel=\"alternate\"") && body.contains("application/json"),
+        "dashboard <head> missing alternate-json link"
+    );
+
+    // Mechanism 2: Vary + Link headers on every response.
+    let vary = html_headers
+        .get("vary")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(vary.contains("Accept"), "Vary header missing Accept");
+    let link = html_headers
+        .get("link")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        link.contains("rel=\"alternate\"") && link.contains("application/json"),
+        "Link header missing alternate-json target"
+    );
+    assert!(
+        link.contains("rel=\"service-desc\""),
+        "Link header missing service-desc pointer at /openapi.json"
+    );
+
+    // Mechanism 3: /openapi.json serves a real OpenAPI doc.
+    let oa = client
+        .get(format!("{base}/openapi.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oa.status(), 200);
+    let oa_doc: serde_json::Value = oa.json().await.unwrap();
+    assert_eq!(oa_doc["openapi"], "3.1.0");
+    assert!(
+        oa_doc["paths"]["/"].is_object(),
+        "openapi missing root path"
+    );
+    assert!(
+        oa_doc["paths"]["/api/action-required"].is_object(),
+        "openapi missing /api/action-required"
+    );
+}

@@ -40,6 +40,7 @@ fn layout_with_banners(title: &str, body: Markup, gh_health: Option<GhHealth>) -
                 link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap";
                 meta name="description" content="Local Claude Code session index — joins sessions to git repos on disk.";
                 meta name="color-scheme" content="light";
+                link rel="alternate" type="application/json" href="/?format=json" title="repo-recall JSON";
                 link rel="stylesheet" href="/static/tailwind.css";
                 script src="https://unpkg.com/htmx.org@2.0.3" {}
                 script src="https://unpkg.com/htmx-ext-ws@2.0.1" {}
