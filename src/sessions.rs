@@ -24,8 +24,21 @@ pub struct SessionRecord {
     pub cache_creation_tokens: i64,
 }
 
-/// Returns the default Claude Code projects directory: `~/.claude/projects/`.
+/// Returns the directory we'll parse session files from. Honors the
+/// `REPO_RECALL_SESSIONS_DIR` env override (used by demo mode and tests to
+/// point at a fixture tree) and otherwise falls back to the canonical Claude
+/// Code projects directory at `~/.claude/projects/`.
 pub fn default_projects_dir() -> Option<PathBuf> {
+    if let Some(over) = std::env::var_os("REPO_RECALL_SESSIONS_DIR") {
+        let dir = PathBuf::from(over);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+        tracing::warn!(
+            "REPO_RECALL_SESSIONS_DIR set to {:?} but is not a directory; falling back",
+            dir
+        );
+    }
     let home = std::env::var_os("HOME")?;
     let dir = PathBuf::from(home).join(".claude").join("projects");
     if dir.is_dir() {
