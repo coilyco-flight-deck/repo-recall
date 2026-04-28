@@ -22,6 +22,9 @@ dunce = "1"
 dotenvy = "0.15"
 git-url-parse = "0.4"
 aho-corasick = "1"
+web-push = "0.10"
+base64 = "0.22"
+dirs = "5"
 
 [profile.release]
 opt-level = 3

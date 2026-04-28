@@ -11,6 +11,7 @@ pub mod join;
 pub mod routes;
 pub mod scanner;
 pub mod sessions;
+pub mod state;
 
 #[derive(Clone)]
 pub struct AppState {
