@@ -27,8 +27,12 @@ css: ## Compile static/tailwind.css from static/tailwind.input.css
 	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --minify
 
 css-check: css ## Build CSS and fail if it differs from the committed copy
-	@git diff --exit-code -- static/tailwind.css >/dev/null \
-		|| (echo 'static/tailwind.css is stale — run `make css` and commit the result'; exit 1)
+	@if ! git diff --exit-code -- static/tailwind.css >/dev/null; then \
+		echo 'static/tailwind.css is stale — run `make css` and commit the result'; \
+		echo '---- diff (first 80 lines) ----'; \
+		git --no-pager diff -- static/tailwind.css | head -80; \
+		exit 1; \
+	fi
 
 css-watch: ## Rebuild CSS on every input/source change (run alongside `make watch`)
 	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --watch
