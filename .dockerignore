@@ -1,0 +1,19 @@
+# Keep Docker build context small. Anything Dockerfile.demo doesn't COPY
+# explicitly should be excluded so layer caching keys off real changes,
+# not local clutter.
+target/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.DS_Store
+.git/
+.github/
+.claude/
+.pre-commit-config.yaml
+docs/
+tests/
+README.md
+Formula/
+*.png
+*.jpg

@@ -1,6 +1,11 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch build release test fmt fmt-check lint check ci clean css css-check css-watch
+.PHONY: help install run watch build release test fmt fmt-check lint check ci clean css css-check css-watch \
+        docker-demo-build docker-demo-run docker-demo-smoke
+
+# Demo image -----------------------------------------------------------------
+demo_image ?= repo-recall-demo:local
+demo_port  ?= 7777
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
@@ -57,6 +62,15 @@ check: ## Fast type-check
 	cargo check --all-targets
 
 ci: fmt-check lint check test css-check ## Everything CI runs, in order. Fail fast.
+
+docker-demo-build: ## Build the public-demo container image (Dockerfile.demo)
+	docker build -f Dockerfile.demo -t $(demo_image) .
+
+docker-demo-run: docker-demo-build ## Run the demo image, port-forwarded to localhost
+	docker run --rm -p $(demo_port):7777 --name repo-recall-demo $(demo_image)
+
+docker-demo-smoke: docker-demo-build ## Build, boot in background, curl /, assert non-empty repo list, kill
+	@bash scripts/docker-demo-smoke.sh $(demo_image) $(demo_port)
 
 clean: ## Remove target/ and the SQLite cache
 	cargo clean
