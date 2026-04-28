@@ -6,10 +6,16 @@
 //! and the env-var override; phase 2 extends this file to boot the full
 //! router and assert the session->repo join.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::process::Command;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use repo_recall::sessions;
+use tokio::sync::{broadcast, Mutex as TokioMutex};
+
+use repo_recall::{db, routes, sessions, state::StateDb, AppState};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -153,4 +159,156 @@ fn sessions_dir_env_override_falls_back_when_directory_missing() {
     if let Some(p) = resolved {
         assert_ne!(p, bogus, "override pointed at a missing dir should not win");
     }
+}
+
+// ----- end-to-end demo boot -------------------------------------------- //
+//
+// Materialises the fixtures via scripts/build-fixture-repos.sh +
+// scripts/render-session-fixtures.sh, boots the in-process router pointed
+// at them, runs a refresh, and asserts the dashboard JSON shows the expected
+// repo + session + join counts. This is the test that catches "fixture
+// shape drifted" or "scanner stopped seeing fake repos" before either makes
+// it into the demo container.
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn unique_tmp(prefix: &str) -> PathBuf {
+    use std::sync::atomic::Ordering;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{}-{}-{}", std::process::id(), nanos, n))
+}
+
+fn run_script(script: &str, args: &[&str]) {
+    let path = manifest_dir().join("scripts").join(script);
+    let status = Command::new("bash")
+        .arg(&path)
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to spawn {script}: {e}"));
+    assert!(status.success(), "{script} exited non-zero: {status:?}");
+}
+
+// `await_holding_lock` is a real bug shape in production code, but here the
+// lock exists specifically to serialize REPO_RECALL_SESSIONS_DIR mutation
+// across tests in the same process. The await stays bounded by the request
+// timeouts inside the test, and another async test holding the same lock
+// would just queue, not deadlock.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn demo_fixtures_boot_and_join_through_the_router() {
+    let _g = ENV_LOCK.lock().unwrap();
+
+    let workdir = unique_tmp("repo-recall-demo");
+    let repos_dir = workdir.join("repos");
+    let sessions_dir = workdir.join("sessions");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    run_script("build-fixture-repos.sh", &[repos_dir.to_str().unwrap()]);
+    run_script(
+        "render-session-fixtures.sh",
+        &[sessions_dir.to_str().unwrap(), repos_dir.to_str().unwrap()],
+    );
+
+    // Per-test SQLite + state DB so parallel `cargo test` invocations don't
+    // collide. Mirrors tests/smoke.rs.
+    let db_path = unique_tmp("repo-recall-demo-cache").with_extension("sqlite");
+    let _ = std::fs::remove_file(&db_path);
+    db::init(&db_path).unwrap();
+    let state_dir = unique_tmp("repo-recall-demo-state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = StateDb::open_at(state_dir.join("state.sqlite")).unwrap();
+
+    let (progress_tx, _) = broadcast::channel::<String>(16);
+    let state = AppState {
+        db_path: db_path.clone(),
+        cwd: repos_dir.clone(),
+        scan_depth: 2,
+        commits_per_repo: 50,
+        refresh_interval_secs: 0,
+        remote_target_limit: 0,
+        progress_tx,
+        refresh_lock: Arc::new(TokioMutex::new(())),
+        last_scan: Arc::new(TokioMutex::new(None)),
+        // No `gh` from the test environment is fine; the fixtures don't have
+        // remotes anyway. Set Missing so the dashboard doesn't try to call gh.
+        gh_health: Arc::new(TokioMutex::new(repo_recall::commits::GhHealth::Missing)),
+        my_gh_login: Arc::new(TokioMutex::new(None)),
+        my_git_email: Arc::new(TokioMutex::new(None)),
+        scan_version: Arc::new(AtomicU64::new(0)),
+        state_db,
+    };
+
+    // Drive session parsing at our rendered fixtures, not ~/.claude/projects.
+    std::env::set_var("REPO_RECALL_SESSIONS_DIR", &sessions_dir);
+
+    routes::refresh::run_refresh(state.clone())
+        .await
+        .expect("refresh failed");
+
+    // Boot the router and hit the JSON dashboard.
+    let app = routes::router(state.clone());
+    let addr: SocketAddr = ([127, 0, 0, 1], 0).into();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let res = client
+        .get(format!("http://{bound}/?format=json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+
+    std::env::remove_var("REPO_RECALL_SESSIONS_DIR");
+    handle.abort();
+
+    let counts = body
+        .get("counts")
+        .expect("dashboard json should have counts");
+    let repos_n = counts.get("repos").and_then(|v| v.as_i64()).unwrap_or(0);
+    let sessions_n = counts.get("sessions").and_then(|v| v.as_i64()).unwrap_or(0);
+    let links_n = counts.get("links").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    assert!(
+        repos_n >= 3,
+        "expected at least 3 fixture repos, got {repos_n} (body: {body})"
+    );
+    assert!(
+        sessions_n >= 5,
+        "expected at least 5 fixture sessions, got {sessions_n}"
+    );
+    assert!(
+        links_n >= 5,
+        "every fixture session has a cwd inside a fixture repo, expected >=5 joins, got {links_n}"
+    );
+
+    // Assert the join actually fired: every session row in `recent_sessions`
+    // should reference a repo that exists in `repos`. This is the signal that
+    // catches a join.rs regression where sessions land but get orphaned.
+    let recent_sessions = body
+        .get("recent_sessions")
+        .and_then(|v| v.as_array())
+        .expect("recent_sessions array");
+    assert!(
+        !recent_sessions.is_empty(),
+        "recent_sessions should be non-empty"
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&state_dir);
 }
