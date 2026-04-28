@@ -410,7 +410,21 @@ pub async fn index(
 
         @let uncommitted_total: i64 = uncommitted_groups.iter().map(|g| g.total).sum();
         @let uncommitted_panel = if uncommitted_groups.is_empty() { PANEL } else { PANEL_ALERT };
-        @let ci_panel = if ci_failures.is_empty() { PANEL } else { PANEL_ALERT };
+        @if !ci_failures.is_empty() {
+            section class={ (PANEL_ALERT) " mb-4 border-l-[6px] bg-[#efe8f5]" } {
+                h2 class="text-sm text-[#3e375d] font-bold uppercase tracking-[0.08em] mb-3
+                         flex items-baseline gap-2" {
+                    span class="text-base leading-none" { "✖" }
+                    "CI failing — action required"
+                    span class="text-[#574f7d]/70 normal-case tracking-normal font-normal text-xs" {
+                        "(" (ci_failures.len()) " repo"
+                        @if ci_failures.len() != 1 { "s" }
+                        ")"
+                    }
+                }
+                (render_ci_failures(&ci_failures))
+            }
+        }
         div class="grid grid-cols-1 lg:grid-cols-2 gap-4" {
             div class="flex flex-col gap-4 min-w-0" {
                 section class=(PANEL) {
@@ -430,19 +444,6 @@ pub async fn index(
                 }
             }
             div class="flex flex-col gap-4 min-w-0" {
-                @if !ci_failures.is_empty() {
-                    section class=(ci_panel) {
-                        h2 class={ (H2) " text-[#3e375d]" } {
-                            "CI failing — action required"
-                            span class="text-[#574f7d]/70 normal-case tracking-normal font-normal" {
-                                " (" (ci_failures.len()) " repo"
-                                @if ci_failures.len() != 1 { "s" }
-                                ")"
-                            }
-                        }
-                        (render_ci_failures(&ci_failures))
-                    }
-                }
                 section class=(uncommitted_panel) {
                     h2 class={
                         (H2)
@@ -1064,17 +1065,20 @@ fn render_ci_failures(failures: &[db::CiFailure]) -> Markup {
             @for f in failures {
                 li class=(LI) {
                     div class="flex items-baseline gap-2 flex-wrap" {
-                        a class={ (LINK) " font-semibold" } href={ "/repos/" (f.repo_id) } {
+                        a class={ (LINK) " font-semibold text-base" } href={ "/repos/" (f.repo_id) } {
                             (f.repo_name)
+                        }
+                        @if let Some(branch) = f.default_branch.as_deref() {
+                            span class={ (PILL) " font-mono" } title="default branch" { (branch) }
                         }
                         @if let (Some(url), Some(branch)) =
                             (f.remote_url.as_deref(), f.default_branch.as_deref())
                         {
-                            a class=(PILL)
+                            a class=(PILL_ALERT)
                               href={ (url) "/actions?query=branch%3A" (branch) }
                               target="_blank" rel="noopener"
                               title="open the failing branch's Actions history on GitHub" {
-                                "view CI ↗"
+                                "view failing CI ↗"
                             }
                         }
                     }
