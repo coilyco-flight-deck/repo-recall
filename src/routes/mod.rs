@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/action-required", get(api::action_required))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
+        .route("/sw.js", get(push::service_worker))
         .route("/api/push/vapid-key", get(push::vapid_key))
         .route("/api/push/subscribe", post(push::subscribe))
         .route("/api/push/unsubscribe", post(push::unsubscribe))

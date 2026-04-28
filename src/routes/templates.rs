@@ -45,12 +45,14 @@ fn layout_with_banners(title: &str, body: Markup, gh_health: Option<GhHealth>) -
                 script src="https://unpkg.com/htmx-ext-ws@2.0.1" {}
                 link rel="stylesheet" href="/static/style.css";
                 script src="/static/livereload.js" defer {}
+                script src="/static/push-subscribe.js" defer {}
             }
             body class="h-full bg-[#e0dde5] text-[#3e375d] text-sm leading-6 antialiased" {
                 header class="flex items-baseline gap-4 px-6 py-4 border-b border-[#9e9fc2]/50 bg-[#c9dcd5]" {
                     a class="font-bold text-base text-[#3e375d] hover:no-underline" href="/" { "repo-recall" }
                     span class="text-[#574f7d]/70 text-xs" { "local claude code session index" }
-                    form method="get" action="/search" class="ml-auto flex" {
+                    span id="push-slot" class="ml-auto flex items-center" {}
+                    form method="get" action="/search" class="flex" {
                         input name="q" placeholder="search…"
                               class="px-2 py-1 text-xs rounded-md border border-[#9e9fc2]/60
                                      bg-white/70 text-[#3e375d] placeholder:text-[#574f7d]/50

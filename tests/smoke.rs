@@ -138,7 +138,7 @@ async fn static_assets_are_served() {
         "/static/icons/icon-192.png",
         "/static/icons/icon-512.png",
         "/static/manifest.webmanifest",
-        "/static/sw.js",
+        "/sw.js",
     ] {
         let res = client.get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(res.status(), 200, "expected 200 for {path}");

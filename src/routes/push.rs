@@ -18,6 +18,26 @@ use serde_json::json;
 use crate::state::NewSubscription;
 use crate::AppState;
 
+/// Serve the service worker at the site root so its default scope is `/`,
+/// not `/static/`. A SW served from `/static/sw.js` is constrained by the
+/// browser to control only same-prefix URLs unless we also send a
+/// Service-Worker-Allowed header — and the redirected scope is still
+/// confusing. Easier to just serve the script at `/sw.js`.
+pub async fn service_worker() -> Response {
+    const SW_JS: &str = include_str!("../../static/sw.js");
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        SW_JS,
+    )
+        .into_response()
+}
+
 pub async fn vapid_key(State(state): State<AppState>) -> Response {
     match state.state_db.get_or_init_vapid() {
         Ok(v) => (
