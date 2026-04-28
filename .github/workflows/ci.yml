@@ -45,21 +45,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --no-fail-fast
 
-  # macOS-arm64 runner + a pinned v4.2.4 standalone binary from the
-  # tailwindcss GitHub release so CI produces the same minified bytes
-  # Kai's dev env produces. Two drift axes both bit us before getting
-  # here: linux-x64 v4.2.4 vs macOS-arm64 v4.2.4 (platform output is
-  # not deterministic) and brew tailwindcss 4.2.2 vs 4.2.4 (the macos
-  # runner's brew lags). Pinning the release URL nails both.
-  css:
-    name: tailwind build in sync
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: install tailwindcss v4.2.4
-        run: |
-          curl -fsSL -o /usr/local/bin/tailwindcss \
-            https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.4/tailwindcss-macos-arm64
-          chmod +x /usr/local/bin/tailwindcss
-          tailwindcss --help >/dev/null
-      - run: make css-check
+  # No css job: the tailwindcss v4 standalone CLI does not produce
+  # byte-identical output across builds (linux-x64 vs macOS-arm64 differ,
+  # and same-platform builds at the same version still drift), so a
+  # css-check gate in CI was a coin flip. The pre-commit hook regenerates
+  # the bundle on every commit that touches static/tailwind.input.css,
+  # any .rs file, or any static/.js file, which is the actual point of
+  # control. The committed static/tailwind.css is what gets shipped via
+  # Docker COPY and via the brew Formula's static dir; CI doesn't model
+  # that pipeline meaningfully by re-minifying the same input.
