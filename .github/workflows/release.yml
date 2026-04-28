@@ -160,6 +160,10 @@ jobs:
           set -euo pipefail
           cd homebrew-tap
           file=Formula/repo-recall.rb
+          # Mirror the source-of-truth Formula from this repo, then patch
+          # url + sha256 to point at the new tarball. Keeps any non-version
+          # Formula edits (install steps, service env, etc.) in sync.
+          cp ../repo-recall/Formula/repo-recall.rb "$file"
           sed -i "s|^  url \".*\"|  url \"${NEW_URL}\"|" "$file"
           sed -i "s|^  sha256 \".*\"|  sha256 \"${NEW_SHA}\"|" "$file"
           PARENT=$(git rev-parse HEAD)
