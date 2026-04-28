@@ -26,11 +26,16 @@ name: release
 #   changes versions.
 #
 # Signed commits:
-#   main has required_signatures enabled, which rejects unsigned commits.
-#   git push from Actions produces unsigned commits and would fail the
-#   push. Instead, the bump goes through GitHub createCommitOnBranch
-#   GraphQL mutation - those commits are signed by GitHub Actions and
-#   pass the protection rule. See .github/scripts/signed-commit.py.
+#   repo-recall's main has required_signatures enabled, which rejects
+#   unsigned commits. git push from Actions produces unsigned commits and
+#   would fail the push. Instead, the in-repo bump goes through GitHub's
+#   createCommitOnBranch GraphQL mutation - those commits are signed by
+#   GitHub Actions and pass the protection rule. See
+#   .github/scripts/signed-commit.py.
+#
+#   The homebrew-tap push uses plain git so the commit is attributed to
+#   github-actions[bot] (matches coily's release flow). homebrew-tap does
+#   not require signatures.
 
 on:
   push:
@@ -139,7 +144,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout repo-recall (for signed-commit helper)
+      - name: Checkout repo-recall (for source-of-truth Formula)
         uses: actions/checkout@v4
         with:
           path: repo-recall
@@ -151,9 +156,8 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Bump Formula and push directly (signed via GraphQL)
+      - name: Bump Formula and push directly
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           NEW_URL: ${{ steps.sha.outputs.url }}
           NEW_SHA: ${{ steps.sha.outputs.sha }}
         run: |
@@ -166,8 +170,8 @@ jobs:
           cp ../repo-recall/Formula/repo-recall.rb "$file"
           sed -i "s|^  url \".*\"|  url \"${NEW_URL}\"|" "$file"
           sed -i "s|^  sha256 \".*\"|  sha256 \"${NEW_SHA}\"|" "$file"
-          PARENT=$(git rev-parse HEAD)
-          ../repo-recall/.github/scripts/signed-commit.py \
-            coilysiren/homebrew-tap main \
-            "repo-recall: bump to ${TAG}" "$PARENT" \
-            "$file"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "repo-recall: bump to ${TAG}"
+          git push origin HEAD:main
