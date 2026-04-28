@@ -30,7 +30,11 @@ fn layout_with_banners(title: &str, body: Markup, gh_health: Option<GhHealth>) -
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
                 title { "repo-recall — " (title) }
-                link rel="icon" type="image/svg+xml" href="/static/favicon.svg";
+                link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png";
+                link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png";
+                link rel="apple-touch-icon" href="/static/icons/icon-192.png";
+                link rel="manifest" href="/static/manifest.webmanifest";
+                meta name="theme-color" content="#c9dcd5";
                 link rel="preconnect" href="https://fonts.googleapis.com";
                 link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
                 link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap";
