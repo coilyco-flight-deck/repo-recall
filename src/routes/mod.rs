@@ -4,6 +4,7 @@ use tower_http::services::ServeDir;
 
 use crate::AppState;
 
+pub mod actions;
 pub mod api;
 pub mod dashboard;
 pub mod fallback;
@@ -29,6 +30,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/action-required", get(api::action_required))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
+        .route("/api/repos/{id}/push", post(actions::push))
+        .route("/api/repos/{id}/pull", post(actions::pull))
+        .route("/api/clone", post(actions::clone_active))
         .route("/sw.js", get(push::service_worker))
         .route("/api/push/vapid-key", get(push::vapid_key))
         .route("/api/push/subscribe", post(push::subscribe))

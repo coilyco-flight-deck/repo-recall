@@ -192,6 +192,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     // and the remote stuff fills in later.
     let ci_updated = ingest_ci_status(state.clone()).await;
 
+    // 2.5: snapshot the user's "active" GitHub repos (regardless of whether
+    // they're cloned into this scan tree). Populates the dashboard's
+    // "clone one" panel. Best-effort — `gh` missing / unauthenticated leaves
+    // the table empty.
+    let _active_repos_n = ingest_active_repos(state.clone()).await;
+
     // Third pass: content-mention matching. Walks every session JSONL
     // looking for bare-word hits on known repo names. Separate because:
     // (a) it's heavy — N sessions × M repos of string-scanning; (b) it's
@@ -497,6 +503,45 @@ async fn ingest_ci_status(state: AppState) -> usize {
     .and_then(|r| r.ok())
     .unwrap_or(0);
     updated
+}
+
+/// Snapshot the viewer's GitHub repos via `gh repo list` and write them into
+/// `active_remote_repos`. Skipped silently when `gh` is missing or
+/// unauthenticated. Caps at 100 repos — enough to surface the user's active
+/// workspace, small enough not to balloon the gh API budget.
+async fn ingest_active_repos(state: AppState) -> usize {
+    if *state.gh_health.lock().await != commits::GhHealth::Ok {
+        return 0;
+    }
+    let actives = tokio::task::spawn_blocking(|| commits::fetch_active_repos(100))
+        .await
+        .unwrap_or_default();
+    if actives.is_empty() {
+        return 0;
+    }
+    let db_path = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        let conn = db::open(&db_path)?;
+        let rows: Vec<db::ActiveRemoteRepo> = actives
+            .into_iter()
+            .map(|a| db::ActiveRemoteRepo {
+                id: 0,
+                full_name: a.full_name,
+                https_url: a.https_url,
+                ssh_url: a.ssh_url,
+                default_branch: a.default_branch,
+                pushed_at: a.pushed_at,
+                description: a.description,
+                is_fork: a.is_fork,
+                is_archived: a.is_archived,
+            })
+            .collect();
+        db::upsert_active_remote_repos(&conn, &rows)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(0)
 }
 
 /// Reconcile the persistent seen-signals set with this scan's

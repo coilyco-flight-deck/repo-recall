@@ -22,6 +22,7 @@ pub fn init(path: &Path) -> Result<()> {
         DROP TABLE IF EXISTS commits;
         DROP TABLE IF EXISTS session_repos;
         DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS active_remote_repos;
         DROP TABLE IF EXISTS repos;
 
         CREATE TABLE repos (
@@ -164,6 +165,23 @@ pub fn init(path: &Path) -> Result<()> {
         CREATE INDEX idx_file_changes_repo_ts ON file_changes(repo_id, timestamp DESC);
         CREATE INDEX idx_file_changes_path ON file_changes(repo_id, file_path);
 
+        -- Snapshot of "active" GitHub repos for the authenticated `gh` user,
+        -- pulled once per refresh. Powers the "clone one" button on the
+        -- dashboard for repos the user has elsewhere but hasn't cloned into
+        -- this scan tree yet. Wiped + rebuilt with the rest of the cache.
+        CREATE TABLE active_remote_repos (
+            id INTEGER PRIMARY KEY,
+            full_name TEXT NOT NULL UNIQUE,
+            https_url TEXT NOT NULL,
+            ssh_url TEXT,
+            default_branch TEXT,
+            pushed_at INTEGER,
+            description TEXT,
+            is_fork INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_active_remote_repos_pushed ON active_remote_repos(pushed_at DESC);
+
         -- FTS5 virtual table indexing the searchable text across every
         -- domain entity we have. `kind` is 'repo' | 'session' | 'commit'
         -- and `ref_id` is the source row's primary key (UNINDEXED so it's
@@ -188,6 +206,7 @@ pub fn wipe(conn: &Connection) -> Result<()> {
          DELETE FROM commits; \
          DELETE FROM session_repos; \
          DELETE FROM sessions; \
+         DELETE FROM active_remote_repos; \
          DELETE FROM repos;",
     )?;
     Ok(())
@@ -789,6 +808,112 @@ pub fn recent_commits(
         out.push(r?);
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveRemoteRepo {
+    pub id: i64,
+    pub full_name: String,
+    pub https_url: String,
+    pub ssh_url: Option<String>,
+    pub default_branch: Option<String>,
+    pub pushed_at: Option<i64>,
+    pub description: Option<String>,
+    pub is_fork: bool,
+    pub is_archived: bool,
+}
+
+pub fn upsert_active_remote_repos(conn: &Connection, repos: &[ActiveRemoteRepo]) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM active_remote_repos", [])?;
+    let mut n = 0usize;
+    for r in repos {
+        tx.execute(
+            "INSERT OR IGNORE INTO active_remote_repos
+             (full_name, https_url, ssh_url, default_branch, pushed_at,
+              description, is_fork, is_archived)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                r.full_name,
+                r.https_url,
+                r.ssh_url,
+                r.default_branch,
+                r.pushed_at,
+                r.description,
+                r.is_fork as i64,
+                r.is_archived as i64,
+            ],
+        )?;
+        n += 1;
+    }
+    tx.commit()?;
+    Ok(n)
+}
+
+/// Active GitHub repos for the viewer that aren't already cloned into the
+/// scan tree (matched by normalized https remote URL). Sorted most-recently-
+/// pushed first so the dashboard panel surfaces what the user is actually
+/// working on elsewhere.
+pub fn uncloned_active_repos(conn: &Connection, limit: i64) -> Result<Vec<ActiveRemoteRepo>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT a.id, a.full_name, a.https_url, a.ssh_url, a.default_branch,
+               a.pushed_at, a.description, a.is_fork, a.is_archived
+        FROM active_remote_repos a
+        WHERE a.is_archived = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM repos r WHERE r.remote_url = a.https_url
+          )
+        ORDER BY COALESCE(a.pushed_at, 0) DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        Ok(ActiveRemoteRepo {
+            id: row.get(0)?,
+            full_name: row.get(1)?,
+            https_url: row.get(2)?,
+            ssh_url: row.get(3)?,
+            default_branch: row.get(4)?,
+            pushed_at: row.get(5)?,
+            description: row.get(6)?,
+            is_fork: row.get::<_, i64>(7)? != 0,
+            is_archived: row.get::<_, i64>(8)? != 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub fn get_active_repo_by_full_name(
+    conn: &Connection,
+    full_name: &str,
+) -> Result<Option<ActiveRemoteRepo>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, full_name, https_url, ssh_url, default_branch,
+               pushed_at, description, is_fork, is_archived
+        FROM active_remote_repos
+        WHERE full_name = ?1
+        "#,
+    )?;
+    let mut rows = stmt.query_map([full_name], |row| {
+        Ok(ActiveRemoteRepo {
+            id: row.get(0)?,
+            full_name: row.get(1)?,
+            https_url: row.get(2)?,
+            ssh_url: row.get(3)?,
+            default_branch: row.get(4)?,
+            pushed_at: row.get(5)?,
+            description: row.get(6)?,
+            is_fork: row.get::<_, i64>(7)? != 0,
+            is_archived: row.get::<_, i64>(8)? != 0,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
 }
 
 pub fn commits_for_repo(conn: &Connection, repo_id: i64, limit: i64) -> Result<Vec<Commit>> {

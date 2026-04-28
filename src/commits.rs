@@ -835,6 +835,119 @@ pub fn my_gh_login() -> Option<String> {
     }
 }
 
+/// One entry from `gh repo list --json …` — the viewer's GitHub repos
+/// regardless of whether they're cloned locally. Drives the dashboard's
+/// "active repos not cloned yet" panel.
+#[derive(Debug, Clone)]
+pub struct ActiveRepo {
+    pub full_name: String,
+    pub https_url: String,
+    pub ssh_url: Option<String>,
+    pub default_branch: Option<String>,
+    pub pushed_at: Option<i64>,
+    pub description: Option<String>,
+    pub is_fork: bool,
+    pub is_archived: bool,
+}
+
+/// `gh repo list` for the authenticated user, ordered by most-recent push.
+/// Returns an empty vec on any subprocess / parse failure (best-effort).
+pub fn fetch_active_repos(limit: usize) -> Vec<ActiveRepo> {
+    let output = match Command::new("gh")
+        .args([
+            "repo",
+            "list",
+            "--limit",
+            &limit.to_string(),
+            "--json",
+            "nameWithOwner,url,sshUrl,defaultBranchRef,pushedAt,description,isFork,isArchived",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::debug!(
+                "gh repo list failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::debug!("gh repo list spawn failed: {e}");
+            return Vec::new();
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let arr: serde_json::Value = match serde_json::from_str(stdout.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("gh repo list parse failed: {e}");
+            return Vec::new();
+        }
+    };
+    let Some(items) = arr.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let full_name = it
+            .get("nameWithOwner")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if full_name.is_empty() {
+            continue;
+        }
+        let https_url = it
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_string();
+        if https_url.is_empty() {
+            continue;
+        }
+        let ssh_url = it
+            .get("sshUrl")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let default_branch = it
+            .get("defaultBranchRef")
+            .and_then(|d| d.get("name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let pushed_at = it
+            .get("pushedAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp());
+        let description = it
+            .get("description")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let is_fork = it.get("isFork").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_archived = it
+            .get("isArchived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        out.push(ActiveRepo {
+            full_name,
+            https_url,
+            ssh_url,
+            default_branch,
+            pushed_at,
+            description,
+            is_fork,
+            is_archived,
+        });
+    }
+    out
+}
+
 /// Pull `OWNER/NAME` out of a normalised remote URL like
 /// `https://github.com/coilysiren/repo-recall`. Returns `None` for non-
 /// GitHub remotes (we can only drive `gh` against GitHub). We don't try to

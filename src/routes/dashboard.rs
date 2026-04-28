@@ -106,6 +106,7 @@ pub async fn index(
         // (+headers), enough to read at a glance without scrolling forever.
         let uncommitted_groups = db::uncommitted_by_repo(&conn, 6, 4)?;
         let ci_failures = db::failing_ci_repos(&conn)?;
+        let uncloned = db::uncloned_active_repos(&conn, 25)?;
         Ok((
             repos_n,
             sessions_n,
@@ -117,6 +118,7 @@ pub async fn index(
             recent_commits,
             uncommitted_groups,
             ci_failures,
+            uncloned,
         ))
     })
     .await
@@ -133,6 +135,7 @@ pub async fn index(
         recent_commits,
         uncommitted_groups,
         ci_failures,
+        uncloned,
     ) = match data {
         Ok(d) => d,
         Err(e) => {
@@ -409,9 +412,22 @@ pub async fn index(
         @let uncommitted_panel = if uncommitted_groups.is_empty() { PANEL } else { PANEL_ALERT };
         @let ci_panel = if ci_failures.is_empty() { PANEL } else { PANEL_ALERT };
         div class="grid grid-cols-1 lg:grid-cols-2 gap-4" {
-            section class=(PANEL) {
-                h2 class=(H2) { "repos" }
-                (render_repos(&repos, &state.cwd))
+            div class="flex flex-col gap-4 min-w-0" {
+                section class=(PANEL) {
+                    h2 class=(H2) { "repos" }
+                    (render_repos(&repos, &state.cwd))
+                }
+                @if !uncloned.is_empty() {
+                    section class=(PANEL) {
+                        h2 class=(H2) {
+                            "active on github, not cloned"
+                            span class="text-[#574f7d]/70 normal-case tracking-normal font-normal" {
+                                " (" (uncloned.len()) ")"
+                            }
+                        }
+                        (render_uncloned(&uncloned))
+                    }
+                }
             }
             div class="flex flex-col gap-4 min-w-0" {
                 @if !ci_failures.is_empty() {
@@ -933,6 +949,55 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                             }
                         }
                         div class=(PATH) { (r.path) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Render the "active on GitHub, not cloned" panel — one row per repo with a
+/// clone button that posts to `/api/clone`. Each row is keyed by a slug of
+/// the `owner/name` so the post-clone fragment knows which row to swap.
+fn render_uncloned(repos: &[db::ActiveRemoteRepo]) -> Markup {
+    html! {
+        ul class="list-none p-0 m-0" {
+            @for r in repos {
+                li class=(LI) {
+                    div class=(ROW) {
+                        a class={ (LINK) " font-semibold" }
+                          href=(r.https_url) target="_blank" rel="noopener" {
+                            (r.full_name)
+                        }
+                        @if r.is_fork {
+                            span class=(PILL) { "fork" }
+                        }
+                        @if let Some(ts) = r.pushed_at {
+                            span class=(PILL) title="last pushed (GitHub)" {
+                                "pushed " (relative_time(Some(ts)))
+                            }
+                        }
+                    }
+                    @if let Some(d) = &r.description {
+                        p class={ (META) " mt-0.5" } { (d) }
+                    }
+                    div id={ "clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                        class="mt-1.5" {
+                        form hx-post="/api/clone"
+                             hx-target={ "#clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                             hx-swap="outerHTML"
+                             class="flex items-baseline gap-2" {
+                            input type="hidden" name="full_name" value=(r.full_name);
+                            button type="submit"
+                                class="bg-[#574f7d] text-white px-2.5 py-1 rounded-md text-[11px]
+                                       font-bold tracking-wide hover:bg-[#3e375d]
+                                       transition-colors cursor-pointer shadow-sm" {
+                                "clone ↓"
+                            }
+                            @if let Some(branch) = &r.default_branch {
+                                span class={ (META) " font-mono" } { (branch) }
+                            }
+                        }
                     }
                 }
             }
