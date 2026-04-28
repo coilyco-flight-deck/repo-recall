@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch build release test fmt fmt-check lint check ci clean
+.PHONY: help install run watch build release test fmt fmt-check lint check ci clean css css-check css-watch
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
@@ -12,10 +12,21 @@ depth ?= $(or $(REPO_RECALL_DEPTH),4)
 help: ## Show this help
 	@perl -nle'print $& if m{^[a-zA-Z_-]+:.*?## .*$$}' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install dev tooling (cargo-watch, pre-commit hooks)
+install: ## Install dev tooling (cargo-watch, pre-commit hooks, tailwindcss)
 	cargo install cargo-watch --locked
 	@command -v pre-commit >/dev/null || pip install --user pre-commit
+	@command -v tailwindcss >/dev/null || brew install tailwindcss
 	pre-commit install
+
+css: ## Compile static/tailwind.css from static/tailwind.input.css
+	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --minify
+
+css-check: css ## Build CSS and fail if it differs from the committed copy
+	@git diff --exit-code -- static/tailwind.css >/dev/null \
+		|| (echo 'static/tailwind.css is stale — run `make css` and commit the result'; exit 1)
+
+css-watch: ## Rebuild CSS on every input/source change (run alongside `make watch`)
+	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --watch
 
 run: ## Run the server against the current directory
 	REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) cargo run
@@ -45,7 +56,7 @@ lint: ## Run clippy with warnings-as-errors
 check: ## Fast type-check
 	cargo check --all-targets
 
-ci: fmt-check lint check test ## Everything CI runs, in order. Fail fast.
+ci: fmt-check lint check test css-check ## Everything CI runs, in order. Fail fast.
 
 clean: ## Remove target/ and the SQLite cache
 	cargo clean

@@ -133,7 +133,7 @@ async fn static_assets_are_served() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::new();
     for path in [
-        "/static/style.css",
+        "/static/tailwind.css",
         "/static/livereload.js",
         "/static/icons/icon-192.png",
         "/static/icons/icon-512.png",

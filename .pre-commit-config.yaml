@@ -18,6 +18,15 @@ repos:
       - id: clippy
         args: ["--all-targets", "--all-features", "--", "-D", "warnings"]
 
+  - repo: local
+    hooks:
+      - id: tailwindcss
+        name: tailwindcss (compile static/tailwind.css)
+        entry: tailwindcss -i static/tailwind.input.css -o static/tailwind.css --minify
+        language: system
+        files: ^(static/tailwind\.input\.css|src/.*\.rs|static/.*\.js)$
+        pass_filenames: false
+
   - repo: https://github.com/trufflesecurity/trufflehog
     rev: v3.82.13
     hooks:

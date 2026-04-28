@@ -35,8 +35,11 @@ src/
     ws.rs           # GET /ws (progress broadcast), GET /livereload (dev reload)
     fallback.rs     # 404 handler
     templates.rs    # maud layout + reusable Tailwind class bundles (PANEL, PILL, ...)
+  push.rs           # web-push dispatcher (encrypt + sign + POST to FCM)
+  state.rs          # persistent state DB (VAPID keypair, push subscriptions, dedup)
 static/
-  style.css         # small overrides on top of Tailwind (scrollbar, body font)
+  tailwind.input.css # source for the standalone Tailwind v4 CLI (custom CSS lives here)
+  tailwind.css      # build artifact, committed to git so brew users do not need the CLI
   livereload.js     # browser reconnect-and-reload loop
   favicon.svg       # 32×32 monochrome magnifying-glass
 tests/
@@ -90,8 +93,8 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 - **`is_action_required` is a curated subset of signals, not every local/remote attr.** Only the ones that ought to pull attention: failing CI, dirty working tree, in-progress rebase/merge/cherry-pick/revert/bisect, detached HEAD. Common states (commits ahead/behind, stash present) are shown as informational pills, not urgent ones.
 - **Remote-state refresh runs in a second pass.** The main refresh stays fully local + blocking (runs inside one `spawn_blocking`). Remote-state checks run after, using tokio tasks with a bounded semaphore (8 concurrent) so N network-latency `gh` calls overlap instead of serialising. The UI shows offline data immediately and CI fills in once it lands. Failures are swallowed at `debug!` — `gh` not installed / not authenticated / rate-limited shouldn't break the dashboard.
 - **Git log is shelled out, not linked.** `src/commits.rs` runs `git log --all --no-merges` as a subprocess per repo and parses NUL-separated fields. Reasons: system `git` is everywhere, no libgit2 build pain, one subprocess per repo is cheap. Individual-repo errors are swallowed (logged at `debug!`) rather than aborting the whole scan.
-- **Templates are maud macros; CSS/JS are files.** The HTML lives in Rust (compile-time-checked), but Tailwind handles nearly all styling as utility classes on the markup. Anything awkward as a utility goes in [`static/style.css`](./static/style.css). Client JS lives under [`static/`](./static/) too — no inline `<script>` blocks. Served via `tower_http::services::ServeDir` mounted at `/static/*`.
-- **Tailwind loads via the v4 browser CDN.** No build step, no `tailwind.config.js`, no PostCSS pipeline. For reused class bundles (panel, pill, list-row) define a `pub const` in [`src/routes/templates.rs`](./src/routes/templates.rs) rather than repeating the same 6-class string across files.
+- **Templates are maud macros; CSS/JS are files.** The HTML lives in Rust (compile-time-checked), but Tailwind handles nearly all styling as utility classes on the markup. Anything awkward as a utility goes in [`static/tailwind.input.css`](./static/tailwind.input.css) below the `@import "tailwindcss"` line. Client JS lives under [`static/`](./static/) too — no inline `<script>` blocks. Served via `tower_http::services::ServeDir` mounted at `/static/*`.
+- **Tailwind compiles via the v4 standalone CLI.** Single self-contained binary (`brew install tailwindcss`), no node, no npm, no PostCSS, no `tailwind.config.js`. `make css` builds `static/tailwind.css` from `static/tailwind.input.css`; `make css-watch` rebuilds on input or `src/**/*.rs` change. Output is committed so `brew install` consumers do not need the CLI. CI runs `make css-check` to fail if the committed output is stale; the pre-commit hook regenerates it on every relevant edit. For reused class bundles (panel, pill, list-row) define a `pub const` in [`src/routes/templates.rs`](./src/routes/templates.rs) rather than repeating the same 6-class string across files.
 - **WebSocket fragments use HTMX out-of-band swaps.** The server sends `<div id="scan-status" hx-swap-oob="true">…</div>` fragments; HTMX pulls them out by id and swaps them in. Don't invent a JSON progress protocol — HTML fragments over the socket is the whole point of `hx-ext="ws"`.
 
 ## Privacy

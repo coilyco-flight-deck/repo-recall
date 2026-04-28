@@ -1,7 +1,17 @@
 /*
- * repo-recall — small overrides on top of Tailwind.
- * Palette borrowed from coilysiren.me (Roboto body, mono for technical data).
+ * Input for the Tailwind v4 standalone CLI. Compiled to
+ * static/tailwind.css by `make css` (or the pre-commit hook).
+ *
+ * Sources are explicit so the JIT only emits classes that show up in
+ * our maud templates, route handlers, or frontend JS. Tailwind v4
+ * autodetect would also work but listing them is faster and surfaces
+ * "did you forget to scan a new dir" the next time we add one.
  */
+
+@import "tailwindcss";
+
+@source "../src/**/*.rs";
+@source "./*.js";
 
 :root {
   --rr-bg: #e0dde5;
@@ -20,7 +30,7 @@ body {
   font-family: var(--rr-font-body);
 }
 
-/* Paths, UUIDs, cwds — all dense technical data reads better in monospace. */
+/* Paths, UUIDs, cwds — dense technical data reads better in monospace. */
 .font-mono,
 pre,
 code,

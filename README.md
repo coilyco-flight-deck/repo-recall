@@ -133,13 +133,13 @@ Each source gets its own SQLite table. No unified "events" table — cross-sourc
 
 **Commits.** `git log --all --no-merges` as a subprocess per repo, NUL-separated, capped at `REPO_RECALL_COMMITS_PER_REPO`. Shelling out to system `git` beats libgit2's build pain. Per-repo errors are swallowed at `debug!` — one weird repo doesn't abort the whole scan.
 
-**UI.** Server-rendered HTML via [maud](https://maud.lambda.xyz) (compile-time checked templates), styled with [Tailwind v4](https://tailwindcss.com) loaded from the browser CDN (no build step), interactivity via [htmx](https://htmx.org) + `htmx-ext-ws`. Scan progress streams as out-of-band HTML fragments over a WebSocket — htmx pulls them out by id and swaps them in. No JSON progress protocol, no client JS to speak of.
+**UI.** Server-rendered HTML via [maud](https://maud.lambda.xyz) (compile-time checked templates), styled with [Tailwind v4](https://tailwindcss.com) compiled via the standalone CLI (`make css`, output committed to `static/tailwind.css`), interactivity via [htmx](https://htmx.org) + `htmx-ext-ws`. Scan progress streams as out-of-band HTML fragments over a WebSocket — htmx pulls them out by id and swaps them in. No JSON progress protocol, no client JS to speak of.
 
 ## Privacy
 
 - Stores **metadata + a truncated 200-char summary only** — not full transcripts on disk. The transcript page re-reads the JSONL at request time.
 - Loopback only. Never listens on `0.0.0.0`, never on a shared-box socket.
-- Third-party CDNs (Tailwind, htmx) load *in the browser*, not from the server process.
+- Tailwind ships as a same-origin compiled CSS file; htmx still loads from a CDN in the browser, not from the server process.
 - One outbound call: `gh run list` for CI status. Reuses your existing `gh` auth — no tokens stored, no tokens read from env. No `gh`? The CI column stays blank.
 
 The 200-char summary can still contain pasted credentials or sensitive text. Treat the SQLite cache as sensitive (it defaults to `$TMPDIR/repo-recall.sqlite`, which most OSes wipe on reboot).

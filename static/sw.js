@@ -13,10 +13,10 @@
 //
 // See docs/push-notifications.md for the full architecture.
 
-const CACHE_VERSION = "repo-recall-shell-v1";
+const CACHE_VERSION = "repo-recall-shell-v2";
 
 const SHELL_ASSETS = [
-  "/static/style.css",
+  "/static/tailwind.css",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",
   "/static/manifest.webmanifest",
