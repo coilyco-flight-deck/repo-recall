@@ -10,6 +10,7 @@ class RepoRecall < Formula
 
   def install
     system "cargo", "install", *std_cargo_args
+    pkgshare.install "static"
   end
 
   service do
@@ -22,6 +23,7 @@ class RepoRecall < Formula
       REPO_RECALL_CWD: "#{Dir.home}/projects/coilysiren",
       REPO_RECALL_PORT: "7777",
       REPO_RECALL_DEPTH: "4",
+      REPO_RECALL_STATIC: opt_pkgshare/"static",
       PATH: "#{HOMEBREW_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     )
   end
