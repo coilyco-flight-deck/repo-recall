@@ -324,6 +324,65 @@ async fn git_log_parses_commits() {
 }
 
 #[tokio::test]
+async fn worktree_snapshot_drops_stat_stale_modifications() {
+    // Set up a real repo, commit a file, then mutate the file's mtime
+    // *without* changing its content. `git status` will report it as
+    // modified because the cached stat info no longer matches; `git diff`
+    // will be silent. Confirm the snapshot drops the phantom from the
+    // count + path sample. Untracked entries should still come through.
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join(format!("repo-recall-statestale-{}", uuid_like()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {:?}", out);
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Test User"]);
+    let tracked = dir.join("tracked.txt");
+    std::fs::write(&tracked, "hello\n").unwrap();
+    run(&["add", "tracked.txt"]);
+    run(&["commit", "-q", "-m", "add tracked.txt"]);
+
+    // Force the index to think tracked.txt's stat is stale: bump the
+    // mtime forward without rewriting bytes. `touch -t` lands a fixed
+    // future timestamp on macOS + Linux without dragging in a filetime
+    // crate just for one test.
+    let touch = Command::new("touch")
+        .args(["-t", "203012311200", tracked.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(touch.success(), "touch failed");
+
+    // Drop an untracked file alongside it so we can prove untracked
+    // counts still come through unaffected.
+    std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+
+    let snap = repo_recall::commits::worktree_snapshot(&dir, 16);
+    assert_eq!(
+        snap.total_modified, 0,
+        "stat-stale modification should be dropped, got {} modified",
+        snap.total_modified
+    );
+    assert_eq!(
+        snap.total_untracked, 1,
+        "untracked count should be unaffected by stat-stale logic"
+    );
+    assert!(
+        snap.files.iter().all(|f| f.path != "tracked.txt"),
+        "stat-stale path should not appear in the file sample"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn json_surface_is_discoverable() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()

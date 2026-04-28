@@ -451,7 +451,38 @@ pub fn worktree_snapshot(repo_path: &Path, paths_cap: usize) -> WorktreeSnapshot
             });
         }
     }
+    // Index-stat-stale phantom-dirty: `git status` reports modified files
+    // whose worktree content is byte-identical to the index, just because
+    // the cached stat info is older than the file mtime. Touched routinely
+    // by deploys / cross-host syncs / file managers. `git diff --quiet`
+    // exits 0 when the unstaged worktree-vs-index diff is empty; if status
+    // claims modifications but diff disagrees, those modifications aren't
+    // real and shouldn't fire dirty_tree. Drop them from the count and
+    // strip them from the path sample. Untracked entries are unaffected
+    // (diff doesn't see those). Mixed real-vs-stale cases keep the full
+    // count, which is acceptable noise on the side of caution. See issue
+    // [#22](https://github.com/coilysiren/repo-recall/issues/22).
+    if snap.total_modified > 0 && unstaged_diff_is_empty(repo_path) {
+        snap.total_modified = 0;
+        snap.files.retain(|f| f.kind == FileKind::Untracked);
+    }
     snap
+}
+
+/// True when `git diff --quiet` exits 0 (no unstaged differences). Any other
+/// outcome — real diff, subprocess failure, weird repo state — returns false
+/// so we keep the dirty count rather than silently masking real dirt.
+fn unstaged_diff_is_empty(repo_path: &Path) -> bool {
+    let Some(path_str) = repo_path.to_str() else {
+        return false;
+    };
+    let Ok(status) = Command::new("git")
+        .args(["-C", path_str, "diff", "--quiet"])
+        .status()
+    else {
+        return false;
+    };
+    status.success()
 }
 
 /// State of the local `gh` CLI install — drives a startup banner so the
