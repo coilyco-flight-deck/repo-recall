@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     // beyond `--version` / `--help` falls through to the server boot path.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("repo-recall {}", env!("CARGO_PKG_VERSION"));
+        println!("repo-recall {}", env!("REPO_RECALL_VERSION"));
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -181,7 +181,7 @@ Usage:
 Config is via env vars (or a .env file in cwd). See the README for the full list.
 Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD, REPO_RECALL_DEPTH.
 ",
-        ver = env!("CARGO_PKG_VERSION"),
+        ver = env!("REPO_RECALL_VERSION"),
     );
 }
 

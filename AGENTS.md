@@ -114,15 +114,14 @@ Every push to `main` triggers `.github/workflows/release.yml`, which fully autom
 
 **Per-push flow:**
 
-1. `mathieudutour/github-tag-action` computes the next semver from commits since the last tag. `default_bump: patch` means *every* push releases at least a patch.
+1. `mathieudutour/github-tag-action` computes the next semver from commits since the last tag and pushes the tag at the just-pushed commit. `default_bump: patch` means *every* push releases at least a patch.
    - plain commit → patch bump
    - `feat: …` → minor bump
    - `feat!: …` or body containing `BREAKING CHANGE:` → major bump
-2. Cargo.toml + Cargo.lock are bumped, committed back to `main` as `github-actions[bot]`, and tagged.
-3. A GitHub Release is cut with the auto-generated changelog.
-4. The `bump-tap` job downloads the new tarball, computes its sha256, and pushes the updated Formula directly to `main` on `coilysiren/homebrew-tap`. No PR.
+2. A GitHub Release is cut with the auto-generated changelog.
+3. The `bump-tap` job downloads the new tarball, computes its sha256, and pushes the updated Formula directly to `main` on `coilysiren/homebrew-tap`. No PR.
 
-**Loop safety:** the bump commit is pushed with the workflow's `GITHUB_TOKEN`, which by GitHub policy doesn't re-trigger workflows. So the release job won't recurse on its own commit, and `ci.yml` doesn't re-run on it (the *pre-bump* commit already passed CI; the bump only changes versions).
+**No bump commit on `main`.** Cargo.toml is pinned at `0.0.0-dev`. The real version comes from [`build.rs`](./build.rs), which prefers `$REPO_RECALL_VERSION` (set by the brew Formula and reproducible from a release tarball) and falls back to `git describe --tags`. This deliberately replaces the older flow that wrote a `chore: release vX.Y.Z` commit back to `main` - that commit hid CI status from the prior commit by always landing green over it.
 
 **Secret required:** `HOMEBREW_TAP_TOKEN` — fine-grained PAT scoped to `coilysiren/homebrew-tap` with `Repository permissions → Contents: Read and write`. Set via `gh secret set HOMEBREW_TAP_TOKEN --repo coilysiren/repo-recall`.
 

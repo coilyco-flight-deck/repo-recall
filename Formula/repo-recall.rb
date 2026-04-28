@@ -9,6 +9,9 @@ class RepoRecall < Formula
   depends_on "rust" => :build
 
   def install
+    # Cargo.toml is pinned at 0.0.0-dev; build.rs reads REPO_RECALL_VERSION
+    # so the installed binary reports the tag the formula was built from.
+    ENV["REPO_RECALL_VERSION"] = version.to_s
     system "cargo", "install", *std_cargo_args
     pkgshare.install "static"
   end
