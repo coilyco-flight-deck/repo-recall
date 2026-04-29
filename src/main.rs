@@ -2,7 +2,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::Router;
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -20,23 +19,20 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Subcommands. Default invocation runs the axum dashboard (existing
-    // behavior). `repo-recall mcp` runs an MCP stdio server on top of the
-    // same data layer; intended to be wired into a host's mcpServers config.
-    let mode = match args.first().map(String::as_str) {
-        Some("mcp") => Mode::Mcp,
-        Some("serve") | None => Mode::Serve,
-        Some(other) => {
-            eprintln!("repo-recall: unknown subcommand `{other}` (try `--help`)");
-            std::process::exit(2);
-        }
-    };
-
     // Load .env from cwd (or repo root when launched via cargo run) before
     // reading any env vars. Missing .env is not an error.
     let _ = dotenvy::dotenv();
 
-    init_tracing(mode);
+    // Single binary, both surfaces. The MCP server is purely additive.
+    // tracing-subscriber writer is stderr unconditionally because the MCP
+    // stdio transport reserves stdout for JSON-RPC framing.
+    tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,repo_recall=debug")),
+        )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
 
     let cwd = match std::env::var_os("REPO_RECALL_CWD") {
         Some(p) => PathBuf::from(p),
@@ -58,19 +54,15 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
 
-    // Default DB path is per-port for axum mode (so two instances on
-    // different ports don't share state) and a separate file for MCP mode
-    // (so they don't fight over the same sqlite when both run side-by-side).
+    // Default DB path is per-port so two instances (e.g. launchd-managed on
+    // 7777 and a dev binary on 7778) don't share state and wipe each other's
+    // tables during their periodic refreshes. Override with REPO_RECALL_DB.
     let db_path = std::env::var("REPO_RECALL_DB")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| match mode {
-            Mode::Serve => std::env::temp_dir().join(format!("repo-recall-{port}.sqlite")),
-            Mode::Mcp => std::env::temp_dir().join("repo-recall-mcp.sqlite"),
-        });
+        .unwrap_or_else(|_| std::env::temp_dir().join(format!("repo-recall-{port}.sqlite")));
 
-    tracing::info!("mode: {:?}", mode);
-    tracing::info!("cwd:  {}", cwd.display());
-    tracing::info!("db:   {}", db_path.display());
+    tracing::info!("cwd: {}", cwd.display());
+    tracing::info!("db:  {}", db_path.display());
 
     db::init(&db_path)?;
 
@@ -141,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
             let mut ticker =
                 tokio::time::interval(std::time::Duration::from_secs(refresh_interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await; // skip immediate first tick — initial scan covers it
+            ticker.tick().await; // skip first immediate tick — initial scan covers it
             loop {
                 ticker.tick().await;
                 if let Err(e) = routes::refresh::run_refresh(state.clone()).await {
@@ -153,39 +145,35 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("periodic refresh disabled (REPO_RECALL_REFRESH_INTERVAL_SECS=0)");
     }
 
-    match mode {
-        Mode::Serve => run_axum(state, host, port).await,
-        Mode::Mcp => mcp::run_stdio(state).await,
-    }
-}
+    // Always start MCP. Tolerate dead-stdin: in the brew-services case, stdin
+    // is /dev/null so run_stdio returns Ok almost immediately and we keep
+    // running axum. In the Claude-Desktop-spawned case, stdin is a pipe from
+    // the host and run_stdio holds it open for the session's life.
+    let mcp_state = state.clone();
+    let mcp_handle = tokio::spawn(async move {
+        if let Err(e) = mcp::run_stdio(mcp_state).await {
+            tracing::warn!("mcp stdio server exited: {e:?}");
+        }
+    });
 
-#[derive(Debug, Clone, Copy)]
-enum Mode {
-    Serve,
-    Mcp,
-}
-
-/// Tracing init. axum mode writes to stdout (or wherever the user redirects);
-/// MCP mode MUST keep stdout pristine for JSON-RPC framing, so it goes to
-/// stderr.
-fn init_tracing(mode: Mode) {
-    let env = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,repo_recall=debug"));
-    let registry = tracing_subscriber::registry().with(env);
-    match mode {
-        Mode::Serve => registry.with(tracing_subscriber::fmt::layer()).init(),
-        Mode::Mcp => registry
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .init(),
-    }
-}
-
-async fn run_axum(state: AppState, host: IpAddr, port: u16) -> anyhow::Result<()> {
-    let app: Router = routes::router(state.clone());
+    // Always try to bind axum. If the port is already in use (e.g. a brew
+    // service is already serving), log and fall back to MCP-only.
     let addr: SocketAddr = SocketAddr::new(host, port);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("listening on http://{}", addr);
-    axum::serve(listener, app).await?;
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            tracing::info!("listening on http://{}", addr);
+            let app = routes::router(state.clone());
+            axum::serve(listener, app).await?;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not bind {addr}: {e}. Skipping axum, running MCP only."
+            );
+            // MCP becomes the only foreground task. Wait on it forever (or
+            // until stdin EOFs and the host disconnects).
+            let _ = mcp_handle.await;
+        }
+    }
     Ok(())
 }
 
@@ -208,16 +196,22 @@ fn print_help() {
         "repo-recall {ver}
 Local dev dashboard that indexes Claude Code session history against your repos.
 
+Always runs both an axum dashboard (HTTP) and an MCP App server (stdio) in
+one process. The dashboard binds $REPO_RECALL_HOST:$REPO_RECALL_PORT (default
+127.0.0.1:7777). The MCP server reads JSON-RPC from stdin and writes to
+stdout, so wire it into your host's mcpServers config with the bare command.
+
+If the HTTP port is already in use (e.g. another instance is already running
+under brew services), this instance falls back to MCP-only.
+
 Usage:
-  repo-recall [serve]      run the axum dashboard server (default).
-                           Binds $REPO_RECALL_HOST:$REPO_RECALL_PORT (default 127.0.0.1:7777).
-  repo-recall mcp          run as an MCP stdio server. Wire into your host's
-                           mcpServers config (Claude Desktop, ChatGPT, mcp-preview).
+  repo-recall              start both (default)
   repo-recall --version    print version and exit
   repo-recall --help       print this help and exit
 
-Config is via env vars (or a .env file in cwd). See the README for the full list.
-Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD, REPO_RECALL_DEPTH.
+Config is via env vars (or a .env file in cwd). See the README for the full
+list. Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD,
+REPO_RECALL_DEPTH.
 ",
         ver = env!("REPO_RECALL_VERSION"),
     );

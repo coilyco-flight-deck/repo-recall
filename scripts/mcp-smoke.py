@@ -11,7 +11,7 @@ env = os.environ.copy()
 env.update({"REPO_RECALL_CWD":"/tmp","REPO_RECALL_DB":"/tmp/mcp-smoke.sqlite","REPO_RECALL_REFRESH_INTERVAL_SECS":"0","RUST_LOG":"warn"})
 
 proc = subprocess.Popen(
-    ["./target/debug/repo-recall", "mcp"],
+    ["./target/debug/repo-recall"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     env=env,
 )

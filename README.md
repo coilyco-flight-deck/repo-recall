@@ -56,12 +56,9 @@ The HTML repo-list cards also carry `data-repo-id`, `data-repo-name`, `data-acti
 
 ## Use it as an MCP App
 
-repo-recall is also an [MCP App](https://github.com/modelcontextprotocol/ext-apps) server. Same data, same scan loop, but exposed to MCP hosts (Claude Desktop, ChatGPT, mcp-preview, ...) as tools and a renderable widget instead of HTTP routes. Run with the `mcp` subcommand:
+repo-recall is also an [MCP App](https://github.com/modelcontextprotocol/ext-apps) server. Same data, same scan loop, but exposed to MCP hosts (Claude Desktop, ChatGPT, mcp-preview, ...) as tools and a renderable widget. Both surfaces always run in one process: the binary boots the axum dashboard *and* the MCP stdio server simultaneously, so a single brew-installed binary serves your browser AND your MCP host without needing two installs.
 
-```sh
-repo-recall mcp        # MCP stdio server (no HTTP listener)
-repo-recall            # axum dashboard (default; same as before)
-```
+If the HTTP port is already in use (because another instance is already serving under `brew services` for example), the new instance falls back gracefully to MCP-only.
 
 For Claude Desktop, drop this into `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -70,7 +67,6 @@ For Claude Desktop, drop this into `~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "repo-recall": {
       "command": "repo-recall",
-      "args": ["mcp"],
       "env": {
         "REPO_RECALL_CWD": "/Users/you/projects",
         "REPO_RECALL_DEPTH": "4"
@@ -81,8 +77,6 @@ For Claude Desktop, drop this into `~/Library/Application Support/Claude/claude_
 ```
 
 Six tools are exposed: `recall_dashboard` (with widget), `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_refresh`. The dashboard widget renders inside the host's iframe.
-
-The HTTP and MCP modes are independent processes — running both side-by-side is fine and they each get their own SQLite cache by default.
 
 ## Quick start
 
