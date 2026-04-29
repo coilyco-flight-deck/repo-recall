@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{activity, db, refresh, AppState};
+use crate::{activity, db, routes, AppState};
 
 // -----------------------------------------------------------------------------
 // recall_dashboard
@@ -300,7 +300,7 @@ pub async fn refresh(
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
     let before = state.scan_version.load(Ordering::Acquire);
-    let stats = refresh::run_refresh(state.clone())
+    routes::refresh::run_refresh(state.clone())
         .await
         .map_err(|e| pmcp::Error::internal(format!("refresh: {e}")))?;
     let after = state.scan_version.load(Ordering::Acquire);
@@ -309,9 +309,8 @@ pub async fn refresh(
     Ok(json!({
         "scan_version_before": before,
         "scan_version_after": after,
-        "ran": stats.ran,
+        "ran": after > before,
         "last_scan": last_scan,
-        "stats": stats,
     }))
 }
 

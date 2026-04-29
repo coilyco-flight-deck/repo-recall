@@ -1,0 +1,87 @@
+name: demo-image
+
+# Builds the public demo image, smoke-tests it locally on the runner, and
+# pushes to ghcr.io/coilysiren/repo-recall-demo on every push to main. Pull
+# requests also build + smoke (so a broken Dockerfile or fixture-rotting
+# parser change fails the gate) but skip the push.
+#
+# Untrusted-input note: this workflow only interpolates `${{ ... }}` into
+# `with:` parameters and `if:` conditions, never into `run:` shell strings.
+# That's the standard GH Actions injection-safety boundary - the only
+# field where command injection matters is `run:`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/coilysiren/repo-recall-demo
+
+jobs:
+  build:
+    name: build, smoke, push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Login is conditional so PRs from forks (no ghcr write) don't fail
+      # the auth step before they even try to build.
+      - name: login to ghcr
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # `latest` for main, plus a sha-based tag for traceability and a
+          # branch-named tag so PR builds stay distinguishable when a
+          # contributor has push rights.
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build the image into the local docker daemon (load: true) so the
+      # smoke harness can `docker run` it. We rebuild + push in a second
+      # step on main only; the wins from buildx caching keep the second
+      # build cheap.
+      - name: build (load only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.demo
+          load: true
+          tags: repo-recall-demo:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test
+        run: bash scripts/docker-demo-smoke.sh repo-recall-demo:smoke 7777
+
+      - name: push (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.demo
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
