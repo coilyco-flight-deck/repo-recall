@@ -166,9 +166,7 @@ async fn main() -> anyhow::Result<()> {
             axum::serve(listener, app).await?;
         }
         Err(e) => {
-            tracing::warn!(
-                "could not bind {addr}: {e}. Skipping axum, running MCP only."
-            );
+            tracing::warn!("could not bind {addr}: {e}. Skipping axum, running MCP only.");
             // MCP becomes the only foreground task. Wait on it forever (or
             // until stdin EOFs and the host disconnects).
             let _ = mcp_handle.await;
