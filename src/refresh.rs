@@ -1,37 +1,31 @@
+//! Repo + session + commit + remote-state scan loop.
+//!
+//! Runs at startup, then on a fixed cadence in a background tokio task, and
+//! on-demand when the `recall_refresh` MCP tool is invoked. The MCP host has
+//! no live channel into a long-running scan, so progress lands in tracing
+//! logs rather than a broadcast.
+
 use std::path::PathBuf;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use chrono::Utc;
 use rusqlite::params;
 
 use crate::AppState;
-use crate::{commits, db, join, push, scanner, sessions};
+use crate::{commits, db, join, scanner, sessions};
 
-pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
-    tokio::spawn(async move {
-        if let Err(e) = run_refresh(state).await {
-            tracing::error!("refresh failed: {e:?}");
-        }
-    });
-    (StatusCode::ACCEPTED, "refresh started")
-}
-
-pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
-    // Prevent overlapping refreshes.
+pub async fn run_refresh(state: AppState) -> anyhow::Result<RefreshStats> {
+    // Prevent overlapping refreshes. A second invocation while one is in
+    // flight returns the no-op marker so callers can distinguish "ran" from
+    // "coalesced."
     let _guard = match state.refresh_lock.try_lock() {
         Ok(g) => g,
         Err(_) => {
-            let _ = state
-                .progress_tx
-                .send(status_fragment("refresh already in progress…"));
-            return Ok(());
+            tracing::info!("refresh already in progress, skipping");
+            return Ok(RefreshStats::coalesced());
         }
     };
 
-    let tx = state.progress_tx.clone();
-    let _ = tx.send(status_fragment("starting refresh…"));
+    tracing::info!("starting refresh");
 
     let cwd = state.cwd.clone();
     let db_path = state.db_path.clone();
@@ -75,25 +69,24 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 
         // --- sessions ---
         let Some(projects_dir) = sessions::default_projects_dir() else {
-            // No Claude projects dir — still try commits before bailing.
-            let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo, &tx)?;
+            let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo)?;
             return Ok(RefreshStats {
                 repos: repos_n,
                 sessions: 0,
                 links: 0,
                 commits: commits_n,
                 skipped: 0,
+                ran: true,
             });
         };
         let files = sessions::list_session_files(&projects_dir)?;
-        let total_files = files.len();
 
         let mut inserted = 0usize;
         let mut skipped = 0usize;
         let mut links = 0usize;
 
         let tx_ins = conn.unchecked_transaction()?;
-        for (i, path) in files.iter().enumerate() {
+        for path in files.iter() {
             match sessions::parse_session_file(path) {
                 Ok(Some(rec)) => {
                     let res = tx_ins.execute(
@@ -118,7 +111,6 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
                         ],
                     )?;
                     if res == 0 {
-                        // Duplicate UUID across files — skip.
                         skipped += 1;
                         continue;
                     }
@@ -142,18 +134,13 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
                     skipped += 1;
                 }
             }
-            // Emit progress every 50 files.
-            if (i + 1) % 50 == 0 || i + 1 == total_files {
-                let msg = format!("indexing sessions… {}/{}", i + 1, total_files);
-                let _ = tx.send(status_fragment(&msg));
-            }
         }
         tx_ins.commit()?;
 
-        // --- commits (git log per repo) ---
-        let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo, &tx)?;
+        // --- commits ---
+        let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo)?;
 
-        // --- search index (rebuilt from the populated tables) ---
+        // --- search index ---
         db::rebuild_search_index(&conn)?;
 
         Ok(RefreshStats {
@@ -162,98 +149,44 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
             links,
             commits: commits_n,
             skipped,
+            ran: true,
         })
     })
     .await?;
 
     let stats = match result {
         Ok(s) => {
-            let msg = format!(
-                "done — {} repos, {} sessions, {} links, {} commits ({} skipped). \
-                 checking CI…",
+            tracing::info!(
+                "core refresh done: {} repos, {} sessions, {} links, {} commits ({} skipped)",
                 s.repos, s.sessions, s.links, s.commits, s.skipped,
             );
-            let _ = state.progress_tx.send(status_fragment(&msg));
             s
         }
         Err(e) => {
-            let _ = state
-                .progress_tx
-                .send(status_fragment(&format!("error: {e}")));
-            return Ok(());
+            tracing::error!("refresh failed: {e:?}");
+            return Ok(RefreshStats::failed());
         }
     };
 
-    // Second pass: CI/CD status + PR + issue counts. Separate from the main
-    // blocking refresh so we can run `gh` subprocesses concurrently (tokio
-    // spawn + spawn_blocking) rather than serializing N×network-latency
-    // into the scan time. Runs after the main refresh has already surfaced
-    // its counts, so the UI updates as soon as the offline data is ready
-    // and the remote stuff fills in later.
-    let ci_updated = ingest_ci_status(state.clone()).await;
-
-    // 2.5: snapshot the user's "active" GitHub repos (regardless of whether
-    // they're cloned into this scan tree). Populates the dashboard's
-    // "clone one" panel. Best-effort — `gh` missing / unauthenticated leaves
-    // the table empty.
-    let _active_repos_n = ingest_active_repos(state.clone()).await;
-
-    // Third pass: content-mention matching. Walks every session JSONL
-    // looking for bare-word hits on known repo names. Separate because:
-    // (a) it's heavy — N sessions × M repos of string-scanning; (b) it's
-    // best-effort, so overcounting is OK and users see a "fuzzy" admission.
-    let content_matches = ingest_content_mentions(state.clone()).await;
-
-    // Fourth pass: push-notify newly-appeared action-required signals.
-    // Best-effort. Failures (no subscriptions, no openssl, FCM hiccup,
-    // network down) are logged and swallowed. The diff_and_record_signals
-    // call in dispatch_pending_pushes is the source of truth for "new since
-    // last scan" so a server restart does not re-fire every broken repo.
-    let push_outcome = dispatch_pending_pushes(state.clone()).await;
+    // Remote-state passes. Best-effort. Failures (gh missing, rate-limited,
+    // network down) are swallowed at debug! level — they shouldn't break the
+    // dashboard.
+    let _ci_updated = ingest_ci_status(state.clone()).await;
+    let _active_n = ingest_active_repos(state.clone()).await;
+    let _content_n = ingest_content_mentions(state.clone()).await;
 
     *state.last_scan.lock().await = Some(Utc::now());
     state
         .scan_version
         .fetch_add(1, std::sync::atomic::Ordering::Release);
-    let msg = format!(
-        "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches, {} push (sent {}, gone {}, fail {}) ({} skipped)",
-        stats.repos,
-        stats.sessions,
-        stats.links,
-        stats.commits,
-        ci_updated,
-        content_matches,
-        push_outcome.new_signals,
-        push_outcome.pushes_sent,
-        push_outcome.gone_subscriptions,
-        push_outcome.pushes_failed,
-        stats.skipped,
-    );
-    let _ = state.progress_tx.send(status_fragment(&msg));
-    // Sentinel: tells the dashboard's reload observer that fresh data is
-    // available. OOB-swap outerHTML of the hidden #dashboard-reload-sentinel
-    // span so a MutationObserver in dashboard-reload.js sees the
-    // `data-reload-trigger` attribute and fires location.reload(). The span
-    // only exists on the dashboard — detail pages have no swap target, so
-    // they don't reload mid-read.
-    let _ = state.progress_tx.send(
-        r#"<span id="dashboard-reload-sentinel" hx-swap-oob="true" data-reload-trigger="1" style="display:none"></span>"#
-            .to_string(),
-    );
-    Ok(())
+
+    Ok(stats)
 }
 
-/// Best-effort word-boundary content match: for each session file we've
-/// indexed, read it once and add `session_repos` rows with
-/// `match_type = 'content_mention'` for any repo whose name appears as a
-/// bare word. Runs inside a single `spawn_blocking` — IO-heavy rather than
-/// CPU-heavy, and serial is fine since a few dozen MB of JSONL parses fast.
 async fn ingest_content_mentions(state: AppState) -> usize {
     let db_path = state.db_path.clone();
-    let tx = state.progress_tx.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
         let conn = db::open(&db_path)?;
-        // Needles: prefer the basename since that's what shows up in prose.
         let mut stmt = conn.prepare("SELECT id, name FROM repos")?;
         let needles: Vec<(i64, String)> = stmt
             .query_map([], |row| {
@@ -270,11 +203,10 @@ async fn ingest_content_mentions(state: AppState) -> usize {
             .filter_map(|r| r.ok())
             .collect();
 
-        let total = sessions.len();
         let mut inserted = 0usize;
         let tx_ins = conn.unchecked_transaction()?;
-        for (i, (session_id, path)) in sessions.iter().enumerate() {
-            let hits = crate::sessions::mentions_in_file(std::path::Path::new(path), &needles);
+        for (session_id, path) in sessions.iter() {
+            let hits = sessions_mod_mentions(std::path::Path::new(path), &needles);
             for repo_id in hits {
                 let n = tx_ins.execute(
                     "INSERT OR IGNORE INTO session_repos
@@ -283,13 +215,6 @@ async fn ingest_content_mentions(state: AppState) -> usize {
                     rusqlite::params![session_id, repo_id],
                 )?;
                 inserted += n;
-            }
-            if (i + 1) % 25 == 0 || i + 1 == total {
-                let _ = tx.send(status_fragment(&format!(
-                    "scanning sessions for repo mentions… {}/{}",
-                    i + 1,
-                    total
-                )));
             }
         }
         tx_ins.commit()?;
@@ -301,13 +226,11 @@ async fn ingest_content_mentions(state: AppState) -> usize {
     .unwrap_or(0)
 }
 
-/// Parallel `gh run list` across every repo with a GitHub remote + known
-/// default branch. Returns how many rows we successfully updated. Each
-/// subprocess runs in its own `spawn_blocking` so network latency overlaps;
-/// a bounded `JoinSet` caps in-flight `gh` calls to avoid fork-bombing.
+fn sessions_mod_mentions(path: &std::path::Path, needles: &[(i64, String)]) -> Vec<i64> {
+    crate::sessions::mentions_in_file(path, needles)
+}
+
 async fn ingest_ci_status(state: AppState) -> usize {
-    // Re-probe `gh` on every refresh — the user may have installed it or
-    // logged in since startup, and the banner should update.
     let health = tokio::task::spawn_blocking(commits::gh_health)
         .await
         .unwrap_or(commits::GhHealth::Missing);
@@ -315,7 +238,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
     if health != commits::GhHealth::Ok {
         return 0;
     }
-    // Re-probe viewer login so it updates if the user switched accounts.
     let my_login = tokio::task::spawn_blocking(commits::my_gh_login)
         .await
         .ok()
@@ -323,13 +245,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
     *state.my_gh_login.lock().await = my_login.clone();
     let my_login = my_login.unwrap_or_default();
 
-    // Pull the candidate list off one blocking DB read. Order by most-recent
-    // commit (LEFT JOIN — repos with no commits sort to the bottom) so the
-    // optional `LIMIT` keeps the activity-rich repos and drops dormant ones.
-    // Repos beyond the cap get NULL remote-state fields this cycle; once
-    // they see a fresh commit they bubble back into the window. Acceptable
-    // because the schema is wiped on every refresh anyway, so "no remote
-    // data" is the natural quiet state.
     let target_limit = state.remote_target_limit;
     let targets = {
         let db_path = state.db_path.clone();
@@ -338,25 +253,25 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 let conn = db::open(&db_path)?;
                 let sql = if target_limit == 0 {
                     "SELECT r.id, r.remote_url, r.default_branch, r.path
-                 FROM repos r
-                 LEFT JOIN (
-                     SELECT repo_id, MAX(timestamp) AS latest_ts
-                     FROM commits GROUP BY repo_id
-                 ) c ON c.repo_id = r.id
-                 WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
-                 ORDER BY COALESCE(c.latest_ts, 0) DESC"
-                        .to_string()
-                } else {
-                    format!(
-                        "SELECT r.id, r.remote_url, r.default_branch, r.path
                      FROM repos r
                      LEFT JOIN (
                          SELECT repo_id, MAX(timestamp) AS latest_ts
                          FROM commits GROUP BY repo_id
                      ) c ON c.repo_id = r.id
                      WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
-                     ORDER BY COALESCE(c.latest_ts, 0) DESC
-                     LIMIT {target_limit}"
+                     ORDER BY COALESCE(c.latest_ts, 0) DESC"
+                        .to_string()
+                } else {
+                    format!(
+                        "SELECT r.id, r.remote_url, r.default_branch, r.path
+                         FROM repos r
+                         LEFT JOIN (
+                             SELECT repo_id, MAX(timestamp) AS latest_ts
+                             FROM commits GROUP BY repo_id
+                         ) c ON c.repo_id = r.id
+                         WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
+                         ORDER BY COALESCE(c.latest_ts, 0) DESC
+                         LIMIT {target_limit}"
                     )
                 };
                 let mut stmt = conn.prepare(&sql)?;
@@ -382,9 +297,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
         }
     };
 
-    // Filter to repos we actually know how to query (GitHub-hosted only).
-    // Sniff the deploy workflow on disk up front so the gh subprocess block
-    // can fan out without re-touching the filesystem.
     let jobs: Vec<_> = targets
         .into_iter()
         .filter_map(|(id, url, branch, path)| {
@@ -399,8 +311,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
         return 0;
     }
 
-    // Bounded concurrency: 8 concurrent `gh` processes is plenty without
-    // hammering the rate limit or fork-bombing the laptop.
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
     let mut set = tokio::task::JoinSet::new();
     for (id, slug, branch, deploy_wf) in jobs {
@@ -408,11 +318,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
         let login = my_login.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
-            // Fan out CI + PRs + issues + deploy health in one blocking
-            // block so the subprocess cost is sequential-per-repo but
-            // overlapping across repos (bounded by the semaphore). PRs +
-            // issues share one GraphQL call; deploy health is one extra
-            // `gh run list` only when a deploy workflow exists.
             tokio::task::spawn_blocking(move || {
                 let ci = commits::ci_status(&slug, &branch);
                 let (prs, issues) = match commits::fetch_pr_and_issue_counts(&slug, &login) {
@@ -435,33 +340,22 @@ async fn ingest_ci_status(state: AppState) -> usize {
         });
     }
 
-    // Collect + write in one sweep. Keeps the SQLite write lock short.
     let mut results: Vec<RemoteSnapshot> = Vec::with_capacity(total);
-    let tx = state.progress_tx.clone();
-    let mut done = 0usize;
     while let Some(res) = set.join_next().await {
-        done += 1;
         if let Ok(Some(snap)) = res {
             results.push(snap);
-        }
-        if done.is_multiple_of(10) || done == total {
-            let _ = tx.send(status_fragment(&format!("remote state… {done}/{total}")));
         }
     }
 
     let db_path = state.db_path.clone();
-    let updated = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
         let conn = db::open(&db_path)?;
         let tx_ins = conn.unchecked_transaction()?;
         let mut n = 0usize;
         for snap in results {
             let prs = snap.prs.unwrap_or_default();
-            let issues = snap.issues.unwrap_or_default();
-            // Pass the totals as Option<i64> so a `None` from the GraphQL
-            // call leaves the existing column untouched (COALESCE), matching
-            // how `ci_status` is treated when the gh subprocess fails.
-            let issues_total: Option<i64> = snap.issues.map(|i| i.open);
-            let issues_assigned: Option<i64> = snap.issues.map(|_| issues.assigned_to_me);
+            let issues_total: Option<i64> = snap.issues.as_ref().map(|i| i.open);
+            let issues_assigned: Option<i64> = snap.issues.as_ref().map(|i| i.assigned_to_me);
             let (deploy_wf, deploy_status, deploy_last_success) = match &snap.deploy {
                 Some((wf, h)) => (Some(wf.clone()), h.status.clone(), h.last_success_ts),
                 None => (None, None, None),
@@ -501,14 +395,9 @@ async fn ingest_ci_status(state: AppState) -> usize {
     .await
     .ok()
     .and_then(|r| r.ok())
-    .unwrap_or(0);
-    updated
+    .unwrap_or(0)
 }
 
-/// Snapshot the viewer's GitHub repos via `gh repo list` and write them into
-/// `active_remote_repos`. Skipped silently when `gh` is missing or
-/// unauthenticated. Caps at 100 repos — enough to surface the user's active
-/// workspace, small enough not to balloon the gh API budget.
 async fn ingest_active_repos(state: AppState) -> usize {
     if *state.gh_health.lock().await != commits::GhHealth::Ok {
         return 0;
@@ -544,58 +433,6 @@ async fn ingest_active_repos(state: AppState) -> usize {
     .unwrap_or(0)
 }
 
-/// Reconcile the persistent seen-signals set with this scan's
-/// action-required ids and fire one push per stored subscription for
-/// each genuinely-new id. Always returns an outcome (never errors out
-/// of the refresh) — push is best-effort.
-async fn dispatch_pending_pushes(state: AppState) -> push::DispatchOutcome {
-    // Pull the repo list off one blocking DB read; building the
-    // ActionRequiredItem-equivalent in-thread keeps SQLite I/O off the
-    // async runtime.
-    let repos = {
-        let db_path = state.db_path.clone();
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::Repo>> {
-            let conn = db::open(&db_path)?;
-            db::list_repos_with_counts(&conn)
-        })
-        .await
-        {
-            Ok(Ok(rs)) => rs,
-            _ => return push::DispatchOutcome::default(),
-        }
-    };
-
-    // Flatten (repo, signal, detail) into a parallel pair of (id, payload).
-    // Keep them aligned so diff_and_record_signals can return ids and we
-    // can look the matching payload back up by index.
-    let mut all_ids: Vec<String> = Vec::new();
-    let mut all_payloads: Vec<push::PushPayload> = Vec::new();
-    for r in &repos {
-        for sig in crate::routes::api::derive_action_signals(r) {
-            let payload = push::payload_for(r.id, &r.name, sig.signal, &sig.detail);
-            all_ids.push(payload.signal_id.clone());
-            all_payloads.push(payload);
-        }
-    }
-
-    let new_ids = match state.state_db.diff_and_record_signals(&all_ids) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("diff_and_record_signals failed: {e:?}");
-            return push::DispatchOutcome::default();
-        }
-    };
-
-    // Map the returned new ids back to their payloads, preserving order.
-    let new_set: std::collections::HashSet<&String> = new_ids.iter().collect();
-    let new_payloads: Vec<push::PushPayload> = all_payloads
-        .into_iter()
-        .filter(|p| new_set.contains(&p.signal_id))
-        .collect();
-
-    push::dispatch_for_signals(&state.state_db, new_payloads).await
-}
-
 struct RemoteSnapshot {
     id: i64,
     ci: Option<String>,
@@ -604,30 +441,35 @@ struct RemoteSnapshot {
     deploy: Option<(String, commits::DeployHealth)>,
 }
 
-struct RefreshStats {
-    repos: usize,
-    sessions: usize,
-    links: usize,
-    commits: usize,
-    skipped: usize,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefreshStats {
+    pub repos: usize,
+    pub sessions: usize,
+    pub links: usize,
+    pub commits: usize,
+    pub skipped: usize,
+    /// `false` when the call coalesced with an in-flight refresh.
+    pub ran: bool,
 }
 
-/// Run `git log` in every discovered repo and bulk-insert the results.
-/// Progress events go out every 5 repos so the user sees movement on large
-/// workspaces without drowning the socket in HTML fragments.
-/// Also computes 30-day LOC churn in the same sweep (second git subprocess
-/// per repo) and updates the `repos` row.
+impl RefreshStats {
+    fn coalesced() -> Self {
+        Self { repos: 0, sessions: 0, links: 0, commits: 0, skipped: 0, ran: false }
+    }
+    fn failed() -> Self {
+        Self { repos: 0, sessions: 0, links: 0, commits: 0, skipped: 0, ran: false }
+    }
+}
+
 fn ingest_commits(
     conn: &rusqlite::Connection,
     repos: &[(i64, PathBuf)],
     limit_per_repo: usize,
-    tx: &tokio::sync::broadcast::Sender<String>,
 ) -> anyhow::Result<usize> {
-    let total_repos = repos.len();
     let mut total_commits = 0usize;
     let churn_cutoff = chrono::Utc::now().timestamp() - 30 * 86_400;
     let tx_ins = conn.unchecked_transaction()?;
-    for (i, (repo_id, repo_path)) in repos.iter().enumerate() {
+    for (repo_id, repo_path) in repos.iter() {
         match commits::scan(repo_path, limit_per_repo) {
             Ok(records) => {
                 for rec in &records {
@@ -651,8 +493,6 @@ fn ingest_commits(
                 tracing::debug!("commits scan failed in {}: {e}", repo_path.display());
             }
         }
-        // Per-file change records for the last 30d — source of truth for
-        // both the scalar churn total and the hotspot query on repo detail.
         let file_changes = commits::file_changes_since(repo_path, churn_cutoff);
         let churn: i64 = file_changes
             .iter()
@@ -674,8 +514,6 @@ fn ingest_commits(
                 ],
             )?;
         }
-        // Cap per-repo at 50 paths: enough for the dashboard sample, small
-        // enough that a pathological refactor can't blow up the DB.
         let snap = commits::worktree_snapshot(repo_path, 50);
         let local = commits::local_state(repo_path);
         tx_ins.execute(
@@ -702,27 +540,7 @@ fn ingest_commits(
                 rusqlite::params![repo_id, f.path, f.kind.as_str()],
             )?;
         }
-        if (i + 1) % 5 == 0 || i + 1 == total_repos {
-            let _ = tx.send(status_fragment(&format!(
-                "indexing commits + churn… {}/{}",
-                i + 1,
-                total_repos
-            )));
-        }
     }
     tx_ins.commit()?;
     Ok(total_commits)
-}
-
-/// HTML fragment that HTMX will swap into #scan-status via out-of-band swap.
-/// Carries the same class string as the initial template render — without
-/// it, every status update strips the banner's styling. Built with `maud`
-/// so escaping is handled by the template engine rather than by hand.
-fn status_fragment(text: &str) -> String {
-    maud::html! {
-        div id="scan-status" hx-swap-oob="true" class=(crate::routes::templates::SCAN_STATUS) {
-            (text)
-        }
-    }
-    .into_string()
 }
