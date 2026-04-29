@@ -12,9 +12,7 @@
 
 use std::sync::atomic::Ordering;
 
-use pmcp::{
-    ResourceCollection, Server, ServerCapabilities, TypedTool, UIResourceBuilder,
-};
+use pmcp::{ResourceCollection, Server, ServerCapabilities, TypedTool, UIResourceBuilder};
 
 use crate::AppState;
 
@@ -33,8 +31,8 @@ pub async fn run_stdio(state: AppState) -> anyhow::Result<()> {
             .build_with_contents()
             .map_err(|e| anyhow::anyhow!("UIResourceBuilder failed: {e:?}"))?;
 
-    let resources = ResourceCollection::new()
-        .add_ui_resource(dashboard_resource, dashboard_contents);
+    let resources =
+        ResourceCollection::new().add_ui_resource(dashboard_resource, dashboard_contents);
 
     // Tools.
     let dashboard = {

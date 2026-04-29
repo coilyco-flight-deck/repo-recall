@@ -158,7 +158,11 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<RefreshStats> {
         Ok(s) => {
             tracing::info!(
                 "core refresh done: {} repos, {} sessions, {} links, {} commits ({} skipped)",
-                s.repos, s.sessions, s.links, s.commits, s.skipped,
+                s.repos,
+                s.sessions,
+                s.links,
+                s.commits,
+                s.skipped,
             );
             s
         }
@@ -454,10 +458,24 @@ pub struct RefreshStats {
 
 impl RefreshStats {
     fn coalesced() -> Self {
-        Self { repos: 0, sessions: 0, links: 0, commits: 0, skipped: 0, ran: false }
+        Self {
+            repos: 0,
+            sessions: 0,
+            links: 0,
+            commits: 0,
+            skipped: 0,
+            ran: false,
+        }
     }
     fn failed() -> Self {
-        Self { repos: 0, sessions: 0, links: 0, commits: 0, skipped: 0, ran: false }
+        Self {
+            repos: 0,
+            sessions: 0,
+            links: 0,
+            commits: 0,
+            skipped: 0,
+            ran: false,
+        }
     }
 }
 

@@ -110,8 +110,7 @@ pub async fn dashboard(
         action_required,
     };
 
-    serde_json::to_value(result)
-        .map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+    serde_json::to_value(result).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
 }
 
 // -----------------------------------------------------------------------------
