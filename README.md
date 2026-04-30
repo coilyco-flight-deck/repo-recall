@@ -2,7 +2,7 @@
 
 > *"Wait — which Claude Code session was the one where I figured out the CI flake?"*
 
-You've got dozens of repos on disk, hundreds of [Claude Code](https://claude.com/claude-code) sessions in `~/.claude/projects/`, and no way to connect the two. repo-recall is a tiny local web app that indexes both and joins them. Two questions, two clicks:
+You've got dozens of repos on disk, hundreds of [Claude Code](https://claude.com/claude-code) sessions in `~/.claude/projects/`, and no way to connect the two. repo-recall is a tiny local web app that joins three data sources you already have - **git** (commits, churn, working tree), **gh** (CI, PRs, issues, deploys), and **Claude Code** (sessions) - keyed to the same set of discovered repos. Two questions, two clicks:
 
 - **Which sessions touched this repo?** — open the repo, see every session that had it as `cwd`.
 - **Which repos did this session touch?** — open the session, see every repo it crossed.
@@ -159,11 +159,13 @@ A `.env` in the repo root is loaded automatically — drop your `REPO_RECALL_*` 
 
 ## How it actually works
 
-Three independent data sources, all keyed to the same set of discovered repos:
+Three input taps, all keyed to the same set of discovered repos:
 
-- **Historical** *(past activity, offline, cheap)* — sessions, commits in the last 30 days, LOC churn, unique authors. The bulk of what the dashboard shows.
-- **Current local state** *(working tree right now, offline, cheap)* — untracked + modified file counts, plus a sampled list of paths on the right column. Answers "what have I left lying around?"
-- **Current remote state** *(network call, parallel post-pass, best-effort)* — GitHub Actions status on the default branch via `gh run list`. Failures surface as a prominent pill; a missing or unauthenticated `gh` degrades silently.
+- **git** — `git log --all --no-merges` for commits / LOC churn / unique-author counts in the last 30 days, plus working-tree inspection for untracked + modified file counts. Offline, cheap, the bulk of what the dashboard shows.
+- **gh** — `gh run list` for CI status on the default branch, plus PRs awaiting your review, issues assigned to you, deploy workflow health, and open-PR counts. Network call, parallel post-pass, best-effort. Missing or unauthenticated `gh` degrades silently.
+- **Claude Code** — `~/.claude/projects/**/*.jsonl` parsed for session metadata (id, timestamps, message count, cost, cwd) and joined to repos by `cwd`. Offline, cheap.
+
+Internally these are bucketed into three refresh categories — **Historical** (past activity, offline), **LocalState** (working tree right now, offline), **RemoteState** (network, parallel post-pass) — which drives *how* each attribute is refreshed and *how* it's rendered. See [`activity::Category`](./src/activity.rs).
 
 Each source gets its own SQLite table. No unified "events" table — cross-source views are a query-time concern. The schema is wiped and rebuilt on every process start, which trades a few seconds of scan time for zero migration code and zero stale-state bugs.
 
