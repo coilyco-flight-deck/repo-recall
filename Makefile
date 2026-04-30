@@ -10,9 +10,11 @@ demo_port  ?= 7777
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
 # do `REPO_RECALL_CWD=$(pwd) make -C repo-recall run` from a parent dir.
-cwd   ?= $(or $(REPO_RECALL_CWD),$(CURDIR))
-port  ?= $(or $(REPO_RECALL_PORT),7777)
-depth ?= $(or $(REPO_RECALL_DEPTH),4)
+cwd        ?= $(or $(REPO_RECALL_CWD),$(CURDIR))
+port       ?= $(or $(REPO_RECALL_PORT),7777)
+depth      ?= $(or $(REPO_RECALL_DEPTH),4)
+https_host ?= repo-recall.localhost
+https_port ?= 7443
 
 help: ## Show this help
 	@perl -nle'print $& if m{^[a-zA-Z_-]+:.*?## .*$$}' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -37,12 +39,20 @@ css-check: css ## Rebuild CSS and warn if it drifted from the committed copy
 css-watch: ## Rebuild CSS on every input/source change (run alongside `make watch`)
 	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --watch
 
-run: ## Run the server against the current directory
-	REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) cargo run
+run: ## Run the server (cargo + caddy https proxy at https://$(https_host):$(https_port))
+	@caddy reverse-proxy --from https://$(https_host):$(https_port) --to 127.0.0.1:$(port) --internal-certs > /tmp/repo-recall-caddy.log 2>&1 & \
+		CADDY_PID=$$!; \
+		trap "kill $$CADDY_PID 2>/dev/null" EXIT INT TERM; \
+		echo "caddy: https://$(https_host):$(https_port) -> 127.0.0.1:$(port) (log: /tmp/repo-recall-caddy.log)"; \
+		REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) cargo run
 
-watch: ## Run under cargo-watch (rebuild + browser livereload on save)
-	REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) \
-		cargo watch -w src -w Cargo.toml -w static -x run
+watch: ## cargo-watch + caddy https proxy at https://$(https_host):$(https_port)
+	@caddy reverse-proxy --from https://$(https_host):$(https_port) --to 127.0.0.1:$(port) --internal-certs > /tmp/repo-recall-caddy.log 2>&1 & \
+		CADDY_PID=$$!; \
+		trap "kill $$CADDY_PID 2>/dev/null" EXIT INT TERM; \
+		echo "caddy: https://$(https_host):$(https_port) -> 127.0.0.1:$(port) (log: /tmp/repo-recall-caddy.log)"; \
+		REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) \
+			cargo watch -w src -w Cargo.toml -w static -x run
 
 build: ## cargo build (dev)
 	cargo build

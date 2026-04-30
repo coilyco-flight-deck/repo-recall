@@ -11,8 +11,12 @@
 //! - `recall_refresh` — trigger a rescan.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
+use axum::Router;
+use pmcp::server::axum_router::{router_with_config, AllowedOrigins, RouterConfig};
 use pmcp::{ResourceCollection, Server, ServerCapabilities, TypedTool, UIResourceBuilder};
+use tokio::sync::Mutex;
 
 use crate::AppState;
 
@@ -21,7 +25,9 @@ mod tools;
 const DASHBOARD_HTML: &str = include_str!("../widgets/dashboard.html");
 const DASHBOARD_URI: &str = "ui://repo-recall/dashboard.html";
 
-pub async fn run_stdio(state: AppState) -> anyhow::Result<()> {
+/// Build the MCP `Server` (tools + widget resource) without binding any
+/// transport. Shared by stdio and HTTP entrypoints.
+pub fn build_server(state: AppState) -> anyhow::Result<Server> {
     // Widget resources. Dashboard is the only one with a widget so far;
     // every other tool returns text content the host displays directly.
     let (dashboard_resource, dashboard_contents) =
@@ -125,9 +131,45 @@ pub async fn run_stdio(state: AppState) -> anyhow::Result<()> {
         "MCP server ready: scan_version={}",
         state.scan_version.load(Ordering::Acquire)
     );
+    Ok(server)
+}
+
+/// Run the MCP server over stdio. Used by the Claude-Desktop spawn case.
+pub async fn run_stdio(state: AppState) -> anyhow::Result<()> {
+    let server = build_server(state)?;
     server
         .run_stdio()
         .await
         .map_err(|e| anyhow::anyhow!("server stdio loop failed: {e:?}"))?;
     Ok(())
+}
+
+/// Build a streamable-HTTP MCP router. Mount under a path prefix to expose
+/// `POST <prefix>` (JSON-RPC) and `GET <prefix>` (SSE) per the MCP spec.
+///
+/// `REPO_RECALL_MCP_ORIGINS` is a comma-separated list of additional origin
+/// URLs (`scheme://host[:port]`) to allow past pmcp's DNS-rebinding check.
+/// Loopback aliases are always allowed; the env var is for non-loopback
+/// hostnames a reverse proxy might forward (e.g. `https://repo-recall.localhost`).
+pub fn http_router(state: AppState) -> anyhow::Result<Router> {
+    let server = build_server(state)?;
+    let mut origins: Vec<String> = vec![
+        "http://localhost".into(),
+        "http://127.0.0.1".into(),
+        "http://[::1]".into(),
+        "https://repo-recall.localhost".into(),
+    ];
+    if let Ok(extra) = std::env::var("REPO_RECALL_MCP_ORIGINS") {
+        origins.extend(
+            extra
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
+    let cfg = RouterConfig {
+        allowed_origins: Some(AllowedOrigins::explicit(origins)),
+        ..Default::default()
+    };
+    Ok(router_with_config(Arc::new(Mutex::new(server)), cfg))
 }

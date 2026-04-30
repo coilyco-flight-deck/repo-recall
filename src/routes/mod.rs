@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::services::ServeDir;
 
-use crate::AppState;
+use crate::{mcp, AppState};
 
 pub mod actions;
 pub mod api;
@@ -24,7 +24,14 @@ pub fn router(state: AppState) -> Router {
     let static_dir = std::env::var("REPO_RECALL_STATIC")
         .ok()
         .unwrap_or_else(|| format!("{}/static", env!("CARGO_MANIFEST_DIR")));
-    Router::new()
+    let mcp_router = match mcp::http_router(state.clone()) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::error!("mcp http router build failed, /mcp disabled: {e:?}");
+            None
+        }
+    };
+    let base = Router::new()
         .route("/", get(dashboard::index))
         .route("/repos/{id}", get(repos::detail))
         .route("/sessions/{id}", get(sessions::detail))
@@ -46,7 +53,11 @@ pub fn router(state: AppState) -> Router {
         .nest_service("/static", ServeDir::new(static_dir))
         .fallback(fallback::not_found)
         .layer(middleware::from_fn(advertise_json_alternate))
-        .with_state(state)
+        .with_state(state);
+    match mcp_router {
+        Some(r) => base.nest("/mcp", r),
+        None => base,
+    }
 }
 
 /// Advertise the JSON content-negotiation surface to discovering clients.
