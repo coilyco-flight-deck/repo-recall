@@ -222,6 +222,8 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - In-progress git operation (rebase / merge / cherry-pick / revert / bisect)
 /// - Detached HEAD
 /// - PR awaiting my review
+/// - My draft PR (push it into a reviewable state)
+/// - My non-draft PR open (test it, ask for review)
 /// - Issue assigned to me
 /// - Deploy workflow's last run failed
 /// - Deploy workflow has been silent for > 7d since its last green run
@@ -231,6 +233,8 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.in_progress_op.is_some()
         || r.head_ref.as_deref() == Some("detached")
         || r.prs_awaiting_my_review > 0
+        || r.my_draft_prs > 0
+        || r.prs_mine_awaiting_review > 0
         || r.issues_assigned_to_me > 0
         || is_deploy_failing(r)
         || is_deploy_stale(r)
@@ -306,6 +310,7 @@ mod tests {
             open_issues: 0,
             prs_awaiting_my_review: 0,
             prs_mine_awaiting_review: 0,
+            my_draft_prs: 0,
             issues_assigned_to_me: 0,
             deploy_workflow: None,
             deploy_status: None,

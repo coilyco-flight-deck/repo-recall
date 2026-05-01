@@ -186,6 +186,34 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             ),
         });
     }
+    if r.my_draft_prs > 0 {
+        let n = r.my_draft_prs;
+        out.push(DerivedSignal {
+            signal: "my_draft_pr",
+            detail: format!(
+                "{n} draft PR{} of yours - get into a reviewable state",
+                if n == 1 { "" } else { "s" },
+            ),
+        });
+    }
+    if r.prs_mine_awaiting_review > 0 {
+        let n = r.prs_mine_awaiting_review;
+        // Solo repo (only Kai authoring in the last 30d): no one to ask.
+        // Drop the "ask for review" framing in that case.
+        let solo = r.authors_30d <= 1;
+        let suffix = if solo {
+            "test it"
+        } else {
+            "test and ask for review"
+        };
+        out.push(DerivedSignal {
+            signal: "my_open_pr",
+            detail: format!(
+                "{n} open PR{} of yours - {suffix}",
+                if n == 1 { "" } else { "s" },
+            ),
+        });
+    }
     if r.issues_assigned_to_me > 0 {
         let n = r.issues_assigned_to_me;
         out.push(DerivedSignal {
