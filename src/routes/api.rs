@@ -186,6 +186,17 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             ),
         });
     }
+    if r.prs_mine_no_reviewer > 0 {
+        let n = r.prs_mine_no_reviewer;
+        out.push(DerivedSignal {
+            signal: "pr_no_reviewer",
+            detail: format!(
+                "{n} of your open PR{} {} no reviewer - request one or self-merge",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "has" } else { "have" },
+            ),
+        });
+    }
     if r.issues_assigned_to_me > 0 {
         let n = r.issues_assigned_to_me;
         out.push(DerivedSignal {

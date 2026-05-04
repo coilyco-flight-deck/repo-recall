@@ -915,6 +915,13 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                                     (r.prs_awaiting_my_review) " awaiting your review"
                                 }
                             }
+                            @if r.prs_mine_no_reviewer > 0 {
+                                span class=(PILL_ALERT)
+                                     data-flag="pr_no_reviewer"
+                                     title="your open PRs with no reviewer requested - request a reviewer or self-merge" {
+                                    "↗ " (r.prs_mine_no_reviewer) " yours, no reviewer"
+                                }
+                            }
                             @if r.issues_assigned_to_me > 0 {
                                 span class=(PILL_ALERT)
                                      data-flag="issue_assigned"
@@ -950,8 +957,8 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                             }
                             @if r.prs_mine_awaiting_review > 0 {
                                 span class=(PILL)
-                                     title="your open PRs waiting on someone else" {
-                                    "↗ " (r.prs_mine_awaiting_review) " yours open"
+                                     title="your open PRs with a reviewer requested - waiting on them" {
+                                    "↗ " (r.prs_mine_awaiting_review) " yours, awaiting reviewer"
                                 }
                             }
                             @if r.open_prs > 0 {

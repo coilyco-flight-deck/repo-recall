@@ -137,6 +137,7 @@ fn humanize_signal(signal: &str) -> &'static str {
         "in_progress_op" => "git op in progress",
         "detached_head" => "detached HEAD",
         "review_requested" => "review requested",
+        "pr_no_reviewer" => "PR needs a reviewer",
         "issue_assigned" => "issue assigned",
         _ => "action required",
     }

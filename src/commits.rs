@@ -688,7 +688,13 @@ pub struct PrCounts {
     pub open: i64,
     pub draft: i64,
     pub awaiting_my_review: i64,
+    /// Your open non-draft PRs that *do* have a reviewer requested. Ball is
+    /// in the reviewer's court - informational, not action-required.
     pub mine_awaiting_review: i64,
+    /// Your open non-draft PRs with zero reviewers requested. You are the
+    /// blocker (request a reviewer, or self-merge on a solo repo).
+    /// Action-required.
+    pub mine_no_reviewer: i64,
 }
 
 /// Issue counts for one repo. `open` is the repo total; `assigned_to_me` is
@@ -842,7 +848,11 @@ pub fn fetch_pr_and_issue_counts(
             counts.awaiting_my_review += 1;
         }
         if !my_login.is_empty() && author_login == my_login && !is_draft {
-            counts.mine_awaiting_review += 1;
+            if reviewers.is_empty() {
+                counts.mine_no_reviewer += 1;
+            } else {
+                counts.mine_awaiting_review += 1;
+            }
         }
     }
     Some((counts, issues))
