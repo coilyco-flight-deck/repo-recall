@@ -5,13 +5,13 @@
 
 # Demo image -----------------------------------------------------------------
 demo_image ?= repo-recall-demo:local
-demo_port  ?= 7777
+demo_port  ?= 7780
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
 # do `REPO_RECALL_CWD=$(pwd) make -C repo-recall run` from a parent dir.
 cwd        ?= $(or $(REPO_RECALL_CWD),$(CURDIR))
-port       ?= $(or $(REPO_RECALL_PORT),7777)
+port       ?= $(or $(REPO_RECALL_PORT),7780)
 depth      ?= $(or $(REPO_RECALL_DEPTH),4)
 https_host ?= repo-recall.localhost
 https_port ?= 7443
