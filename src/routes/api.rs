@@ -50,15 +50,11 @@ pub struct ActionRequiredResponse {
 /// polling client gets `304` between scans.
 pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let state2 = state.clone();
-    let repos = match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::Repo>> {
-        let conn = db::open(&state2.db_path)?;
-        db::list_repos_with_counts(&conn)
-    })
-    .await
-    {
-        Ok(Ok(rs)) => rs,
-        _ => Vec::new(),
-    };
+    let repos =
+        match tokio::task::spawn_blocking(move || state2.cache_db.list_repos_with_counts()).await {
+            Ok(Ok(rs)) => rs,
+            _ => Vec::new(),
+        };
 
     let mut items = Vec::new();
     for r in &repos {

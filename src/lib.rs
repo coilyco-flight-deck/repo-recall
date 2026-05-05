@@ -18,7 +18,7 @@ pub mod state;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db_path: PathBuf,
+    pub cache_db: db::CacheDb,
     pub cwd: PathBuf,
     pub scan_depth: usize,
     pub commits_per_repo: usize,

@@ -4,10 +4,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use chrono::Utc;
-use rusqlite::params;
 
+use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::AppState;
-use crate::{commits, db, join, push, scanner, sessions};
+use crate::{commits, join, push, scanner, sessions};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -34,50 +34,40 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let _ = tx.send(status_fragment("starting refresh…"));
 
     let cwd = state.cwd.clone();
-    let db_path = state.db_path.clone();
+    let cache_db = state.cache_db.clone();
     let scan_depth = state.scan_depth;
     let commits_per_repo = state.commits_per_repo;
     let search_index = state.search_index.clone();
+    let cutoff_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RefreshStats> {
-        let conn = db::open(&db_path)?;
-        db::wipe(&conn)?;
-
-        // --- repos ---
+        // Phase 1: discovery + repo upserts. One write transaction.
         let discovered = scanner::scan(&cwd, scan_depth)?;
         let now = Utc::now().timestamp();
-        let mut repo_id_by_path: Vec<(i64, PathBuf)> = Vec::with_capacity(discovered.len());
-        {
-            let tx_ins = conn.unchecked_transaction()?;
+        let repo_id_by_path: Vec<(i64, PathBuf)> = cache_db.write_batch(|w| {
+            w.wipe()?;
+            let mut out = Vec::with_capacity(discovered.len());
             for r in &discovered {
                 let remote = commits::remote_info(&r.path);
-                tx_ins.execute(
-                    "INSERT OR IGNORE INTO repos
-                     (path, name, discovered_at, remote_url, default_branch)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        r.path.to_string_lossy(),
-                        r.name,
-                        now,
-                        remote.url,
-                        remote.default_branch,
-                    ],
+                let id = w.upsert_repo(
+                    &r.path.to_string_lossy(),
+                    &r.name,
+                    now,
+                    remote.url.as_deref(),
+                    remote.default_branch.as_deref(),
                 )?;
-                let id: i64 = tx_ins.query_row(
-                    "SELECT id FROM repos WHERE path = ?1",
-                    params![r.path.to_string_lossy()],
-                    |row| row.get(0),
-                )?;
-                repo_id_by_path.push((id, r.path.clone()));
+                out.push((id, r.path.clone()));
             }
-            tx_ins.commit()?;
-        }
+            Ok(out)
+        })?;
         let repos_n = repo_id_by_path.len();
 
-        // --- sessions ---
+        // Phase 2: sessions. Same wipe semantics as before — every record
+        // in the cache lands inside the same refresh sweep.
         let Some(projects_dir) = sessions::default_projects_dir() else {
             // No Claude projects dir — still try commits before bailing.
-            let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo, &tx)?;
+            let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo, &tx)?;
+            cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
             return Ok(RefreshStats {
                 repos: repos_n,
                 sessions: 0,
@@ -93,69 +83,63 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         let mut skipped = 0usize;
         let mut links = 0usize;
 
-        let tx_ins = conn.unchecked_transaction()?;
-        for (i, path) in files.iter().enumerate() {
-            match sessions::parse_session_file(path) {
-                Ok(Some(rec)) => {
-                    let res = tx_ins.execute(
-                        "INSERT OR IGNORE INTO sessions
-                         (session_uuid, cwd, started_at, ended_at, message_count, summary,
-                          source_file, duration_ms, input_tokens, output_tokens,
-                          cache_read_tokens, cache_creation_tokens)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                        params![
-                            rec.session_uuid,
-                            rec.cwd,
+        cache_db.write_batch(|w| {
+            for (i, path) in files.iter().enumerate() {
+                match sessions::parse_session_file(path) {
+                    Ok(Some(rec)) => {
+                        let (session_id, was_new) = w.upsert_session(
+                            &rec.session_uuid,
+                            rec.cwd.as_deref(),
                             rec.started_at,
                             rec.ended_at,
                             rec.message_count,
-                            rec.summary,
-                            rec.source_file,
+                            rec.summary.as_deref(),
+                            &rec.source_file,
                             rec.duration_ms,
                             rec.input_tokens,
                             rec.output_tokens,
                             rec.cache_read_tokens,
                             rec.cache_creation_tokens,
-                        ],
-                    )?;
-                    if res == 0 {
-                        // Duplicate UUID across files — skip.
-                        skipped += 1;
-                        continue;
-                    }
-                    inserted += 1;
-                    let session_id = tx_ins.last_insert_rowid();
-
-                    if let Some(cwd_str) = rec.cwd.as_deref() {
-                        if let Some(repo_id) = join::best_repo_for_cwd(cwd_str, &repo_id_by_path) {
-                            tx_ins.execute(
-                                "INSERT OR IGNORE INTO session_repos (session_id, repo_id, match_type)
-                                 VALUES (?1, ?2, 'cwd')",
-                                params![session_id, repo_id],
-                            )?;
-                            links += 1;
+                        )?;
+                        if !was_new {
+                            skipped += 1;
+                            continue;
+                        }
+                        inserted += 1;
+                        if let Some(cwd_str) = rec.cwd.as_deref() {
+                            if let Some(repo_id) =
+                                join::best_repo_for_cwd(cwd_str, &repo_id_by_path)
+                            {
+                                if w.link_session_repo(session_id, repo_id, "cwd")? {
+                                    links += 1;
+                                }
+                            }
                         }
                     }
+                    Ok(None) => {
+                        skipped += 1;
+                    }
+                    Err(e) => {
+                        tracing::debug!("parse error {}: {}", path.display(), e);
+                        skipped += 1;
+                    }
                 }
-                Ok(None) => { skipped += 1; }
-                Err(e) => {
-                    tracing::debug!("parse error {}: {}", path.display(), e);
-                    skipped += 1;
+                if (i + 1) % 50 == 0 || i + 1 == total_files {
+                    let msg = format!("indexing sessions… {}/{}", i + 1, total_files);
+                    let _ = tx.send(status_fragment(&msg));
                 }
             }
-            // Emit progress every 50 files.
-            if (i + 1) % 50 == 0 || i + 1 == total_files {
-                let msg = format!("indexing sessions… {}/{}", i + 1, total_files);
-                let _ = tx.send(status_fragment(&msg));
-            }
-        }
-        tx_ins.commit()?;
+            Ok(())
+        })?;
 
-        // --- commits (git log per repo) ---
-        let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo, &tx)?;
+        // Phase 3: commits + per-repo state.
+        let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo, &tx)?;
 
-        // --- search index (tantivy, rebuilt from the populated cache tables) ---
-        let corpus = db::collect_search_corpus(&conn)?;
+        // Phase 4: precompute aggregates the dashboard reads back.
+        cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
+
+        // Phase 5: rebuild the tantivy search index.
+        let corpus = cache_db.collect_search_corpus()?;
         if let Err(e) = search_index.rebuild(corpus) {
             tracing::warn!("tantivy rebuild failed (search will serve stale results): {e:?}");
         }
@@ -253,50 +237,31 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 /// bare word. Runs inside a single `spawn_blocking` — IO-heavy rather than
 /// CPU-heavy, and serial is fine since a few dozen MB of JSONL parses fast.
 async fn ingest_content_mentions(state: AppState) -> usize {
-    let db_path = state.db_path.clone();
+    let cache_db = state.cache_db.clone();
     let tx = state.progress_tx.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-        let conn = db::open(&db_path)?;
-        // Needles: prefer the basename since that's what shows up in prose.
-        let mut stmt = conn.prepare("SELECT id, name FROM repos")?;
-        let needles: Vec<(i64, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut stmt = conn.prepare("SELECT id, source_file FROM sessions")?;
-        let sessions: Vec<(i64, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
+        let needles = cache_db.iter_repo_ids_and_names()?;
+        let sessions = cache_db.iter_session_source_files()?;
         let total = sessions.len();
-        let mut inserted = 0usize;
-        let tx_ins = conn.unchecked_transaction()?;
-        for (i, (session_id, path)) in sessions.iter().enumerate() {
-            let hits = crate::sessions::mentions_in_file(std::path::Path::new(path), &needles);
-            for repo_id in hits {
-                let n = tx_ins.execute(
-                    "INSERT OR IGNORE INTO session_repos
-                     (session_id, repo_id, match_type)
-                     VALUES (?1, ?2, 'content_mention')",
-                    rusqlite::params![session_id, repo_id],
-                )?;
-                inserted += n;
+        let inserted = cache_db.write_batch(|w| {
+            let mut n = 0usize;
+            for (i, (session_id, path)) in sessions.iter().enumerate() {
+                let hits = crate::sessions::mentions_in_file(std::path::Path::new(path), &needles);
+                for repo_id in hits {
+                    if w.link_session_repo(*session_id, repo_id, "content_mention")? {
+                        n += 1;
+                    }
+                }
+                if (i + 1) % 25 == 0 || i + 1 == total {
+                    let _ = tx.send(status_fragment(&format!(
+                        "scanning sessions for repo mentions… {}/{}",
+                        i + 1,
+                        total
+                    )));
+                }
             }
-            if (i + 1) % 25 == 0 || i + 1 == total {
-                let _ = tx.send(status_fragment(&format!(
-                    "scanning sessions for repo mentions… {}/{}",
-                    i + 1,
-                    total
-                )));
-            }
-        }
-        tx_ins.commit()?;
+            Ok(n)
+        })?;
         Ok(inserted)
     })
     .await
@@ -327,63 +292,17 @@ async fn ingest_ci_status(state: AppState) -> usize {
     *state.my_gh_login.lock().await = my_login.clone();
     let my_login = my_login.unwrap_or_default();
 
-    // Pull the candidate list off one blocking DB read. Order by most-recent
-    // commit (LEFT JOIN — repos with no commits sort to the bottom) so the
-    // optional `LIMIT` keeps the activity-rich repos and drops dormant ones.
-    // Repos beyond the cap get NULL remote-state fields this cycle; once
-    // they see a fresh commit they bubble back into the window. Acceptable
-    // because the schema is wiped on every refresh anyway, so "no remote
-    // data" is the natural quiet state.
     let target_limit = state.remote_target_limit;
-    let targets = {
-        let db_path = state.db_path.clone();
-        match tokio::task::spawn_blocking(
-            move || -> anyhow::Result<Vec<(i64, String, String, String)>> {
-                let conn = db::open(&db_path)?;
-                let sql = if target_limit == 0 {
-                    "SELECT r.id, r.remote_url, r.default_branch, r.path
-                 FROM repos r
-                 LEFT JOIN (
-                     SELECT repo_id, MAX(timestamp) AS latest_ts
-                     FROM commits GROUP BY repo_id
-                 ) c ON c.repo_id = r.id
-                 WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
-                 ORDER BY COALESCE(c.latest_ts, 0) DESC"
-                        .to_string()
-                } else {
-                    format!(
-                        "SELECT r.id, r.remote_url, r.default_branch, r.path
-                     FROM repos r
-                     LEFT JOIN (
-                         SELECT repo_id, MAX(timestamp) AS latest_ts
-                         FROM commits GROUP BY repo_id
-                     ) c ON c.repo_id = r.id
-                     WHERE r.remote_url IS NOT NULL AND r.default_branch IS NOT NULL
-                     ORDER BY COALESCE(c.latest_ts, 0) DESC
-                     LIMIT {target_limit}"
-                    )
-                };
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })?;
-                let mut out = Vec::new();
-                for r in rows {
-                    out.push(r?);
-                }
-                Ok(out)
-            },
-        )
-        .await
-        {
-            Ok(Ok(v)) => v,
-            _ => return 0,
-        }
+    let cache_db = state.cache_db.clone();
+    let targets = match tokio::task::spawn_blocking(
+        move || -> anyhow::Result<Vec<(i64, String, String, String)>> {
+            cache_db.remote_targets(target_limit)
+        },
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        _ => return 0,
     };
 
     // Filter to repos we actually know how to query (GitHub-hosted only).
@@ -412,11 +331,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
         let login = my_login.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
-            // Fan out CI + PRs + issues + deploy health in one blocking
-            // block so the subprocess cost is sequential-per-repo but
-            // overlapping across repos (bounded by the semaphore). PRs +
-            // issues share one GraphQL call; deploy health is one extra
-            // `gh run list` only when a deploy workflow exists.
             tokio::task::spawn_blocking(move || {
                 let ci = commits::ci_status(&slug, &branch);
                 let (prs, issues) = match commits::fetch_pr_and_issue_counts(&slug, &login) {
@@ -439,7 +353,7 @@ async fn ingest_ci_status(state: AppState) -> usize {
         });
     }
 
-    // Collect + write in one sweep. Keeps the SQLite write lock short.
+    // Collect + write in one sweep. Keeps the cache write window short.
     let mut results: Vec<RemoteSnapshot> = Vec::with_capacity(total);
     let tx = state.progress_tx.clone();
     let mut done = 0usize;
@@ -453,39 +367,20 @@ async fn ingest_ci_status(state: AppState) -> usize {
         }
     }
 
-    let db_path = state.db_path.clone();
-    let updated = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-        let conn = db::open(&db_path)?;
-        let tx_ins = conn.unchecked_transaction()?;
-        let mut n = 0usize;
-        for snap in results {
-            let prs = snap.prs.unwrap_or_default();
-            let issues = snap.issues.unwrap_or_default();
-            // Pass the totals as Option<i64> so a `None` from the GraphQL
-            // call leaves the existing column untouched (COALESCE), matching
-            // how `ci_status` is treated when the gh subprocess fails.
-            let issues_total: Option<i64> = snap.issues.map(|i| i.open);
-            let issues_assigned: Option<i64> = snap.issues.map(|_| issues.assigned_to_me);
-            let (deploy_wf, deploy_status, deploy_last_success) = match &snap.deploy {
-                Some((wf, h)) => (Some(wf.clone()), h.status.clone(), h.last_success_ts),
-                None => (None, None, None),
-            };
-            tx_ins.execute(
-                "UPDATE repos
-                 SET ci_status = COALESCE(?1, ci_status),
-                     open_prs = ?2,
-                     draft_prs = ?3,
-                     prs_awaiting_my_review = ?4,
-                     prs_mine_awaiting_review = ?5,
-                     prs_mine_no_reviewer = ?6,
-                     my_draft_prs = ?7,
-                     open_issues = COALESCE(?8, open_issues),
-                     issues_assigned_to_me = COALESCE(?9, issues_assigned_to_me),
-                     deploy_workflow = COALESCE(?10, deploy_workflow),
-                     deploy_status = COALESCE(?11, deploy_status),
-                     deploy_last_success_ts = COALESCE(?12, deploy_last_success_ts)
-                 WHERE id = ?13",
-                rusqlite::params![
+    let cache_db = state.cache_db.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        cache_db.write_batch(|w| {
+            let mut n = 0usize;
+            for snap in results {
+                let prs = snap.prs.unwrap_or_default();
+                let issues_total: Option<i64> = snap.issues.map(|i| i.open);
+                let issues_assigned: Option<i64> = snap.issues.map(|i| i.assigned_to_me);
+                let (deploy_wf, deploy_status, deploy_last_success) = match snap.deploy {
+                    Some((wf, h)) => (Some(wf), h.status, h.last_success_ts),
+                    None => (None, None, None),
+                };
+                w.update_repo_remote_state(
+                    snap.id,
                     snap.ci,
                     prs.open,
                     prs.draft,
@@ -498,19 +393,16 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     deploy_wf,
                     deploy_status,
                     deploy_last_success,
-                    snap.id,
-                ],
-            )?;
-            n += 1;
-        }
-        tx_ins.commit()?;
-        Ok(n)
+                )?;
+                n += 1;
+            }
+            Ok(n)
+        })
     })
     .await
     .ok()
     .and_then(|r| r.ok())
-    .unwrap_or(0);
-    updated
+    .unwrap_or(0)
 }
 
 /// Snapshot the viewer's GitHub repos via `gh repo list` and write them into
@@ -527,12 +419,11 @@ async fn ingest_active_repos(state: AppState) -> usize {
     if actives.is_empty() {
         return 0;
     }
-    let db_path = state.db_path.clone();
+    let cache_db = state.cache_db.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-        let conn = db::open(&db_path)?;
-        let rows: Vec<db::ActiveRemoteRepo> = actives
+        let rows: Vec<ActiveRemoteRepo> = actives
             .into_iter()
-            .map(|a| db::ActiveRemoteRepo {
+            .map(|a| ActiveRemoteRepo {
                 id: 0,
                 full_name: a.full_name,
                 https_url: a.https_url,
@@ -544,7 +435,7 @@ async fn ingest_active_repos(state: AppState) -> usize {
                 is_archived: a.is_archived,
             })
             .collect();
-        db::upsert_active_remote_repos(&conn, &rows)
+        cache_db.write_batch(|w| w.replace_active_remote_repos(&rows))
     })
     .await
     .ok()
@@ -557,25 +448,12 @@ async fn ingest_active_repos(state: AppState) -> usize {
 /// each genuinely-new id. Always returns an outcome (never errors out
 /// of the refresh) — push is best-effort.
 async fn dispatch_pending_pushes(state: AppState) -> push::DispatchOutcome {
-    // Pull the repo list off one blocking DB read; building the
-    // ActionRequiredItem-equivalent in-thread keeps SQLite I/O off the
-    // async runtime.
-    let repos = {
-        let db_path = state.db_path.clone();
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::Repo>> {
-            let conn = db::open(&db_path)?;
-            db::list_repos_with_counts(&conn)
-        })
-        .await
-        {
-            Ok(Ok(rs)) => rs,
-            _ => return push::DispatchOutcome::default(),
-        }
+    let cache_db = state.cache_db.clone();
+    let repos = match tokio::task::spawn_blocking(move || cache_db.list_repos_with_counts()).await {
+        Ok(Ok(rs)) => rs,
+        _ => return push::DispatchOutcome::default(),
     };
 
-    // Flatten (repo, signal, detail) into a parallel pair of (id, payload).
-    // Keep them aligned so diff_and_record_signals can return ids and we
-    // can look the matching payload back up by index.
     let mut all_ids: Vec<String> = Vec::new();
     let mut all_payloads: Vec<push::PushPayload> = Vec::new();
     for r in &repos {
@@ -594,7 +472,6 @@ async fn dispatch_pending_pushes(state: AppState) -> push::DispatchOutcome {
         }
     };
 
-    // Map the returned new ids back to their payloads, preserving order.
     let new_set: std::collections::HashSet<&String> = new_ids.iter().collect();
     let new_payloads: Vec<push::PushPayload> = all_payloads
         .into_iter()
@@ -626,100 +503,81 @@ struct RefreshStats {
 /// Also computes 30-day LOC churn in the same sweep (second git subprocess
 /// per repo) and updates the `repos` row.
 fn ingest_commits(
-    conn: &rusqlite::Connection,
+    cache_db: &CacheDb,
     repos: &[(i64, PathBuf)],
     limit_per_repo: usize,
     tx: &tokio::sync::broadcast::Sender<String>,
 ) -> anyhow::Result<usize> {
     let total_repos = repos.len();
-    let mut total_commits = 0usize;
     let churn_cutoff = chrono::Utc::now().timestamp() - 30 * 86_400;
-    let tx_ins = conn.unchecked_transaction()?;
-    for (i, (repo_id, repo_path)) in repos.iter().enumerate() {
-        match commits::scan(repo_path, limit_per_repo) {
-            Ok(records) => {
-                for rec in &records {
-                    tx_ins.execute(
-                        "INSERT OR IGNORE INTO commits
-                         (repo_id, sha, author_name, author_email, timestamp, subject)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![
-                            repo_id,
-                            rec.sha,
-                            rec.author_name,
-                            rec.author_email,
+    cache_db.write_batch(|w| {
+        let mut total_commits = 0usize;
+        for (i, (repo_id, repo_path)) in repos.iter().enumerate() {
+            match commits::scan(repo_path, limit_per_repo) {
+                Ok(records) => {
+                    for rec in &records {
+                        w.upsert_commit(
+                            *repo_id,
+                            &rec.sha,
+                            &rec.author_name,
+                            &rec.author_email,
                             rec.timestamp,
-                            rec.subject,
-                        ],
-                    )?;
+                            &rec.subject,
+                        )?;
+                    }
+                    total_commits += records.len();
                 }
-                total_commits += records.len();
+                Err(e) => {
+                    tracing::debug!("commits scan failed in {}: {e}", repo_path.display());
+                }
             }
-            Err(e) => {
-                tracing::debug!("commits scan failed in {}: {e}", repo_path.display());
-            }
-        }
-        // Per-file change records for the last 30d — source of truth for
-        // both the scalar churn total and the hotspot query on repo detail.
-        let file_changes = commits::file_changes_since(repo_path, churn_cutoff);
-        let churn: i64 = file_changes
-            .iter()
-            .map(|fc| fc.additions + fc.deletions)
-            .sum();
-        for fc in &file_changes {
-            tx_ins.execute(
-                "INSERT INTO file_changes
-                 (repo_id, sha, file_path, additions, deletions, author_email, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    repo_id,
-                    fc.sha,
-                    fc.file_path,
+            // Per-file change records for the last 30d — source of truth for
+            // both the scalar churn total and the hotspot query.
+            let file_changes = commits::file_changes_since(repo_path, churn_cutoff);
+            let churn: i64 = file_changes
+                .iter()
+                .map(|fc| fc.additions + fc.deletions)
+                .sum();
+            for fc in &file_changes {
+                w.insert_file_change(
+                    *repo_id,
+                    &fc.sha,
+                    &fc.file_path,
                     fc.additions,
                     fc.deletions,
-                    fc.author_email,
+                    &fc.author_email,
                     fc.timestamp,
-                ],
-            )?;
-        }
-        // Cap per-repo at 50 paths: enough for the dashboard sample, small
-        // enough that a pathological refactor can't blow up the DB.
-        let snap = commits::worktree_snapshot(repo_path, 50);
-        let local = commits::local_state(repo_path);
-        tx_ins.execute(
-            "UPDATE repos
-             SET loc_churn_30d = ?1, untracked_files = ?2, modified_files = ?3,
-                 commits_ahead = ?4, commits_behind = ?5, stash_count = ?6,
-                 head_ref = ?7, in_progress_op = ?8
-             WHERE id = ?9",
-            rusqlite::params![
+                )?;
+            }
+            // Cap per-repo at 50 paths: enough for the dashboard sample,
+            // small enough that a pathological refactor cannot blow up the
+            // DB.
+            let snap = commits::worktree_snapshot(repo_path, 50);
+            let local = commits::local_state(repo_path);
+            w.update_repo_local_state(
+                *repo_id,
                 churn,
                 snap.total_untracked,
                 snap.total_modified,
                 local.commits_ahead,
                 local.commits_behind,
                 local.stash_count,
-                local.head_ref,
-                local.in_progress_op,
-                repo_id,
-            ],
-        )?;
-        for f in &snap.files {
-            tx_ins.execute(
-                "INSERT INTO uncommitted_files (repo_id, path, kind) VALUES (?1, ?2, ?3)",
-                rusqlite::params![repo_id, f.path, f.kind.as_str()],
+                local.head_ref.as_deref(),
+                local.in_progress_op.as_deref(),
             )?;
+            for f in &snap.files {
+                w.insert_uncommitted_file(*repo_id, &f.path, f.kind.as_str())?;
+            }
+            if (i + 1) % 5 == 0 || i + 1 == total_repos {
+                let _ = tx.send(status_fragment(&format!(
+                    "indexing commits + churn… {}/{}",
+                    i + 1,
+                    total_repos
+                )));
+            }
         }
-        if (i + 1) % 5 == 0 || i + 1 == total_repos {
-            let _ = tx.send(status_fragment(&format!(
-                "indexing commits + churn… {}/{}",
-                i + 1,
-                total_repos
-            )));
-        }
-    }
-    tx_ins.commit()?;
-    Ok(total_commits)
+        Ok(total_commits)
+    })
 }
 
 /// HTML fragment that HTMX will swap into #scan-status via out-of-band swap.

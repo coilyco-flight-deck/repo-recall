@@ -10,8 +10,8 @@
 Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort) and, when push notifications are enabled, signed Web Push deliveries to `fcm.googleapis.com`.
 
 - **Language**: Rust (edition 2021, stable toolchain)
-- **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [rusqlite](https://docs.rs/rusqlite) (bundled SQLite), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 with `mcp-apps` feature for the MCP App server (the `mcp` subcommand). Hand-rolled widget JS, no JS toolchain.
-- **Runtime deps**: none beyond the bundled SQLite. No config file. Discovery is lazy — the server scans from whatever directory it was launched in.
+- **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [redb](https://docs.rs/redb) (embedded ACID KV, pure-Rust), [tantivy](https://docs.rs/tantivy) (full-text search), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 with `mcp-apps` feature for the MCP App server (the `mcp` subcommand). Hand-rolled widget JS, no JS toolchain.
+- **Runtime deps**: none beyond the bundled crates. No config file. Discovery is lazy — the server scans from whatever directory it was launched in.
 
 ## Repository structure
 
@@ -19,7 +19,7 @@ Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Ou
 src/
   main.rs           # entry point; reads env, bootstraps state, runs initial scan
   lib.rs            # AppState + shared types (keeps main.rs thin and tests importable)
-  db.rs             # SQLite schema + queries (wipe-and-rebuild on every refresh)
+  db.rs             # redb cache schema + queries (wipe-and-rebuild on every refresh)
   scanner.rs        # repo discovery: walk cwd + REPO_RECALL_DEPTH levels for .git entries
   sessions.rs       # data source #1: parse Claude Code JSONL session files
   commits.rs        # data source #2: shell out to `git log`, NUL-separated
@@ -79,18 +79,20 @@ Environment variables:
 | `REPO_RECALL_COMMITS_PER_REPO` | `500`                           | How many commits to pull per repo via `git log --all --no-merges`. Higher = longer history at the cost of scan time and DB size. |
 | `REPO_RECALL_REFRESH_INTERVAL_SECS` | `150`                      | How often to auto-refresh in the background. `0` disables. Overlaps with a running refresh no-op via the same lock the `POST /refresh` button uses. |
 | `REPO_RECALL_REMOTE_TARGET_LIMIT` | `25`                         | Max GitHub-hosted repos to query for remote state (CI / PRs / issues) per refresh, picked by most-recent-commit time. Caps `gh` API spend. `0` = no cap. Repos beyond the cap have NULL remote fields until they bubble back into the window. |
-| `REPO_RECALL_DB`    | `$TMPDIR/repo-recall.sqlite`               | SQLite file. Schema is dropped and recreated on every startup.               |
+| `REPO_RECALL_CACHE_DIR` | `$TMPDIR/repo-recall-<port>`           | Directory holding `cache.redb`. Wiped + recreated on every startup.          |
 | `RUST_LOG`          | `info,repo_recall=debug`                   | `tracing-subscriber` filter.                                                 |
 
 Browser auto-reload: every page includes a small script that opens a WebSocket to `/livereload`. When `cargo watch` restarts the process, the socket drops; on reconnect the page calls `location.reload()`. This is always-on — it's cheap, invisible when the server is stable, and unnecessary to gate behind a dev flag.
 
 ## Conventions
 
-- **SQLite is a cache, not a database.** The schema is wiped and recreated on every process start. No migrations, no `INSERT OR REPLACE` heroics, no stale-state bugs. If you need to change the schema, change it in [`src/db.rs`](./src/db.rs) and restart. On refresh, the tables are truncated and rebuilt from scratch.
+- **Three stores, no SQLite.** The persistence surface is exactly three things: `state.redb` (durable, lives in `~/.local/share/repo-recall/`), `cache.redb` (wipe-on-restart, lives in `$REPO_RECALL_CACHE_DIR` or `$TMPDIR/repo-recall-<port>/`), and the tantivy full-text index next to the cache. Cache + tantivy are derived from disk on every refresh, so neither needs migrations. State carries the VAPID keypair, push subscriptions, and the seen-signal dedup set.
+- **The cache is wipe-on-restart.** `CacheDb::open_in_dir` deletes the prior `cache.redb` before opening a fresh one, and every refresh starts with `wipe()` to truncate every table. No migrations, no `INSERT OR REPLACE` heroics, no stale-state bugs. Schema changes live in [`src/db.rs`](./src/db.rs); restart picks them up.
 - **Discovery is lazy.** No config file, no root-dir setting. The server walks its cwd + `REPO_RECALL_DEPTH` levels deep (default 4). If you want it to index a different tree, run it there (or set `REPO_RECALL_CWD`).
 - **`session_repos.match_type` is the extension point.** MVP writes only `'cwd'`. Additional signals (file paths touched in a session, branch-name matches, etc.) go in as new rows with new `match_type` values — don't replace the `cwd` row, add to it.
-- **DB access uses `spawn_blocking` + a fresh `rusqlite::Connection` per task.** rusqlite is sync; SQLite handles concurrent readers via WAL. Don't introduce an `Arc<Mutex<Connection>>` — it serializes request handling during long scans.
-- **Integration tests boot the real router on port 0.** See [`tests/smoke.rs`](./tests/smoke.rs). Each test gets its own SQLite file under `$TMPDIR` (nanos + PID + an atomic counter) so parallel `cargo test` invocations don't collide. Prefer adding tests here over writing manual-curl README snippets.
+- **Cache reads use redb's MVCC; the writer is the refresh path.** [`CacheDb`](./src/db.rs) wraps a single `Arc<Database>` shared in `AppState`. Reads open lightweight `begin_read()` transactions freely (no locking, no contention with the writer). All mutations route through `cache.write_batch(|w| { … })`, which opens one `begin_write()` per phase and commits atomically. Refresh holds `state.refresh_lock` so two refreshes never overlap, which keeps the single-writer rule honest.
+- **Every dashboard query has its own secondary index.** redb is a KV store, not a planner — every per-repo / per-session / per-timestamp scan needs a hand-designed index table. Aggregates the SQL layer used to compute via subqueries (`session_count`, `commits_30d`, `authors_30d`) are precomputed at the end of refresh by `finalize_repo_aggregates` and stored on the `Repo` record. If you add a new query, design the index alongside it.
+- **Integration tests boot the real router on port 0.** See [`tests/smoke.rs`](./tests/smoke.rs). Each test gets its own cache directory under `$TMPDIR` (nanos + PID + an atomic counter) so parallel `cargo test` invocations don't collide. Prefer adding tests here over writing manual-curl README snippets.
 - **Session parsing tolerates malformed lines.** Individual JSONL lines can be skipped with a `tracing::debug!` log; don't fail a whole file because one line is bad. The parser already handles the mix of `queue-operation` / `user` / `assistant` record shapes we've seen.
 - **Data sources are independent tables, not a single unified "events" table.** Sessions live in `sessions` + `session_repos`, commits live in `commits`. Both reference `repos.id` but don't join through each other. When future data sources arrive (GitHub PRs, CI runs, etc.) they each get their own table + refresh step. A cross-source "activity feed" is a query-time concern, not a schema-time one — don't pre-unify.
 - **Activity attributes fall into three categories**, declared via [`activity::Category`](./src/activity.rs): **Historical** (past activity, local, cheap), **LocalState** (working tree right now, local, cheap), **RemoteState** (requires a network call to a remote service — GitHub, CI, etc.). Each new attribute picks a category; the category drives *how* it's refreshed (main blocking pass vs. parallel async post-pass) and *how* it's rendered (alert-style pill vs. standard vs. silent-when-healthy).
@@ -111,7 +113,7 @@ Claude Code session files can contain code, pasted credentials, and internal dis
 
 - Stores **only metadata and a truncated 200-char summary** — not full transcripts.
 - Binds the web server to **loopback by default** (`127.0.0.1`). The `REPO_RECALL_HOST` env var can override this to bind a non-loopback address - only do this when access is gated at a different layer (e.g. `tailscale serve` on a tailnet-only host). Never bind a non-loopback address on a shared or public-facing box.
-- Writes the SQLite cache to `$TMPDIR` by default, which most OSes wipe on reboot.
+- Writes the redb cache to `$TMPDIR` by default, which most OSes wipe on reboot.
 - **Outbound network calls** are limited to `RemoteState` refresh (`gh run list` for CI status, reusing the user's existing `gh` auth) and Web Push delivery to `fcm.googleapis.com` when the user has opted in to PWA notifications. `gh` not installed or not authenticated leaves the remote-state column blank; nothing else breaks. Add new remote calls only when a new `RemoteState` attribute genuinely needs them, and keep them best-effort.
 
 The 200-char summary can still leak sensitive content. Redaction is future work.

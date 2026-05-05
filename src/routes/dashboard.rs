@@ -95,18 +95,18 @@ pub async fn index(
     let state2 = state.clone();
     let af = author_filter.clone();
     let data = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let conn = db::open(&state2.db_path)?;
-        let (repos_n, sessions_n, links_n, commits_n) = db::counts(&conn)?;
-        let earliest_ts = db::earliest_session_ts(&conn)?;
-        let mut repos = db::list_repos_with_counts(&conn)?;
+        let cache = &state2.cache_db;
+        let (repos_n, sessions_n, links_n, commits_n) = cache.counts()?;
+        let earliest_ts = cache.earliest_session_ts()?;
+        let mut repos = cache.list_repos_with_counts()?;
         activity::sort(&mut repos);
-        let recent_sessions = db::recent_sessions(&conn, 15)?;
-        let recent_commits = db::recent_commits(&conn, 15, af.as_deref())?;
+        let recent_sessions = cache.recent_sessions(15)?;
+        let recent_commits = cache.recent_commits(15, af.as_deref())?;
         // Capped at 6 repos × 4 files/repo = max 24 rows in the panel
         // (+headers), enough to read at a glance without scrolling forever.
-        let uncommitted_groups = db::uncommitted_by_repo(&conn, 6, 4)?;
-        let ci_failures = db::failing_ci_repos(&conn)?;
-        let uncloned = db::uncloned_active_repos(&conn, 25)?;
+        let uncommitted_groups = cache.uncommitted_by_repo(6, 4)?;
+        let ci_failures = cache.failing_ci_repos()?;
+        let uncloned = cache.uncloned_active_repos(25)?;
         Ok((
             repos_n,
             sessions_n,

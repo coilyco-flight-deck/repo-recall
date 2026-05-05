@@ -154,7 +154,7 @@ A `.env` in the repo root is loaded automatically — drop your `REPO_RECALL_*` 
 | `REPO_RECALL_CWD`              | process cwd                  | Directory to scan for repos.                                     |
 | `REPO_RECALL_DEPTH`            | `4`                          | Directory levels below cwd to walk.                              |
 | `REPO_RECALL_COMMITS_PER_REPO` | `500`                        | Max commits pulled per repo via `git log --all --no-merges`.     |
-| `REPO_RECALL_DB`               | `$TMPDIR/repo-recall.sqlite` | SQLite cache. Dropped and rebuilt every startup.                 |
+| `REPO_RECALL_CACHE_DIR`        | `$TMPDIR/repo-recall-<port>` | Cache directory holding `cache.redb`. Wiped + rebuilt on every startup. |
 | `RUST_LOG`                     | `info,repo_recall=debug`     | `tracing-subscriber` filter.                                     |
 
 ## How it actually works
@@ -167,7 +167,7 @@ Three input taps, all keyed to the same set of discovered repos:
 
 Internally these are bucketed into three refresh categories — **Historical** (past activity, offline), **LocalState** (working tree right now, offline), **RemoteState** (network, parallel post-pass) — which drives *how* each attribute is refreshed and *how* it's rendered. See [`activity::Category`](./src/activity.rs).
 
-Each source gets its own SQLite table. No unified "events" table — cross-source views are a query-time concern. The schema is wiped and rebuilt on every process start, which trades a few seconds of scan time for zero migration code and zero stale-state bugs.
+Each source gets its own redb table. No unified "events" table — cross-source views are a query-time concern. The cache file is wiped and rebuilt on every process start, which trades a few seconds of scan time for zero migration code and zero stale-state bugs.
 
 **Sessions.** Each `*.jsonl` under `~/.claude/projects/` is parsed for `sessionId`, first/last timestamps, the first user message (as a 200-char summary), message count, and `cwd`. Malformed lines are skipped with a debug log — the format drifts and I'd rather keep going than bail on one bad record. Sessions join to repos when the session's `cwd` is inside a discovered repo. Other match types (touched file paths, branch names) are the natural extension point.
 
@@ -180,9 +180,9 @@ Each source gets its own SQLite table. No unified "events" table — cross-sourc
 - Stores **metadata + a truncated 200-char summary only** — not full transcripts on disk. The transcript page re-reads the JSONL at request time.
 - Loopback only. Never listens on `0.0.0.0`, never on a shared-box socket.
 - Tailwind ships as a same-origin compiled CSS file; htmx still loads from a CDN in the browser, not from the server process.
-- Outbound calls: `gh run list` for CI status (reuses your existing `gh` auth, no tokens stored, no tokens read from env; no `gh` and the CI column stays blank), and Web Push deliveries to `fcm.googleapis.com` if you opt into PWA notifications. Push is off until you grant permission and subscribe; the VAPID keypair lives in `~/.local/share/repo-recall/state.sqlite`.
+- Outbound calls: `gh run list` for CI status (reuses your existing `gh` auth, no tokens stored, no tokens read from env; no `gh` and the CI column stays blank), and Web Push deliveries to `fcm.googleapis.com` if you opt into PWA notifications. Push is off until you grant permission and subscribe; the VAPID keypair lives in `~/.local/share/repo-recall/state.redb`.
 
-The 200-char summary can still contain pasted credentials or sensitive text. Treat the SQLite cache as sensitive (it defaults to `$TMPDIR/repo-recall.sqlite`, which most OSes wipe on reboot).
+The 200-char summary can still contain pasted credentials or sensitive text. Treat the redb cache as sensitive (it defaults to `$TMPDIR/repo-recall-<port>/cache.redb`, which most OSes wipe on reboot).
 
 ## Prior art
 

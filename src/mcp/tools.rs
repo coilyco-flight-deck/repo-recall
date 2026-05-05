@@ -1,5 +1,5 @@
 //! Tool handlers. Each handler takes a typed args struct, queries the data
-//! layer via spawn_blocking (rusqlite is sync), and returns JSON.
+//! layer via spawn_blocking (the redb readers are sync), and returns JSON.
 
 use std::sync::atomic::Ordering;
 
@@ -53,14 +53,11 @@ pub async fn dashboard(
     _args: DashboardArgs,
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
-    let db_path = state.db_path.clone();
-    let mut repos = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::Repo>> {
-        let conn = db::open(&db_path)?;
-        db::list_repos_with_counts(&conn)
-    })
-    .await
-    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-    .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+    let cache = state.cache_db.clone();
+    let mut repos = tokio::task::spawn_blocking(move || cache.list_repos_with_counts())
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
 
     activity::sort(&mut repos);
 
@@ -131,18 +128,18 @@ pub async fn repo(
     args: RepoArgs,
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
-    let db_path = state.db_path.clone();
+    let cache = state.cache_db.clone();
     let repo_id = args.repo_id;
     let commit_limit = args.commit_limit.unwrap_or(50);
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let conn = db::open(&db_path)?;
-        let repo = db::get_repo(&conn, repo_id)?
+        let repo = cache
+            .get_repo(repo_id)?
             .ok_or_else(|| anyhow::anyhow!("repo {repo_id} not found"))?;
-        let sessions = db::sessions_for_repo(&conn, repo_id)?;
-        let commits = db::commits_for_repo(&conn, repo_id, commit_limit)?;
+        let sessions = cache.sessions_for_repo(repo_id)?;
+        let commits = cache.commits_for_repo(repo_id, commit_limit)?;
         let since_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
-        let hotspots = db::file_hotspots(&conn, repo_id, since_30d, 10)?;
+        let hotspots = cache.file_hotspots(repo_id, since_30d, 10)?;
 
         Ok(json!({
             "repo": repo,
@@ -179,12 +176,12 @@ pub async fn session(
     args: SessionArgs,
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
-    let db_path = state.db_path.clone();
+    let cache = state.cache_db.clone();
     let session_id = args.session_id;
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let conn = db::open(&db_path)?;
-        let session = db::get_session(&conn, session_id)?
+        let session = cache
+            .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
 
         Ok(json!({
@@ -260,14 +257,11 @@ pub async fn action_required(
     _args: ActionRequiredArgs,
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
-    let db_path = state.db_path.clone();
-    let repos = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::Repo>> {
-        let conn = db::open(&db_path)?;
-        db::list_repos_with_counts(&conn)
-    })
-    .await
-    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-    .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+    let cache = state.cache_db.clone();
+    let repos = tokio::task::spawn_blocking(move || cache.list_repos_with_counts())
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
 
     let mut items = Vec::new();
     for r in &repos {

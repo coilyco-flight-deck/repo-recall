@@ -158,11 +158,10 @@ pub async fn detail(
 ) -> Response {
     let state2 = state.clone();
     let data = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let state = state2;
-        let conn = db::open(&state.db_path)?;
-        let sr = db::get_session(&conn, id)?;
+        let cache = &state2.cache_db;
+        let sr = cache.get_session(id)?;
         let partitioned = match sr.as_ref() {
-            Some(_) => db::repos_for_session_by_match(&conn, id)?,
+            Some(_) => cache.repos_for_session_by_match(id)?,
             None => (Vec::new(), Vec::new()),
         };
         // Parse the JSONL on demand — cheap enough (~tens of ms for a big

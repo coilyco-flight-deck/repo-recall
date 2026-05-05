@@ -1,210 +1,90 @@
-use std::path::Path;
+// Cache layer backed by redb. Wipe-on-restart: the file lives under
+// `$TMPDIR/repo-recall-<port>/cache.redb` by default and is deleted at
+// startup so a fresh process always sees an empty corpus.
+//
+// Layout: one primary table per entity (id -> JSON-encoded record) plus a
+// hand-designed secondary index for every query path so per-repo lookups
+// stay sub-linear. Aggregates that the SQL layer used subqueries for
+// (`session_count`, `commits_30d`, `authors_30d`) are precomputed at the
+// end of refresh and stored on the Repo record itself.
+//
+// Concurrency: redb gives MVCC, so reads open lightweight read txns
+// freely. The single writer is the refresh path (guarded by
+// `state.refresh_lock` upstream); request handlers never write to the
+// cache. Bulk writes during refresh route through `CacheDb::write_batch`
+// so the whole phase commits atomically.
 
-use anyhow::Result;
-use rusqlite::Connection;
-use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub fn open(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(conn)
-}
+use anyhow::{Context, Result};
+use redb::{
+    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+    WriteTransaction,
+};
+use serde::{Deserialize, Serialize};
 
-pub fn init(path: &Path) -> Result<()> {
-    let conn = open(path)?;
-    conn.execute_batch(
-        r#"
-        DROP TABLE IF EXISTS file_changes;
-        DROP TABLE IF EXISTS uncommitted_files;
-        DROP TABLE IF EXISTS commits;
-        DROP TABLE IF EXISTS session_repos;
-        DROP TABLE IF EXISTS sessions;
-        DROP TABLE IF EXISTS active_remote_repos;
-        DROP TABLE IF EXISTS repos;
+// ---------------------------------------------------------------------------
+// table definitions
+// ---------------------------------------------------------------------------
 
-        CREATE TABLE repos (
-            id INTEGER PRIMARY KEY,
-            path TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL,
-            discovered_at INTEGER NOT NULL,
-            -- Normalized browsable base, e.g. `https://github.com/owner/repo`.
-            -- Null when the repo has no `origin` or the URL wasn't parseable.
-            remote_url TEXT,
-            -- Short branch name of `refs/remotes/origin/HEAD`, e.g. `main`.
-            -- Null when there's no origin or origin/HEAD is unset.
-            default_branch TEXT,
-            -- Sum of (additions + deletions) from `git log --numstat` across
-            -- commits in the last 30 days. A rough "how much code moved"
-            -- signal, surfaced alongside the commit-count pill.
-            loc_churn_30d INTEGER NOT NULL DEFAULT 0,
-            -- Working-tree state (from `git status --porcelain=v1 -uall` at
-            -- refresh time). Untracked = `??`-prefixed lines; modified =
-            -- everything else (staged + unstaged, including renames).
-            untracked_files INTEGER NOT NULL DEFAULT 0,
-            modified_files INTEGER NOT NULL DEFAULT 0,
-            -- Latest default-branch CI run outcome from `gh run list`:
-            -- 'success' | 'failure' | 'running' | 'pending' | NULL (unknown /
-            -- no `gh` / no GitHub remote / not yet checked).
-            ci_status TEXT,
-            -- Commits the local branch is ahead / behind its upstream.
-            -- 0 when no upstream is configured (rather than NULL — simpler).
-            commits_ahead INTEGER NOT NULL DEFAULT 0,
-            commits_behind INTEGER NOT NULL DEFAULT 0,
-            -- `git stash list` count. Stash-heavy repos are a useful signal.
-            stash_count INTEGER NOT NULL DEFAULT 0,
-            -- Short branch name, or literal "detached" for a detached HEAD.
-            -- NULL when HEAD isn't resolvable (brand new empty repo, etc).
-            head_ref TEXT,
-            -- One of 'rebase' | 'merge' | 'cherry-pick' | 'bisect' | 'revert'
-            -- when the repo is mid-operation (detected by `.git/` state
-            -- files). NULL when clean. Any non-NULL is action-required.
-            in_progress_op TEXT,
-            -- GitHub remote-state snapshot (filled by `gh pr list` /
-            -- `gh issue list` in the parallel remote pass). Zero when we
-            -- can't query (no GH remote / `gh` missing / errored).
-            open_prs INTEGER NOT NULL DEFAULT 0,
-            draft_prs INTEGER NOT NULL DEFAULT 0,
-            open_issues INTEGER NOT NULL DEFAULT 0,
-            prs_awaiting_my_review INTEGER NOT NULL DEFAULT 0,
-            prs_mine_awaiting_review INTEGER NOT NULL DEFAULT 0,
-            -- Your open non-draft PRs with zero reviewers requested. You are
-            -- the blocker (request a reviewer, or self-merge on a solo repo).
-            -- Action-required when > 0.
-            prs_mine_no_reviewer INTEGER NOT NULL DEFAULT 0,
-            -- Open draft PRs authored by the authenticated `gh` user. Action-
-            -- required because Kai owes herself "get this into a reviewable
-            -- state" - distinct from `draft_prs`, which is the repo total.
-            my_draft_prs INTEGER NOT NULL DEFAULT 0,
-            -- Open issues assigned to the authenticated `gh` user. Distinct
-            -- from `open_issues` (the repo total) so a repo can have many
-            -- issues without dragging this signal up. Action-required when > 0.
-            issues_assigned_to_me INTEGER NOT NULL DEFAULT 0,
-            -- Deploy-workflow health, populated when the repo has a workflow
-            -- file matching `*deploy*.{yml,yaml}` under `.github/workflows/`.
-            -- All NULL when the repo doesn't deploy via GH Actions or `gh`
-            -- couldn't query it.
-            deploy_workflow TEXT,
-            -- Last run outcome for the deploy workflow on the default branch:
-            -- 'success' | 'failure' | 'running' | 'pending' | NULL.
-            deploy_status TEXT,
-            -- Unix seconds of the most recent *successful* deploy run on the
-            -- default branch. NULL when the workflow has never gone green.
-            -- Drives the `deploy_stale` signal (last success > 7 days old).
-            deploy_last_success_ts INTEGER
-        );
+// Primary tables: id -> JSON record.
+const REPOS: TableDefinition<u64, &[u8]> = TableDefinition::new("repos");
+const SESSIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("sessions");
+const COMMITS: TableDefinition<u64, &[u8]> = TableDefinition::new("commits");
+const FILE_CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("file_changes");
+const UNCOMMITTED_FILES: TableDefinition<u64, &[u8]> = TableDefinition::new("uncommitted_files");
+const ACTIVE_REMOTE_REPOS: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("active_remote_repos");
 
-        CREATE TABLE sessions (
-            id INTEGER PRIMARY KEY,
-            session_uuid TEXT NOT NULL UNIQUE,
-            cwd TEXT,
-            started_at INTEGER,
-            ended_at INTEGER,
-            message_count INTEGER NOT NULL DEFAULT 0,
-            summary TEXT,
-            source_file TEXT NOT NULL,
-            -- Wall-clock span of the session in milliseconds (ended - started).
-            -- NULL when we only saw one timestamp.
-            duration_ms INTEGER,
-            -- Token usage summed across every assistant turn's `message.usage`
-            -- in the JSONL. Zero when the usage blocks aren't populated (older
-            -- sessions / malformed lines).
-            input_tokens INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0,
-            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-            cache_creation_tokens INTEGER NOT NULL DEFAULT 0
-        );
+// id-allocator counters keyed by entity name ("repo", "session", ...).
+const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
-        CREATE TABLE session_repos (
-            session_id INTEGER NOT NULL REFERENCES sessions(id),
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            match_type TEXT NOT NULL,
-            PRIMARY KEY (session_id, repo_id, match_type)
-        );
+// Secondary indexes. Composite keys store the natural sort order so a
+// single ranged scan answers the query.
+const REPOS_BY_PATH: TableDefinition<&str, u64> = TableDefinition::new("repos_by_path");
+const SESSIONS_BY_UUID: TableDefinition<&str, u64> = TableDefinition::new("sessions_by_uuid");
+// (started_at, session_id). Sessions without a timestamp use i64::MIN so
+// they sort to the bottom under reverse iteration (NULLS LAST DESC).
+const SESSIONS_BY_STARTED_AT: TableDefinition<(i64, u64), ()> =
+    TableDefinition::new("sessions_by_started_at");
+// (session_id, repo_id, match_type) -> (). Match-types per (s,r) are
+// stored as separate rows so DISTINCT joins fall out naturally.
+const SESSION_REPOS: TableDefinition<(u64, u64, &str), ()> = TableDefinition::new("session_repos");
+const SESSION_REPOS_BY_REPO: TableDefinition<(u64, u64, &str), ()> =
+    TableDefinition::new("session_repos_by_repo");
+// (repo_id, sha) -> commit_id; INSERT OR IGNORE dedup.
+const COMMITS_BY_REPO_SHA: TableDefinition<(u64, &str), u64> =
+    TableDefinition::new("commits_by_repo_sha");
+// (repo_id, timestamp, commit_id) -> author_email. Author lives in the
+// value so the per-repo aggregate scan does not need to load each commit.
+const COMMITS_BY_REPO_TS: TableDefinition<(u64, i64, u64), &str> =
+    TableDefinition::new("commits_by_repo_ts");
+// (timestamp, commit_id) -> () for the dashboard's recent-commits scan.
+const COMMITS_BY_TS: TableDefinition<(i64, u64), ()> = TableDefinition::new("commits_by_ts");
+// (repo_id, timestamp, fc_id) -> () for the per-repo hotspot query.
+const FILE_CHANGES_BY_REPO_TS: TableDefinition<(u64, i64, u64), ()> =
+    TableDefinition::new("file_changes_by_repo_ts");
+const UNCOMMITTED_BY_REPO: TableDefinition<(u64, u64), ()> =
+    TableDefinition::new("uncommitted_by_repo");
+const ACTIVE_REPOS_BY_FULL_NAME: TableDefinition<&str, u64> =
+    TableDefinition::new("active_repos_by_full_name");
+const ACTIVE_REPOS_BY_HTTPS_URL: TableDefinition<&str, u64> =
+    TableDefinition::new("active_repos_by_https_url");
+const ACTIVE_REPOS_BY_PUSHED_AT: TableDefinition<(i64, u64), ()> =
+    TableDefinition::new("active_repos_by_pushed_at");
 
-        CREATE TABLE commits (
-            id INTEGER PRIMARY KEY,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            sha TEXT NOT NULL,
-            author_name TEXT NOT NULL,
-            author_email TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            subject TEXT NOT NULL,
-            UNIQUE(repo_id, sha)
-        );
+const META_NEXT_REPO: &str = "next_repo_id";
+const META_NEXT_SESSION: &str = "next_session_id";
+const META_NEXT_COMMIT: &str = "next_commit_id";
+const META_NEXT_FILE_CHANGE: &str = "next_file_change_id";
+const META_NEXT_UNCOMMITTED: &str = "next_uncommitted_id";
+const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
 
-        -- A capped sample of file paths from `git status --porcelain` per
-        -- repo. We store *some* individual paths (for the dashboard's
-        -- uncommitted-files column) and rely on the full counts living on
-        -- the `repos` row for the score + pill. This is per-refresh state,
-        -- not a long-term log.
-        CREATE TABLE uncommitted_files (
-            id INTEGER PRIMARY KEY,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            path TEXT NOT NULL,
-            -- 'untracked' (`??`) or 'modified' (everything else).
-            kind TEXT NOT NULL
-        );
-
-        CREATE INDEX idx_sessions_started_at ON sessions(started_at DESC);
-        CREATE INDEX idx_session_repos_repo ON session_repos(repo_id);
-        CREATE INDEX idx_session_repos_session ON session_repos(session_id);
-        CREATE INDEX idx_commits_repo_ts ON commits(repo_id, timestamp DESC);
-        CREATE INDEX idx_commits_ts ON commits(timestamp DESC);
-        CREATE INDEX idx_uncommitted_repo ON uncommitted_files(repo_id);
-
-        -- One row per (commit, file) pair from `git log --numstat`. Holds
-        -- the raw per-file churn so we can derive hotspots, per-author
-        -- churn, etc. without re-running git. Replaces the old aggregate-
-        -- only `loc_churn_30d` column as the source of truth (that column
-        -- is still materialised for quick score lookups).
-        CREATE TABLE file_changes (
-            id INTEGER PRIMARY KEY,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            sha TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            additions INTEGER NOT NULL,
-            deletions INTEGER NOT NULL,
-            author_email TEXT NOT NULL,
-            timestamp INTEGER NOT NULL
-        );
-        CREATE INDEX idx_file_changes_repo_ts ON file_changes(repo_id, timestamp DESC);
-        CREATE INDEX idx_file_changes_path ON file_changes(repo_id, file_path);
-
-        -- Snapshot of "active" GitHub repos for the authenticated `gh` user,
-        -- pulled once per refresh. Powers the "clone one" button on the
-        -- dashboard for repos the user has elsewhere but hasn't cloned into
-        -- this scan tree yet. Wiped + rebuilt with the rest of the cache.
-        CREATE TABLE active_remote_repos (
-            id INTEGER PRIMARY KEY,
-            full_name TEXT NOT NULL UNIQUE,
-            https_url TEXT NOT NULL,
-            ssh_url TEXT,
-            default_branch TEXT,
-            pushed_at INTEGER,
-            description TEXT,
-            is_fork INTEGER NOT NULL DEFAULT 0,
-            is_archived INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX idx_active_remote_repos_pushed ON active_remote_repos(pushed_at DESC);
-        "#,
-    )?;
-    Ok(())
-}
-
-pub fn wipe(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "DELETE FROM file_changes; \
-         DELETE FROM uncommitted_files; \
-         DELETE FROM commits; \
-         DELETE FROM session_repos; \
-         DELETE FROM sessions; \
-         DELETE FROM active_remote_repos; \
-         DELETE FROM repos;",
-    )?;
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// public API surface (unchanged from the SQLite version)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileHotspot {
@@ -214,93 +94,6 @@ pub struct FileHotspot {
     pub authors: i64,
 }
 
-/// Top-N most-edited files in a repo over the given time window. `churn` is
-/// `SUM(additions + deletions)`, `commits` is how many commits touched the
-/// file, `authors` is distinct authors who touched it — three signals from
-/// one query so the repo detail page can show all of them at once.
-pub fn file_hotspots(
-    conn: &Connection,
-    repo_id: i64,
-    since_ts: i64,
-    limit: i64,
-) -> Result<Vec<FileHotspot>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT file_path,
-               SUM(additions + deletions) AS churn,
-               COUNT(*) AS commits,
-               COUNT(DISTINCT author_email) AS authors
-        FROM file_changes
-        WHERE repo_id = ?1 AND timestamp >= ?2
-        GROUP BY file_path
-        ORDER BY churn DESC, commits DESC
-        LIMIT ?3
-        "#,
-    )?;
-    let rows = stmt.query_map(rusqlite::params![repo_id, since_ts, limit], |row| {
-        Ok(FileHotspot {
-            file_path: row.get(0)?,
-            churn: row.get(1)?,
-            commits: row.get(2)?,
-            authors: row.get(3)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-/// Read every row that would land in `search_idx` and return it as plain
-/// records. Step 2 of the redb migration uses this to dual-write the same
-/// corpus into tantivy alongside SQLite. Kept separate from
-/// `rebuild_search_index` so the SQLite read path is unchanged.
-pub fn collect_search_corpus(conn: &Connection) -> Result<Vec<crate::search::IndexDoc>> {
-    use crate::search::IndexDoc;
-    let mut out: Vec<IndexDoc> = Vec::new();
-
-    let mut stmt =
-        conn.prepare("SELECT id, COALESCE(name, '') || ' ' || COALESCE(path, '') FROM repos")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-    for row in rows {
-        let (id, text) = row?;
-        out.push(IndexDoc {
-            kind: "repo".into(),
-            ref_id: id,
-            text,
-        });
-    }
-
-    let mut stmt =
-        conn.prepare("SELECT id, COALESCE(summary, '') FROM sessions WHERE summary IS NOT NULL")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-    for row in rows {
-        let (id, text) = row?;
-        out.push(IndexDoc {
-            kind: "session".into(),
-            ref_id: id,
-            text,
-        });
-    }
-
-    let mut stmt = conn.prepare("SELECT id, COALESCE(subject, '') FROM commits")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-    for row in rows {
-        let (id, text) = row?;
-        out.push(IndexDoc {
-            kind: "commit".into(),
-            ref_id: id,
-            text,
-        });
-    }
-
-    Ok(out)
-}
-
-/// JSON shape of a search hit. Returned by both the `/search` route and
-/// the `recall_search` MCP tool. The reader is now tantivy
-/// (`crate::search`), but this struct remains the public API contract.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub kind: String,
@@ -309,21 +102,16 @@ pub struct SearchHit {
     pub extra: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub id: i64,
     pub path: String,
     pub name: String,
     pub session_count: i64,
-    /// Commits in the last 30 days. Surfaced as a repo-row pill so quiet
-    /// repos (no sessions, no recent commits) fade; active repos surface.
     pub commits_30d: i64,
     pub loc_churn_30d: i64,
     pub untracked_files: i64,
     pub modified_files: i64,
-    /// Distinct commit author emails in the last 30 days. Computed via a
-    /// subquery from the `commits` table rather than stored — the data is
-    /// already there.
     pub authors_30d: i64,
     pub ci_status: Option<String>,
     pub commits_ahead: i64,
@@ -346,7 +134,7 @@ pub struct Repo {
     pub default_branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: i64,
     pub session_uuid: String,
@@ -366,10 +154,10 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionWithRepos {
     pub session: Session,
-    pub repos: Vec<(i64, String, String)>, // id, name, path
+    pub repos: Vec<(i64, String, String)>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
     pub id: i64,
     pub repo_id: i64,
@@ -386,348 +174,17 @@ pub struct CommitWithRepo {
     pub repo_id: i64,
     pub repo_name: String,
     pub repo_path: String,
-    /// Normalized remote base (`https://github.com/owner/repo`). Present only
-    /// when the repo has a recognisable origin. Lets callers build
-    /// `/commit/<sha>` links without another DB round-trip.
     pub repo_remote_url: Option<String>,
 }
 
-pub fn list_repos_with_counts(conn: &Connection) -> Result<Vec<Repo>> {
-    // 30 days ago as unix seconds. Subqueries (vs. joins) keep the two counts
-    // independent so neither multiplies the other's row count.
-    let cutoff_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT r.id, r.path, r.name, r.remote_url, r.default_branch,
-               r.loc_churn_30d, r.untracked_files, r.modified_files, r.ci_status,
-               r.commits_ahead, r.commits_behind, r.stash_count,
-               r.head_ref, r.in_progress_op,
-               r.open_prs, r.draft_prs, r.open_issues,
-               r.prs_awaiting_my_review, r.prs_mine_awaiting_review,
-               r.prs_mine_no_reviewer,
-               r.issues_assigned_to_me,
-               r.deploy_workflow, r.deploy_status, r.deploy_last_success_ts,
-               r.my_draft_prs,
-               (SELECT COUNT(*) FROM session_repos sr WHERE sr.repo_id = r.id) AS session_count,
-               (SELECT COUNT(*) FROM commits c
-                WHERE c.repo_id = r.id AND c.timestamp >= ?1) AS commits_30d,
-               (SELECT COUNT(DISTINCT c.author_email) FROM commits c
-                WHERE c.repo_id = r.id AND c.timestamp >= ?1) AS authors_30d
-        FROM repos r
-        -- Intentionally no ORDER BY: callers re-sort via
-        -- `activity::sort` so the ranking stays consistent across however
-        -- many activity dimensions we currently have wired up.
-        "#,
-    )?;
-    let rows = stmt.query_map([cutoff_30d], |row| {
-        Ok(Repo {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            name: row.get(2)?,
-            remote_url: row.get(3)?,
-            default_branch: row.get(4)?,
-            loc_churn_30d: row.get(5)?,
-            untracked_files: row.get(6)?,
-            modified_files: row.get(7)?,
-            ci_status: row.get(8)?,
-            commits_ahead: row.get(9)?,
-            commits_behind: row.get(10)?,
-            stash_count: row.get(11)?,
-            head_ref: row.get(12)?,
-            in_progress_op: row.get(13)?,
-            open_prs: row.get(14)?,
-            draft_prs: row.get(15)?,
-            open_issues: row.get(16)?,
-            prs_awaiting_my_review: row.get(17)?,
-            prs_mine_awaiting_review: row.get(18)?,
-            prs_mine_no_reviewer: row.get(19)?,
-            issues_assigned_to_me: row.get(20)?,
-            deploy_workflow: row.get(21)?,
-            deploy_status: row.get(22)?,
-            deploy_last_success_ts: row.get(23)?,
-            my_draft_prs: row.get(24)?,
-            session_count: row.get(25)?,
-            commits_30d: row.get(26)?,
-            authors_30d: row.get(27)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-pub fn get_repo(conn: &Connection, id: i64) -> Result<Option<Repo>> {
-    let cutoff_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT r.id, r.path, r.name, r.remote_url, r.default_branch,
-               r.loc_churn_30d, r.untracked_files, r.modified_files, r.ci_status,
-               r.commits_ahead, r.commits_behind, r.stash_count,
-               r.head_ref, r.in_progress_op,
-               r.open_prs, r.draft_prs, r.open_issues,
-               r.prs_awaiting_my_review, r.prs_mine_awaiting_review,
-               r.prs_mine_no_reviewer,
-               r.issues_assigned_to_me,
-               r.deploy_workflow, r.deploy_status, r.deploy_last_success_ts,
-               r.my_draft_prs,
-               (SELECT COUNT(*) FROM session_repos sr WHERE sr.repo_id = r.id) AS session_count,
-               (SELECT COUNT(*) FROM commits c
-                WHERE c.repo_id = r.id AND c.timestamp >= ?2) AS commits_30d,
-               (SELECT COUNT(DISTINCT c.author_email) FROM commits c
-                WHERE c.repo_id = r.id AND c.timestamp >= ?2) AS authors_30d
-        FROM repos r
-        WHERE r.id = ?1
-        "#,
-    )?;
-    let mut rows = stmt.query_map(rusqlite::params![id, cutoff_30d], |row| {
-        Ok(Repo {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            name: row.get(2)?,
-            remote_url: row.get(3)?,
-            default_branch: row.get(4)?,
-            loc_churn_30d: row.get(5)?,
-            untracked_files: row.get(6)?,
-            modified_files: row.get(7)?,
-            ci_status: row.get(8)?,
-            commits_ahead: row.get(9)?,
-            commits_behind: row.get(10)?,
-            stash_count: row.get(11)?,
-            head_ref: row.get(12)?,
-            in_progress_op: row.get(13)?,
-            open_prs: row.get(14)?,
-            draft_prs: row.get(15)?,
-            open_issues: row.get(16)?,
-            prs_awaiting_my_review: row.get(17)?,
-            prs_mine_awaiting_review: row.get(18)?,
-            prs_mine_no_reviewer: row.get(19)?,
-            issues_assigned_to_me: row.get(20)?,
-            deploy_workflow: row.get(21)?,
-            deploy_status: row.get(22)?,
-            deploy_last_success_ts: row.get(23)?,
-            my_draft_prs: row.get(24)?,
-            session_count: row.get(25)?,
-            commits_30d: row.get(26)?,
-            authors_30d: row.get(27)?,
-        })
-    })?;
-    Ok(rows.next().transpose()?)
-}
-
-pub fn sessions_for_repo(conn: &Connection, repo_id: i64) -> Result<Vec<Session>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT DISTINCT s.id, s.session_uuid, s.cwd, s.started_at, s.ended_at,
-                        s.message_count, s.summary, s.source_file,
-                        s.duration_ms, s.input_tokens, s.output_tokens,
-                        s.cache_read_tokens, s.cache_creation_tokens
-        FROM sessions s
-        JOIN session_repos sr ON sr.session_id = s.id
-        WHERE sr.repo_id = ?1
-        ORDER BY s.started_at DESC NULLS LAST
-        "#,
-    )?;
-    let rows = stmt.query_map([repo_id], map_session)?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-pub fn recent_sessions(conn: &Connection, limit: i64) -> Result<Vec<SessionWithRepos>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT s.id, s.session_uuid, s.cwd, s.started_at, s.ended_at,
-               s.message_count, s.summary, s.source_file,
-               s.duration_ms, s.input_tokens, s.output_tokens,
-               s.cache_read_tokens, s.cache_creation_tokens
-        FROM sessions s
-        ORDER BY s.started_at DESC NULLS LAST
-        LIMIT ?1
-        "#,
-    )?;
-    let rows = stmt.query_map([limit], map_session)?;
-    let mut sessions = Vec::new();
-    for r in rows {
-        sessions.push(r?);
-    }
-    let mut out = Vec::with_capacity(sessions.len());
-    for s in sessions {
-        let repos = repos_for_session(conn, s.id)?;
-        out.push(SessionWithRepos { session: s, repos });
-    }
-    Ok(out)
-}
-
-pub fn get_session(conn: &Connection, id: i64) -> Result<Option<SessionWithRepos>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id, session_uuid, cwd, started_at, ended_at,
-               message_count, summary, source_file,
-               duration_ms, input_tokens, output_tokens,
-               cache_read_tokens, cache_creation_tokens
-        FROM sessions
-        WHERE id = ?1
-        "#,
-    )?;
-    let mut rows = stmt.query_map([id], map_session)?;
-    match rows.next() {
-        None => Ok(None),
-        Some(r) => {
-            let s = r?;
-            let repos = repos_for_session(conn, s.id)?;
-            Ok(Some(SessionWithRepos { session: s, repos }))
-        }
-    }
-}
-
-pub fn repos_for_session(conn: &Connection, session_id: i64) -> Result<Vec<(i64, String, String)>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT DISTINCT r.id, r.name, r.path
-        FROM repos r
-        JOIN session_repos sr ON sr.repo_id = r.id
-        WHERE sr.session_id = ?1
-        ORDER BY r.name COLLATE NOCASE ASC
-        "#,
-    )?;
-    let rows = stmt.query_map([session_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-/// Partitioned version: returns `(cwd_matches, content_matches)` for the
-/// session detail page so it can render each with its own tone + admission.
-#[allow(clippy::type_complexity)]
-pub fn repos_for_session_by_match(
-    conn: &Connection,
-    session_id: i64,
-) -> Result<(Vec<(i64, String, String)>, Vec<(i64, String, String)>)> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT r.id, r.name, r.path, sr.match_type
-        FROM repos r
-        JOIN session_repos sr ON sr.repo_id = r.id
-        WHERE sr.session_id = ?1
-        ORDER BY sr.match_type ASC, r.name COLLATE NOCASE ASC
-        "#,
-    )?;
-    let rows = stmt.query_map([session_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    let mut cwd = Vec::new();
-    let mut content = Vec::new();
-    for r in rows {
-        let (id, name, path, match_type) = r?;
-        match match_type.as_str() {
-            "content_mention" => content.push((id, name, path)),
-            _ => cwd.push((id, name, path)),
-        }
-    }
-    Ok((cwd, content))
-}
-
-/// Earliest `started_at` across all indexed sessions. `None` if no sessions
-/// have a timestamp. Used to surface "how far back does history go" on the
-/// dashboard — the answer is whatever Claude Code happens to have kept on
-/// disk, since we don't cap our own scan.
-pub fn earliest_session_ts(conn: &Connection) -> Result<Option<i64>> {
-    let ts: Option<i64> = conn.query_row(
-        "SELECT MIN(started_at) FROM sessions WHERE started_at IS NOT NULL",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(ts)
-}
-
-/// One repo's uncommitted-work summary — total counts + a capped sample of
-/// individual paths. Used by the dashboard's "action required" column so we
-/// group dirt *by repo* instead of emitting a flat list that scrolls past.
 #[derive(Debug, Clone, Serialize)]
 pub struct UncommittedGroup {
     pub repo_id: i64,
     pub repo_name: String,
     pub repo_path: String,
     pub repo_remote_url: Option<String>,
-    /// Total untracked + modified for this repo (full count, not sample).
     pub total: i64,
-    /// A bounded sample of `(path, kind)` pairs for display.
     pub sample: Vec<(String, String)>,
-}
-
-pub fn uncommitted_by_repo(
-    conn: &Connection,
-    max_repos: i64,
-    files_per_repo: usize,
-) -> Result<Vec<UncommittedGroup>> {
-    // Pull every captured file row for repos that actually have uncommitted
-    // work, joined to repo metadata. Order within a repo: modified first
-    // (tracked, usually the more interesting kind), then untracked.
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT r.id, r.name, r.path, r.remote_url,
-               r.untracked_files + r.modified_files AS total,
-               u.path, u.kind
-        FROM repos r
-        JOIN uncommitted_files u ON u.repo_id = r.id
-        WHERE (r.untracked_files + r.modified_files) > 0
-        ORDER BY total DESC, r.name COLLATE NOCASE ASC,
-                 u.kind DESC, u.path ASC
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-        ))
-    })?;
-
-    let mut groups: Vec<UncommittedGroup> = Vec::new();
-    for row in rows {
-        let (repo_id, name, path, url, total, file_path, kind) = row?;
-        if let Some(last) = groups.last_mut() {
-            if last.repo_id == repo_id {
-                if last.sample.len() < files_per_repo {
-                    last.sample.push((file_path, kind));
-                }
-                continue;
-            }
-        }
-        if groups.len() as i64 >= max_repos {
-            break;
-        }
-        groups.push(UncommittedGroup {
-            repo_id,
-            repo_name: name,
-            repo_path: path,
-            repo_remote_url: url,
-            total,
-            sample: vec![(file_path, kind)],
-        });
-    }
-    Ok(groups)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -739,83 +196,7 @@ pub struct CiFailure {
     pub default_branch: Option<String>,
 }
 
-pub fn failing_ci_repos(conn: &Connection) -> Result<Vec<CiFailure>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id, name, path, remote_url, default_branch
-        FROM repos
-        WHERE ci_status = 'failure'
-        ORDER BY name COLLATE NOCASE ASC
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(CiFailure {
-            repo_id: row.get(0)?,
-            repo_name: row.get(1)?,
-            repo_path: row.get(2)?,
-            remote_url: row.get(3)?,
-            default_branch: row.get(4)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-pub fn counts(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
-    let repos: i64 = conn.query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))?;
-    let sessions: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
-    let links: i64 = conn.query_row("SELECT COUNT(*) FROM session_repos", [], |r| r.get(0))?;
-    let commits: i64 = conn.query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))?;
-    Ok((repos, sessions, links, commits))
-}
-
-pub fn recent_commits(
-    conn: &Connection,
-    limit: i64,
-    author_filter: Option<&str>,
-) -> Result<Vec<CommitWithRepo>> {
-    // Single SQL shape with an always-matches fallback for the email, so we
-    // don't have to juggle two parameter lists with different lifetimes.
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT c.id, c.repo_id, c.sha, c.author_name, c.author_email,
-               c.timestamp, c.subject,
-               r.name, r.path, r.remote_url
-        FROM commits c
-        JOIN repos r ON r.id = c.repo_id
-        WHERE (?2 IS NULL OR c.author_email = ?2)
-        ORDER BY c.timestamp DESC
-        LIMIT ?1
-        "#,
-    )?;
-    let rows = stmt.query_map(rusqlite::params![limit, author_filter], |row| {
-        Ok(CommitWithRepo {
-            commit: Commit {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                sha: row.get(2)?,
-                author_name: row.get(3)?,
-                author_email: row.get(4)?,
-                timestamp: row.get(5)?,
-                subject: row.get(6)?,
-            },
-            repo_id: row.get(1)?,
-            repo_name: row.get(7)?,
-            repo_path: row.get(8)?,
-            repo_remote_url: row.get(9)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveRemoteRepo {
     pub id: i64,
     pub full_name: String,
@@ -828,141 +209,1124 @@ pub struct ActiveRemoteRepo {
     pub is_archived: bool,
 }
 
-pub fn upsert_active_remote_repos(conn: &Connection, repos: &[ActiveRemoteRepo]) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM active_remote_repos", [])?;
-    let mut n = 0usize;
-    for r in repos {
-        tx.execute(
-            "INSERT OR IGNORE INTO active_remote_repos
-             (full_name, https_url, ssh_url, default_branch, pushed_at,
-              description, is_fork, is_archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                r.full_name,
-                r.https_url,
-                r.ssh_url,
-                r.default_branch,
-                r.pushed_at,
-                r.description,
-                r.is_fork as i64,
-                r.is_archived as i64,
-            ],
-        )?;
-        n += 1;
+// ---------------------------------------------------------------------------
+// records persisted to disk (extra fields beyond the public types)
+// ---------------------------------------------------------------------------
+
+/// Internal on-disk record for `file_changes` rows. The dashboard never
+/// reads these directly; they exist for the hotspot aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileChangeRecord {
+    id: i64,
+    repo_id: i64,
+    sha: String,
+    file_path: String,
+    additions: i64,
+    deletions: i64,
+    author_email: String,
+    timestamp: i64,
+}
+
+/// Internal on-disk record for `uncommitted_files` rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UncommittedFileRecord {
+    id: i64,
+    repo_id: i64,
+    path: String,
+    kind: String,
+}
+
+// ---------------------------------------------------------------------------
+// CacheDb
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct CacheDb {
+    db: Arc<Database>,
+}
+
+impl std::fmt::Debug for CacheDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheDb").finish_non_exhaustive()
     }
-    tx.commit()?;
+}
+
+impl CacheDb {
+    /// Open the cache file at `<dir>/cache.redb`, deleting any prior file
+    /// first. Wipe-on-restart matches the SQLite-era contract.
+    pub fn open_in_dir(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| format!("create cache dir: {dir:?}"))?;
+        let path = dir.join("cache.redb");
+        let _ = std::fs::remove_file(&path);
+        Self::open_at(path)
+    }
+
+    pub fn open_at(path: PathBuf) -> Result<Self> {
+        let db = Database::create(&path).with_context(|| format!("open cache redb at {path:?}"))?;
+        // Pre-create every table so first reads do not error on a fresh file.
+        let write = db.begin_write()?;
+        {
+            let _ = write.open_table(REPOS)?;
+            let _ = write.open_table(SESSIONS)?;
+            let _ = write.open_table(COMMITS)?;
+            let _ = write.open_table(FILE_CHANGES)?;
+            let _ = write.open_table(UNCOMMITTED_FILES)?;
+            let _ = write.open_table(ACTIVE_REMOTE_REPOS)?;
+            let _ = write.open_table(META)?;
+            let _ = write.open_table(REPOS_BY_PATH)?;
+            let _ = write.open_table(SESSIONS_BY_UUID)?;
+            let _ = write.open_table(SESSIONS_BY_STARTED_AT)?;
+            let _ = write.open_table(SESSION_REPOS)?;
+            let _ = write.open_table(SESSION_REPOS_BY_REPO)?;
+            let _ = write.open_table(COMMITS_BY_REPO_SHA)?;
+            let _ = write.open_table(COMMITS_BY_REPO_TS)?;
+            let _ = write.open_table(COMMITS_BY_TS)?;
+            let _ = write.open_table(FILE_CHANGES_BY_REPO_TS)?;
+            let _ = write.open_table(UNCOMMITTED_BY_REPO)?;
+            let _ = write.open_table(ACTIVE_REPOS_BY_FULL_NAME)?;
+            let _ = write.open_table(ACTIVE_REPOS_BY_HTTPS_URL)?;
+            let _ = write.open_table(ACTIVE_REPOS_BY_PUSHED_AT)?;
+        }
+        write.commit()?;
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Run a closure inside a single write transaction. All mutations
+    /// commit atomically when the closure returns Ok.
+    pub fn write_batch<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&CacheWriter) -> Result<R>,
+    {
+        let txn = self.db.begin_write()?;
+        let res = {
+            let writer = CacheWriter { txn: &txn };
+            f(&writer)?
+        };
+        txn.commit()?;
+        Ok(res)
+    }
+
+    /// Truncate every cache table. Called at the start of every refresh.
+    pub fn wipe(&self) -> Result<()> {
+        self.write_batch(|w| w.wipe())
+    }
+
+    // -----------------------------------------------------------------
+    // reads
+    // -----------------------------------------------------------------
+
+    pub fn list_repos_with_counts(&self) -> Result<Vec<Repo>> {
+        let read = self.db.begin_read()?;
+        let t = read.open_table(REPOS)?;
+        let mut out: Vec<Repo> = Vec::new();
+        for row in t.iter()? {
+            let (_k, v) = row?;
+            let r: Repo = serde_json::from_slice(v.value())?;
+            out.push(r);
+        }
+        Ok(out)
+    }
+
+    pub fn get_repo(&self, id: i64) -> Result<Option<Repo>> {
+        let read = self.db.begin_read()?;
+        let t = read.open_table(REPOS)?;
+        let Some(g) = t.get(id_to_u64(id))? else {
+            return Ok(None);
+        };
+        let r: Repo = serde_json::from_slice(g.value())?;
+        Ok(Some(r))
+    }
+
+    pub fn sessions_for_repo(&self, repo_id: i64) -> Result<Vec<Session>> {
+        let read = self.db.begin_read()?;
+        let by_repo = read.open_table(SESSION_REPOS_BY_REPO)?;
+        let sessions_t = read.open_table(SESSIONS)?;
+        let key_lo = (id_to_u64(repo_id), 0u64, "");
+        let key_hi = (id_to_u64(repo_id), u64::MAX, "\u{10ffff}");
+        let mut session_ids: BTreeSet<u64> = BTreeSet::new();
+        for row in by_repo.range(key_lo..=key_hi)? {
+            let (k, _) = row?;
+            let (_, sid, _) = k.value();
+            session_ids.insert(sid);
+        }
+        let mut out: Vec<Session> = Vec::with_capacity(session_ids.len());
+        for sid in session_ids {
+            if let Some(g) = sessions_t.get(sid)? {
+                let s: Session = serde_json::from_slice(g.value())?;
+                out.push(s);
+            }
+        }
+        // ORDER BY started_at DESC NULLS LAST.
+        out.sort_by(|a, b| order_by_started_at_desc(a.started_at, b.started_at));
+        Ok(out)
+    }
+
+    pub fn recent_sessions(&self, limit: i64) -> Result<Vec<SessionWithRepos>> {
+        let read = self.db.begin_read()?;
+        let by_ts = read.open_table(SESSIONS_BY_STARTED_AT)?;
+        let sessions_t = read.open_table(SESSIONS)?;
+        let mut out: Vec<Session> = Vec::with_capacity(limit.max(0) as usize);
+        for row in by_ts.iter()?.rev() {
+            let (k, _) = row?;
+            let (_ts, sid) = k.value();
+            let Some(g) = sessions_t.get(sid)? else {
+                continue;
+            };
+            let s: Session = serde_json::from_slice(g.value())?;
+            out.push(s);
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+        let mut with_repos = Vec::with_capacity(out.len());
+        for s in out {
+            let repos = self.repos_for_session(s.id)?;
+            with_repos.push(SessionWithRepos { session: s, repos });
+        }
+        Ok(with_repos)
+    }
+
+    pub fn get_session(&self, id: i64) -> Result<Option<SessionWithRepos>> {
+        let session = {
+            let read = self.db.begin_read()?;
+            let t = read.open_table(SESSIONS)?;
+            match t.get(id_to_u64(id))? {
+                Some(g) => Some(serde_json::from_slice::<Session>(g.value())?),
+                None => None,
+            }
+        };
+        let Some(s) = session else {
+            return Ok(None);
+        };
+        let repos = self.repos_for_session(s.id)?;
+        Ok(Some(SessionWithRepos { session: s, repos }))
+    }
+
+    pub fn repos_for_session(&self, session_id: i64) -> Result<Vec<(i64, String, String)>> {
+        let read = self.db.begin_read()?;
+        let session_repos = read.open_table(SESSION_REPOS)?;
+        let repos_t = read.open_table(REPOS)?;
+        let key_lo = (id_to_u64(session_id), 0u64, "");
+        let key_hi = (id_to_u64(session_id), u64::MAX, "\u{10ffff}");
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        for row in session_repos.range(key_lo..=key_hi)? {
+            let (k, _) = row?;
+            let (_sid, rid, _mt) = k.value();
+            seen.insert(rid);
+        }
+        let mut rows: Vec<(i64, String, String)> = Vec::with_capacity(seen.len());
+        for rid in seen {
+            if let Some(g) = repos_t.get(rid)? {
+                let r: Repo = serde_json::from_slice(g.value())?;
+                rows.push((r.id, r.name, r.path));
+            }
+        }
+        // ORDER BY r.name COLLATE NOCASE ASC.
+        rows.sort_by_key(|r| r.1.to_lowercase());
+        Ok(rows)
+    }
+
+    /// Returns `(cwd_matches, content_matches)`.
+    #[allow(clippy::type_complexity)]
+    pub fn repos_for_session_by_match(
+        &self,
+        session_id: i64,
+    ) -> Result<(Vec<(i64, String, String)>, Vec<(i64, String, String)>)> {
+        let read = self.db.begin_read()?;
+        let session_repos = read.open_table(SESSION_REPOS)?;
+        let repos_t = read.open_table(REPOS)?;
+        let key_lo = (id_to_u64(session_id), 0u64, "");
+        let key_hi = (id_to_u64(session_id), u64::MAX, "\u{10ffff}");
+        let mut by_match: HashMap<String, Vec<(i64, String, String)>> = HashMap::new();
+        for row in session_repos.range(key_lo..=key_hi)? {
+            let (k, _) = row?;
+            let (_sid, rid, mt) = k.value();
+            if let Some(g) = repos_t.get(rid)? {
+                let r: Repo = serde_json::from_slice(g.value())?;
+                by_match
+                    .entry(mt.to_string())
+                    .or_default()
+                    .push((r.id, r.name, r.path));
+            }
+        }
+        for v in by_match.values_mut() {
+            v.sort_by_key(|r| r.1.to_lowercase());
+        }
+        let cwd = by_match.remove("cwd").unwrap_or_default();
+        let content = by_match.remove("content_mention").unwrap_or_default();
+        // Anything else (future match types) defaults into the cwd bucket
+        // for the same reason the SQLite version's match arm did: callers
+        // treat non-content matches as the primary list.
+        let mut cwd_combined = cwd;
+        for (mt, mut v) in by_match {
+            tracing::debug!("session {session_id}: unknown match_type {mt:?}");
+            cwd_combined.append(&mut v);
+        }
+        Ok((cwd_combined, content))
+    }
+
+    pub fn earliest_session_ts(&self) -> Result<Option<i64>> {
+        let read = self.db.begin_read()?;
+        let by_ts = read.open_table(SESSIONS_BY_STARTED_AT)?;
+        // Sessions with NULL started_at use i64::MIN; skip those.
+        for row in by_ts.iter()? {
+            let (k, _) = row?;
+            let (ts, _) = k.value();
+            if ts == i64::MIN {
+                continue;
+            }
+            return Ok(Some(ts));
+        }
+        Ok(None)
+    }
+
+    pub fn uncommitted_by_repo(
+        &self,
+        max_repos: i64,
+        files_per_repo: usize,
+    ) -> Result<Vec<UncommittedGroup>> {
+        let read = self.db.begin_read()?;
+        let repos_t = read.open_table(REPOS)?;
+        let by_repo = read.open_table(UNCOMMITTED_BY_REPO)?;
+        let files_t = read.open_table(UNCOMMITTED_FILES)?;
+
+        // Collect groups keyed by repo_id with their dirty totals + files.
+        struct Acc {
+            repo: Repo,
+            total: i64,
+            samples: Vec<(String, String)>,
+        }
+        let mut acc: HashMap<u64, Acc> = HashMap::new();
+        for row in by_repo.iter()? {
+            let (k, _) = row?;
+            let (rid, fid) = k.value();
+            let entry = match acc.entry(rid) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let Some(g) = repos_t.get(rid)? else {
+                        continue;
+                    };
+                    let repo: Repo = serde_json::from_slice(g.value())?;
+                    let total = repo.untracked_files + repo.modified_files;
+                    if total <= 0 {
+                        continue;
+                    }
+                    slot.insert(Acc {
+                        repo,
+                        total,
+                        samples: Vec::new(),
+                    })
+                }
+            };
+            if let Some(g) = files_t.get(fid)? {
+                let f: UncommittedFileRecord = serde_json::from_slice(g.value())?;
+                entry.samples.push((f.path, f.kind));
+            }
+        }
+
+        let mut groups: Vec<UncommittedGroup> = acc
+            .into_values()
+            .map(|a| {
+                // Modified rows first (descending kind), then untracked,
+                // each sub-group sorted by path. Mirrors the SQLite ORDER.
+                let mut samples = a.samples;
+                samples.sort_by(|x, y| {
+                    y.1.cmp(&x.1) // kind DESC: 'untracked' < 'modified', want modified first
+                        .then_with(|| x.0.cmp(&y.0))
+                });
+                UncommittedGroup {
+                    repo_id: a.repo.id,
+                    repo_name: a.repo.name.clone(),
+                    repo_path: a.repo.path.clone(),
+                    repo_remote_url: a.repo.remote_url.clone(),
+                    total: a.total,
+                    sample: samples.into_iter().take(files_per_repo).collect(),
+                }
+            })
+            .collect();
+        // ORDER BY total DESC, name ASC NOCASE.
+        groups.sort_by(|a, b| {
+            b.total
+                .cmp(&a.total)
+                .then_with(|| a.repo_name.to_lowercase().cmp(&b.repo_name.to_lowercase()))
+        });
+        groups.truncate(max_repos.max(0) as usize);
+        Ok(groups)
+    }
+
+    pub fn failing_ci_repos(&self) -> Result<Vec<CiFailure>> {
+        let mut out: Vec<CiFailure> = Vec::new();
+        for r in self.list_repos_with_counts()? {
+            if r.ci_status.as_deref() == Some("failure") {
+                out.push(CiFailure {
+                    repo_id: r.id,
+                    repo_name: r.name,
+                    repo_path: r.path,
+                    remote_url: r.remote_url,
+                    default_branch: r.default_branch,
+                });
+            }
+        }
+        out.sort_by_key(|r| r.repo_name.to_lowercase());
+        Ok(out)
+    }
+
+    pub fn counts(&self) -> Result<(i64, i64, i64, i64)> {
+        let read = self.db.begin_read()?;
+        let repos = read.open_table(REPOS)?.len()? as i64;
+        let sessions = read.open_table(SESSIONS)?.len()? as i64;
+        let links = read.open_table(SESSION_REPOS)?.len()? as i64;
+        let commits = read.open_table(COMMITS)?.len()? as i64;
+        Ok((repos, sessions, links, commits))
+    }
+
+    pub fn recent_commits(
+        &self,
+        limit: i64,
+        author_filter: Option<&str>,
+    ) -> Result<Vec<CommitWithRepo>> {
+        let read = self.db.begin_read()?;
+        let by_ts = read.open_table(COMMITS_BY_TS)?;
+        let commits_t = read.open_table(COMMITS)?;
+        let repos_t = read.open_table(REPOS)?;
+        let mut out: Vec<CommitWithRepo> = Vec::new();
+        for row in by_ts.iter()?.rev() {
+            let (k, _) = row?;
+            let (_ts, cid) = k.value();
+            let Some(g) = commits_t.get(cid)? else {
+                continue;
+            };
+            let c: Commit = serde_json::from_slice(g.value())?;
+            if let Some(email) = author_filter {
+                if c.author_email != email {
+                    continue;
+                }
+            }
+            let (rname, rpath, rurl) = match repos_t.get(id_to_u64(c.repo_id))? {
+                Some(g) => {
+                    let r: Repo = serde_json::from_slice(g.value())?;
+                    (r.name, r.path, r.remote_url)
+                }
+                None => (String::new(), String::new(), None),
+            };
+            out.push(CommitWithRepo {
+                repo_id: c.repo_id,
+                repo_name: rname,
+                repo_path: rpath,
+                repo_remote_url: rurl,
+                commit: c,
+            });
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn commits_for_repo(&self, repo_id: i64, limit: i64) -> Result<Vec<Commit>> {
+        let read = self.db.begin_read()?;
+        let by_repo_ts = read.open_table(COMMITS_BY_REPO_TS)?;
+        let commits_t = read.open_table(COMMITS)?;
+        let key_lo = (id_to_u64(repo_id), i64::MIN, 0u64);
+        let key_hi = (id_to_u64(repo_id), i64::MAX, u64::MAX);
+        let mut out: Vec<Commit> = Vec::new();
+        for row in by_repo_ts.range(key_lo..=key_hi)?.rev() {
+            let (k, _) = row?;
+            let (_rid, _ts, cid) = k.value();
+            let Some(g) = commits_t.get(cid)? else {
+                continue;
+            };
+            let c: Commit = serde_json::from_slice(g.value())?;
+            out.push(c);
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn file_hotspots(
+        &self,
+        repo_id: i64,
+        since_ts: i64,
+        limit: i64,
+    ) -> Result<Vec<FileHotspot>> {
+        let read = self.db.begin_read()?;
+        let by_repo_ts = read.open_table(FILE_CHANGES_BY_REPO_TS)?;
+        let fc_t = read.open_table(FILE_CHANGES)?;
+        let key_lo = (id_to_u64(repo_id), since_ts, 0u64);
+        let key_hi = (id_to_u64(repo_id), i64::MAX, u64::MAX);
+
+        struct Acc {
+            churn: i64,
+            commits: i64,
+            authors: HashSet<String>,
+        }
+        let mut by_path: HashMap<String, Acc> = HashMap::new();
+        for row in by_repo_ts.range(key_lo..=key_hi)? {
+            let (k, _) = row?;
+            let (_rid, _ts, fid) = k.value();
+            let Some(g) = fc_t.get(fid)? else {
+                continue;
+            };
+            let f: FileChangeRecord = serde_json::from_slice(g.value())?;
+            let acc = by_path.entry(f.file_path.clone()).or_insert_with(|| Acc {
+                churn: 0,
+                commits: 0,
+                authors: HashSet::new(),
+            });
+            acc.churn += f.additions + f.deletions;
+            acc.commits += 1;
+            acc.authors.insert(f.author_email);
+        }
+        let mut hotspots: Vec<FileHotspot> = by_path
+            .into_iter()
+            .map(|(p, a)| FileHotspot {
+                file_path: p,
+                churn: a.churn,
+                commits: a.commits,
+                authors: a.authors.len() as i64,
+            })
+            .collect();
+        // ORDER BY churn DESC, commits DESC, then path ASC for stability.
+        hotspots.sort_by(|a, b| {
+            b.churn
+                .cmp(&a.churn)
+                .then_with(|| b.commits.cmp(&a.commits))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+        });
+        hotspots.truncate(limit.max(0) as usize);
+        Ok(hotspots)
+    }
+
+    /// Read every record that needs to land in tantivy. The shape mirrors
+    /// the prior FTS5 `search_idx` rows: `(kind, ref_id, text)`.
+    pub fn collect_search_corpus(&self) -> Result<Vec<crate::search::IndexDoc>> {
+        use crate::search::IndexDoc;
+        let read = self.db.begin_read()?;
+        let mut out: Vec<IndexDoc> = Vec::new();
+
+        for row in read.open_table(REPOS)?.iter()? {
+            let (_k, v) = row?;
+            let r: Repo = serde_json::from_slice(v.value())?;
+            let text = format!("{} {}", r.name, r.path);
+            out.push(IndexDoc {
+                kind: "repo".into(),
+                ref_id: r.id,
+                text,
+            });
+        }
+        for row in read.open_table(SESSIONS)?.iter()? {
+            let (_k, v) = row?;
+            let s: Session = serde_json::from_slice(v.value())?;
+            if let Some(text) = s.summary {
+                out.push(IndexDoc {
+                    kind: "session".into(),
+                    ref_id: s.id,
+                    text,
+                });
+            }
+        }
+        for row in read.open_table(COMMITS)?.iter()? {
+            let (_k, v) = row?;
+            let c: Commit = serde_json::from_slice(v.value())?;
+            out.push(IndexDoc {
+                kind: "commit".into(),
+                ref_id: c.id,
+                text: c.subject,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn uncloned_active_repos(&self, limit: i64) -> Result<Vec<ActiveRemoteRepo>> {
+        let read = self.db.begin_read()?;
+        let by_pushed = read.open_table(ACTIVE_REPOS_BY_PUSHED_AT)?;
+        let active_t = read.open_table(ACTIVE_REMOTE_REPOS)?;
+        let repos_by_remote: HashSet<String> = {
+            let mut set = HashSet::new();
+            for row in read.open_table(REPOS)?.iter()? {
+                let (_k, v) = row?;
+                let r: Repo = serde_json::from_slice(v.value())?;
+                if let Some(u) = r.remote_url {
+                    set.insert(u);
+                }
+            }
+            set
+        };
+        let mut out: Vec<ActiveRemoteRepo> = Vec::new();
+        for row in by_pushed.iter()?.rev() {
+            let (k, _) = row?;
+            let (_ts, aid) = k.value();
+            let Some(g) = active_t.get(aid)? else {
+                continue;
+            };
+            let a: ActiveRemoteRepo = serde_json::from_slice(g.value())?;
+            if a.is_archived {
+                continue;
+            }
+            if repos_by_remote.contains(&a.https_url) {
+                continue;
+            }
+            out.push(a);
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get_active_repo_by_full_name(
+        &self,
+        full_name: &str,
+    ) -> Result<Option<ActiveRemoteRepo>> {
+        let read = self.db.begin_read()?;
+        let by_name = read.open_table(ACTIVE_REPOS_BY_FULL_NAME)?;
+        let active_t = read.open_table(ACTIVE_REMOTE_REPOS)?;
+        let Some(g) = by_name.get(full_name)? else {
+            return Ok(None);
+        };
+        let aid = g.value();
+        match active_t.get(aid)? {
+            Some(g) => Ok(Some(serde_json::from_slice(g.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Pull every repo in the cache as `(id, name)` pairs. Used by the
+    /// content-mention pass to build the Aho-Corasick needle list.
+    pub fn iter_repo_ids_and_names(&self) -> Result<Vec<(i64, String)>> {
+        let read = self.db.begin_read()?;
+        let mut out = Vec::new();
+        for row in read.open_table(REPOS)?.iter()? {
+            let (_k, v) = row?;
+            let r: Repo = serde_json::from_slice(v.value())?;
+            out.push((r.id, r.name));
+        }
+        Ok(out)
+    }
+
+    /// Pull every indexed session as `(id, source_file)` pairs for the
+    /// content-mention scan to drive its file walk.
+    pub fn iter_session_source_files(&self) -> Result<Vec<(i64, String)>> {
+        let read = self.db.begin_read()?;
+        let mut out = Vec::new();
+        for row in read.open_table(SESSIONS)?.iter()? {
+            let (_k, v) = row?;
+            let s: Session = serde_json::from_slice(v.value())?;
+            out.push((s.id, s.source_file));
+        }
+        Ok(out)
+    }
+
+    /// Subset of repos eligible for remote-state queries: those with a
+    /// known origin URL and default branch. Sorted by most-recent commit
+    /// timestamp DESC so the optional cap keeps the active workspace.
+    pub fn remote_targets(
+        &self,
+        target_limit: usize,
+    ) -> Result<Vec<(i64, String, String, String)>> {
+        let read = self.db.begin_read()?;
+        let mut latest_per_repo: HashMap<u64, i64> = HashMap::new();
+        for row in read.open_table(COMMITS_BY_REPO_TS)?.iter()? {
+            let (k, _) = row?;
+            let (rid, ts, _) = k.value();
+            let entry = latest_per_repo.entry(rid).or_insert(i64::MIN);
+            if ts > *entry {
+                *entry = ts;
+            }
+        }
+        let mut all: Vec<(i64, String, String, String, i64)> = Vec::new();
+        for row in read.open_table(REPOS)?.iter()? {
+            let (_k, v) = row?;
+            let r: Repo = serde_json::from_slice(v.value())?;
+            let (Some(url), Some(branch)) = (r.remote_url, r.default_branch) else {
+                continue;
+            };
+            let latest = *latest_per_repo.get(&id_to_u64(r.id)).unwrap_or(&i64::MIN);
+            all.push((r.id, url, branch, r.path, latest));
+        }
+        all.sort_by_key(|r| std::cmp::Reverse(r.4));
+        let trimmed: Vec<(i64, String, String, String)> = all
+            .into_iter()
+            .take(if target_limit == 0 {
+                usize::MAX
+            } else {
+                target_limit
+            })
+            .map(|(id, url, branch, path, _)| (id, url, branch, path))
+            .collect();
+        Ok(trimmed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CacheWriter: a typed handle on an open redb write transaction
+// ---------------------------------------------------------------------------
+
+pub struct CacheWriter<'a> {
+    txn: &'a WriteTransaction,
+}
+
+impl CacheWriter<'_> {
+    pub fn wipe(&self) -> Result<()> {
+        clear_table::<u64, &[u8]>(self.txn, REPOS)?;
+        clear_table::<u64, &[u8]>(self.txn, SESSIONS)?;
+        clear_table::<u64, &[u8]>(self.txn, COMMITS)?;
+        clear_table::<u64, &[u8]>(self.txn, FILE_CHANGES)?;
+        clear_table::<u64, &[u8]>(self.txn, UNCOMMITTED_FILES)?;
+        clear_table::<u64, &[u8]>(self.txn, ACTIVE_REMOTE_REPOS)?;
+        clear_table::<&str, u64>(self.txn, META)?;
+        clear_table::<&str, u64>(self.txn, REPOS_BY_PATH)?;
+        clear_table::<&str, u64>(self.txn, SESSIONS_BY_UUID)?;
+        clear_table::<(i64, u64), ()>(self.txn, SESSIONS_BY_STARTED_AT)?;
+        clear_table::<(u64, u64, &str), ()>(self.txn, SESSION_REPOS)?;
+        clear_table::<(u64, u64, &str), ()>(self.txn, SESSION_REPOS_BY_REPO)?;
+        clear_table::<(u64, &str), u64>(self.txn, COMMITS_BY_REPO_SHA)?;
+        clear_table::<(u64, i64, u64), &str>(self.txn, COMMITS_BY_REPO_TS)?;
+        clear_table::<(i64, u64), ()>(self.txn, COMMITS_BY_TS)?;
+        clear_table::<(u64, i64, u64), ()>(self.txn, FILE_CHANGES_BY_REPO_TS)?;
+        clear_table::<(u64, u64), ()>(self.txn, UNCOMMITTED_BY_REPO)?;
+        clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_FULL_NAME)?;
+        clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_HTTPS_URL)?;
+        clear_table::<(i64, u64), ()>(self.txn, ACTIVE_REPOS_BY_PUSHED_AT)?;
+        Ok(())
+    }
+
+    /// Insert a repo or return the existing id if `path` is already
+    /// present. Mirrors the SQLite `INSERT OR IGNORE ... SELECT id`.
+    pub fn upsert_repo(
+        &self,
+        path: &str,
+        name: &str,
+        discovered_at: i64,
+        remote_url: Option<&str>,
+        default_branch: Option<&str>,
+    ) -> Result<i64> {
+        let mut by_path = self.txn.open_table(REPOS_BY_PATH)?;
+        if let Some(g) = by_path.get(path)? {
+            return Ok(u64_to_id(g.value()));
+        }
+        let id = next_id(self.txn, META_NEXT_REPO)?;
+        let repo = Repo {
+            id: u64_to_id(id),
+            path: path.into(),
+            name: name.into(),
+            session_count: 0,
+            commits_30d: 0,
+            loc_churn_30d: 0,
+            untracked_files: 0,
+            modified_files: 0,
+            authors_30d: 0,
+            ci_status: None,
+            commits_ahead: 0,
+            commits_behind: 0,
+            stash_count: 0,
+            head_ref: None,
+            in_progress_op: None,
+            open_prs: 0,
+            draft_prs: 0,
+            open_issues: 0,
+            prs_awaiting_my_review: 0,
+            prs_mine_awaiting_review: 0,
+            prs_mine_no_reviewer: 0,
+            my_draft_prs: 0,
+            issues_assigned_to_me: 0,
+            deploy_workflow: None,
+            deploy_status: None,
+            deploy_last_success_ts: None,
+            remote_url: remote_url.map(str::to_string),
+            default_branch: default_branch.map(str::to_string),
+        };
+        let _ = discovered_at; // discovery time is not surfaced anywhere
+        let bytes = serde_json::to_vec(&repo)?;
+        let mut repos = self.txn.open_table(REPOS)?;
+        repos.insert(id, bytes.as_slice())?;
+        by_path.insert(path, id)?;
+        Ok(u64_to_id(id))
+    }
+
+    /// Insert a session if its UUID has not been seen, returning the
+    /// `(session_id, true)` on success or `(existing_id, false)` if a
+    /// previous file already produced this UUID.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_session(
+        &self,
+        session_uuid: &str,
+        cwd: Option<&str>,
+        started_at: Option<i64>,
+        ended_at: Option<i64>,
+        message_count: i64,
+        summary: Option<&str>,
+        source_file: &str,
+        duration_ms: Option<i64>,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+    ) -> Result<(i64, bool)> {
+        let mut by_uuid = self.txn.open_table(SESSIONS_BY_UUID)?;
+        if let Some(g) = by_uuid.get(session_uuid)? {
+            return Ok((u64_to_id(g.value()), false));
+        }
+        let id = next_id(self.txn, META_NEXT_SESSION)?;
+        let session = Session {
+            id: u64_to_id(id),
+            session_uuid: session_uuid.into(),
+            cwd: cwd.map(str::to_string),
+            started_at,
+            ended_at,
+            message_count,
+            summary: summary.map(str::to_string),
+            source_file: source_file.into(),
+            duration_ms,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        };
+        let bytes = serde_json::to_vec(&session)?;
+        self.txn
+            .open_table(SESSIONS)?
+            .insert(id, bytes.as_slice())?;
+        by_uuid.insert(session_uuid, id)?;
+        let ts_key = started_at.unwrap_or(i64::MIN);
+        self.txn
+            .open_table(SESSIONS_BY_STARTED_AT)?
+            .insert((ts_key, id), ())?;
+        Ok((u64_to_id(id), true))
+    }
+
+    /// Add `(session_id, repo_id, match_type)` to the join. Returns true
+    /// when the row was new, mirroring `INSERT OR IGNORE` row-count.
+    pub fn link_session_repo(
+        &self,
+        session_id: i64,
+        repo_id: i64,
+        match_type: &str,
+    ) -> Result<bool> {
+        let mut t = self.txn.open_table(SESSION_REPOS)?;
+        let mut by_repo = self.txn.open_table(SESSION_REPOS_BY_REPO)?;
+        let key = (id_to_u64(session_id), id_to_u64(repo_id), match_type);
+        if t.get(key)?.is_some() {
+            return Ok(false);
+        }
+        t.insert(key, ())?;
+        by_repo.insert((id_to_u64(repo_id), id_to_u64(session_id), match_type), ())?;
+        Ok(true)
+    }
+
+    /// Insert a commit if `(repo_id, sha)` is new. Returns true when the
+    /// row was inserted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_commit(
+        &self,
+        repo_id: i64,
+        sha: &str,
+        author_name: &str,
+        author_email: &str,
+        timestamp: i64,
+        subject: &str,
+    ) -> Result<bool> {
+        let mut by_sha = self.txn.open_table(COMMITS_BY_REPO_SHA)?;
+        if by_sha.get((id_to_u64(repo_id), sha))?.is_some() {
+            return Ok(false);
+        }
+        let id = next_id(self.txn, META_NEXT_COMMIT)?;
+        let commit = Commit {
+            id: u64_to_id(id),
+            repo_id,
+            sha: sha.into(),
+            author_name: author_name.into(),
+            author_email: author_email.into(),
+            timestamp,
+            subject: subject.into(),
+        };
+        let bytes = serde_json::to_vec(&commit)?;
+        self.txn.open_table(COMMITS)?.insert(id, bytes.as_slice())?;
+        by_sha.insert((id_to_u64(repo_id), sha), id)?;
+        self.txn
+            .open_table(COMMITS_BY_REPO_TS)?
+            .insert((id_to_u64(repo_id), timestamp, id), author_email)?;
+        self.txn
+            .open_table(COMMITS_BY_TS)?
+            .insert((timestamp, id), ())?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_file_change(
+        &self,
+        repo_id: i64,
+        sha: &str,
+        file_path: &str,
+        additions: i64,
+        deletions: i64,
+        author_email: &str,
+        timestamp: i64,
+    ) -> Result<()> {
+        let id = next_id(self.txn, META_NEXT_FILE_CHANGE)?;
+        let rec = FileChangeRecord {
+            id: u64_to_id(id),
+            repo_id,
+            sha: sha.into(),
+            file_path: file_path.into(),
+            additions,
+            deletions,
+            author_email: author_email.into(),
+            timestamp,
+        };
+        let bytes = serde_json::to_vec(&rec)?;
+        self.txn
+            .open_table(FILE_CHANGES)?
+            .insert(id, bytes.as_slice())?;
+        self.txn
+            .open_table(FILE_CHANGES_BY_REPO_TS)?
+            .insert((id_to_u64(repo_id), timestamp, id), ())?;
+        Ok(())
+    }
+
+    pub fn insert_uncommitted_file(&self, repo_id: i64, path: &str, kind: &str) -> Result<()> {
+        let id = next_id(self.txn, META_NEXT_UNCOMMITTED)?;
+        let rec = UncommittedFileRecord {
+            id: u64_to_id(id),
+            repo_id,
+            path: path.into(),
+            kind: kind.into(),
+        };
+        let bytes = serde_json::to_vec(&rec)?;
+        self.txn
+            .open_table(UNCOMMITTED_FILES)?
+            .insert(id, bytes.as_slice())?;
+        self.txn
+            .open_table(UNCOMMITTED_BY_REPO)?
+            .insert((id_to_u64(repo_id), id), ())?;
+        Ok(())
+    }
+
+    /// Update a repo's local-state fields. Mirrors the SQLite UPDATE that
+    /// runs after the per-repo git scan.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_repo_local_state(
+        &self,
+        repo_id: i64,
+        loc_churn_30d: i64,
+        untracked_files: i64,
+        modified_files: i64,
+        commits_ahead: i64,
+        commits_behind: i64,
+        stash_count: i64,
+        head_ref: Option<&str>,
+        in_progress_op: Option<&str>,
+    ) -> Result<()> {
+        self.mutate_repo(repo_id, |r| {
+            r.loc_churn_30d = loc_churn_30d;
+            r.untracked_files = untracked_files;
+            r.modified_files = modified_files;
+            r.commits_ahead = commits_ahead;
+            r.commits_behind = commits_behind;
+            r.stash_count = stash_count;
+            r.head_ref = head_ref.map(str::to_string);
+            r.in_progress_op = in_progress_op.map(str::to_string);
+        })
+    }
+
+    /// Update a repo's remote-state fields. `None` arguments preserve the
+    /// existing value (matching the SQLite COALESCE semantics).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_repo_remote_state(
+        &self,
+        repo_id: i64,
+        ci_status: Option<String>,
+        open_prs: i64,
+        draft_prs: i64,
+        prs_awaiting_my_review: i64,
+        prs_mine_awaiting_review: i64,
+        prs_mine_no_reviewer: i64,
+        my_draft_prs: i64,
+        open_issues: Option<i64>,
+        issues_assigned_to_me: Option<i64>,
+        deploy_workflow: Option<String>,
+        deploy_status: Option<String>,
+        deploy_last_success_ts: Option<i64>,
+    ) -> Result<()> {
+        self.mutate_repo(repo_id, |r| {
+            if ci_status.is_some() {
+                r.ci_status = ci_status;
+            }
+            r.open_prs = open_prs;
+            r.draft_prs = draft_prs;
+            r.prs_awaiting_my_review = prs_awaiting_my_review;
+            r.prs_mine_awaiting_review = prs_mine_awaiting_review;
+            r.prs_mine_no_reviewer = prs_mine_no_reviewer;
+            r.my_draft_prs = my_draft_prs;
+            if let Some(v) = open_issues {
+                r.open_issues = v;
+            }
+            if let Some(v) = issues_assigned_to_me {
+                r.issues_assigned_to_me = v;
+            }
+            if deploy_workflow.is_some() {
+                r.deploy_workflow = deploy_workflow;
+            }
+            if deploy_status.is_some() {
+                r.deploy_status = deploy_status;
+            }
+            if let Some(v) = deploy_last_success_ts {
+                r.deploy_last_success_ts = Some(v);
+            }
+        })
+    }
+
+    /// Recompute and store the per-repo aggregates that the dashboard
+    /// reads back in one shot: `session_count`, `commits_30d`,
+    /// `authors_30d`. Run once at the end of every refresh after the row
+    /// inserts and per-repo state updates have all landed.
+    pub fn finalize_repo_aggregates(&self, cutoff_30d_ts: i64) -> Result<()> {
+        // Tally per-repo session counts (DISTINCT session_id).
+        let mut sessions_per_repo: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+        {
+            let by_repo = self.txn.open_table(SESSION_REPOS_BY_REPO)?;
+            for row in by_repo.iter()? {
+                let (k, _) = row?;
+                let (rid, sid, _mt) = k.value();
+                sessions_per_repo.entry(rid).or_default().insert(sid);
+            }
+        }
+        // Tally commits_30d + authors_30d per repo.
+        let mut commits_per_repo: HashMap<u64, i64> = HashMap::new();
+        let mut authors_per_repo: HashMap<u64, HashSet<String>> = HashMap::new();
+        {
+            let by_repo_ts = self.txn.open_table(COMMITS_BY_REPO_TS)?;
+            for row in by_repo_ts.iter()? {
+                let (k, v) = row?;
+                let (rid, ts, _cid) = k.value();
+                if ts < cutoff_30d_ts {
+                    continue;
+                }
+                *commits_per_repo.entry(rid).or_insert(0) += 1;
+                authors_per_repo
+                    .entry(rid)
+                    .or_default()
+                    .insert(v.value().to_string());
+            }
+        }
+
+        // Iterate every repo and write back its aggregates.
+        let ids: Vec<u64> = {
+            let repos = self.txn.open_table(REPOS)?;
+            let mut ids = Vec::new();
+            for row in repos.iter()? {
+                let (k, _) = row?;
+                ids.push(k.value());
+            }
+            ids
+        };
+        for id in ids {
+            self.mutate_repo(u64_to_id(id), |r| {
+                r.session_count = sessions_per_repo
+                    .get(&id)
+                    .map(|s| s.len() as i64)
+                    .unwrap_or(0);
+                r.commits_30d = *commits_per_repo.get(&id).unwrap_or(&0);
+                r.authors_30d = authors_per_repo
+                    .get(&id)
+                    .map(|s| s.len() as i64)
+                    .unwrap_or(0);
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Replace the active-remote-repos snapshot with `repos`. Wipes the
+    /// table first to match `DELETE FROM active_remote_repos` + bulk
+    /// insert. Returns the number of rows written.
+    pub fn replace_active_remote_repos(&self, repos: &[ActiveRemoteRepo]) -> Result<usize> {
+        clear_table::<u64, &[u8]>(self.txn, ACTIVE_REMOTE_REPOS)?;
+        clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_FULL_NAME)?;
+        clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_HTTPS_URL)?;
+        clear_table::<(i64, u64), ()>(self.txn, ACTIVE_REPOS_BY_PUSHED_AT)?;
+
+        let mut active = self.txn.open_table(ACTIVE_REMOTE_REPOS)?;
+        let mut by_full_name = self.txn.open_table(ACTIVE_REPOS_BY_FULL_NAME)?;
+        let mut by_https = self.txn.open_table(ACTIVE_REPOS_BY_HTTPS_URL)?;
+        let mut by_pushed = self.txn.open_table(ACTIVE_REPOS_BY_PUSHED_AT)?;
+        let mut written = 0usize;
+        for r in repos {
+            // Match the SQLite `INSERT OR IGNORE` on full_name.
+            if by_full_name.get(r.full_name.as_str())?.is_some() {
+                continue;
+            }
+            let id = next_id(self.txn, META_NEXT_ACTIVE_REPO)?;
+            let rec = ActiveRemoteRepo {
+                id: u64_to_id(id),
+                ..r.clone()
+            };
+            let bytes = serde_json::to_vec(&rec)?;
+            active.insert(id, bytes.as_slice())?;
+            by_full_name.insert(rec.full_name.as_str(), id)?;
+            by_https.insert(rec.https_url.as_str(), id)?;
+            let ts = rec.pushed_at.unwrap_or(i64::MIN);
+            by_pushed.insert((ts, id), ())?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    fn mutate_repo<F>(&self, repo_id: i64, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Repo),
+    {
+        let id = id_to_u64(repo_id);
+        let mut repos = self.txn.open_table(REPOS)?;
+        let Some(g) = repos.get(id)? else {
+            return Ok(());
+        };
+        let mut r: Repo = serde_json::from_slice(g.value())?;
+        drop(g);
+        f(&mut r);
+        let bytes = serde_json::to_vec(&r)?;
+        repos.insert(id, bytes.as_slice())?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+fn next_id(txn: &WriteTransaction, key: &str) -> Result<u64> {
+    let mut meta = txn.open_table(META)?;
+    let n = meta.get(key)?.map(|g| g.value()).unwrap_or(1);
+    meta.insert(key, n + 1)?;
     Ok(n)
 }
 
-/// Active GitHub repos for the viewer that aren't already cloned into the
-/// scan tree (matched by normalized https remote URL). Sorted most-recently-
-/// pushed first so the dashboard panel surfaces what the user is actually
-/// working on elsewhere.
-pub fn uncloned_active_repos(conn: &Connection, limit: i64) -> Result<Vec<ActiveRemoteRepo>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT a.id, a.full_name, a.https_url, a.ssh_url, a.default_branch,
-               a.pushed_at, a.description, a.is_fork, a.is_archived
-        FROM active_remote_repos a
-        WHERE a.is_archived = 0
-          AND NOT EXISTS (
-              SELECT 1 FROM repos r WHERE r.remote_url = a.https_url
-          )
-        ORDER BY COALESCE(a.pushed_at, 0) DESC
-        LIMIT ?1
-        "#,
-    )?;
-    let rows = stmt.query_map([limit], |row| {
-        Ok(ActiveRemoteRepo {
-            id: row.get(0)?,
-            full_name: row.get(1)?,
-            https_url: row.get(2)?,
-            ssh_url: row.get(3)?,
-            default_branch: row.get(4)?,
-            pushed_at: row.get(5)?,
-            description: row.get(6)?,
-            is_fork: row.get::<_, i64>(7)? != 0,
-            is_archived: row.get::<_, i64>(8)? != 0,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
+fn clear_table<K, V>(txn: &WriteTransaction, def: TableDefinition<K, V>) -> Result<()>
+where
+    K: redb::Key + 'static,
+    V: redb::Value + 'static,
+{
+    let mut t = txn.open_table(def)?;
+    t.retain(|_, _| false)?;
+    Ok(())
+}
+
+fn id_to_u64(id: i64) -> u64 {
+    id as u64
+}
+
+fn u64_to_id(id: u64) -> i64 {
+    id as i64
+}
+
+fn order_by_started_at_desc(a: Option<i64>, b: Option<i64>) -> std::cmp::Ordering {
+    // ORDER BY started_at DESC NULLS LAST.
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
-    Ok(out)
-}
-
-pub fn get_active_repo_by_full_name(
-    conn: &Connection,
-    full_name: &str,
-) -> Result<Option<ActiveRemoteRepo>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id, full_name, https_url, ssh_url, default_branch,
-               pushed_at, description, is_fork, is_archived
-        FROM active_remote_repos
-        WHERE full_name = ?1
-        "#,
-    )?;
-    let mut rows = stmt.query_map([full_name], |row| {
-        Ok(ActiveRemoteRepo {
-            id: row.get(0)?,
-            full_name: row.get(1)?,
-            https_url: row.get(2)?,
-            ssh_url: row.get(3)?,
-            default_branch: row.get(4)?,
-            pushed_at: row.get(5)?,
-            description: row.get(6)?,
-            is_fork: row.get::<_, i64>(7)? != 0,
-            is_archived: row.get::<_, i64>(8)? != 0,
-        })
-    })?;
-    Ok(rows.next().transpose()?)
-}
-
-pub fn commits_for_repo(conn: &Connection, repo_id: i64, limit: i64) -> Result<Vec<Commit>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id, repo_id, sha, author_name, author_email, timestamp, subject
-        FROM commits
-        WHERE repo_id = ?1
-        ORDER BY timestamp DESC
-        LIMIT ?2
-        "#,
-    )?;
-    let rows = stmt.query_map(rusqlite::params![repo_id, limit], |row| {
-        Ok(Commit {
-            id: row.get(0)?,
-            repo_id: row.get(1)?,
-            sha: row.get(2)?,
-            author_name: row.get(3)?,
-            author_email: row.get(4)?,
-            timestamp: row.get(5)?,
-            subject: row.get(6)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
-    Ok(Session {
-        id: row.get(0)?,
-        session_uuid: row.get(1)?,
-        cwd: row.get(2)?,
-        started_at: row.get(3)?,
-        ended_at: row.get(4)?,
-        message_count: row.get(5)?,
-        summary: row.get(6)?,
-        source_file: row.get(7)?,
-        duration_ms: row.get(8)?,
-        input_tokens: row.get(9)?,
-        output_tokens: row.get(10)?,
-        cache_read_tokens: row.get(11)?,
-        cache_creation_tokens: row.get(12)?,
-    })
 }

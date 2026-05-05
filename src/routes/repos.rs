@@ -34,22 +34,21 @@ pub async fn detail(
 ) -> Response {
     let state2 = state.clone();
     let data = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let state = state2;
-        let conn = db::open(&state.db_path)?;
-        let repo = db::get_repo(&conn, id)?;
+        let cache = &state2.cache_db;
+        let repo = cache.get_repo(id)?;
         let sessions = if repo.is_some() {
-            db::sessions_for_repo(&conn, id)?
+            cache.sessions_for_repo(id)?
         } else {
             Vec::new()
         };
         let commits = if repo.is_some() {
-            db::commits_for_repo(&conn, id, 50)?
+            cache.commits_for_repo(id, 50)?
         } else {
             Vec::new()
         };
         let cutoff_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
         let hotspots = if repo.is_some() {
-            db::file_hotspots(&conn, id, cutoff_30d, 10)?
+            cache.file_hotspots(id, cutoff_30d, 10)?
         } else {
             Vec::new()
         };

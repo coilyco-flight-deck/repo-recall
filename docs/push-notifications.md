@@ -20,7 +20,7 @@ If we lose the keypair, every existing subscription becomes useless. New subscri
 
 ### Persistent state file
 
-`~/.local/share/repo-recall/state.sqlite`. Separate from the cache DB at `$TMPDIR/repo-recall.sqlite` because the cache DB is wiped and rebuilt on every process start. State that must outlive restarts goes here:
+`~/.local/share/repo-recall/state.redb`. Separate from the cache DB at `$TMPDIR/repo-recall-<port>/cache.redb` because the cache DB is wiped and rebuilt on every process start. State that must outlive restarts goes here:
 
 - `vapid` table, single row, holds the keypair PEMs.
 - `subscriptions` table, one row per device, holds `{endpoint, p256dh, auth, created_at, label}`.
@@ -85,7 +85,7 @@ Crate: [`web-push`](https://crates.io/crates/web-push) handles VAPID JWT signing
   Page  ──pushManager.subscribe(VAPID_PUB)──> Chrome ──> FCM
   FCM   ──> Chrome ──> Page: PushSubscription { endpoint, keys }
   Page  ──POST /api/push/subscribe──> repo-recall
-  repo-recall ──insert──> state.sqlite
+  repo-recall ──insert──> state.redb
 
 [ steady state, no broken repos ]
 
@@ -128,7 +128,7 @@ Crate: [`web-push`](https://crates.io/crates/web-push) handles VAPID JWT signing
 - The push payload contains the repo name and signal type. It does not contain code, commits, or session content.
 - FCM sees the encrypted payload and the destination device. Google can correlate "this server pushes to this device at these times" but cannot decrypt the body. This is the same posture as any Web Push deployment.
 - The README's "one outbound call (`gh run list`)" claim must be amended once dispatch ships. Outbound calls become: `gh run list` (CI status) and `POST <fcm endpoint>` per push delivery.
-- The state DB at `~/.local/share/repo-recall/state.sqlite` is sensitive: anyone with read access can impersonate the server (private VAPID key) or send notifications to subscribed devices (subscription rows). It is mode 0600 by default. Treat it like an SSH private key.
+- The state DB at `~/.local/share/repo-recall/state.redb` is sensitive: anyone with read access can impersonate the server (private VAPID key) or send notifications to subscribed devices (subscription rows). It is mode 0600 by default. Treat it like an SSH private key.
 
 ## References
 

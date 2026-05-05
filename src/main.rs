@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{commits, db, mcp, routes, search, state::StateDb, AppState};
+use repo_recall::{commits, db::CacheDb, mcp, routes, search, state::StateDb, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -54,17 +54,19 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
 
-    // Default DB path is per-port so two instances (e.g. launchd-managed on
-    // 7777 and a dev binary on 7778) don't share state and wipe each other's
-    // tables during their periodic refreshes. Override with REPO_RECALL_DB.
-    let db_path = std::env::var("REPO_RECALL_DB")
+    // Default cache directory is per-port so two instances (e.g.
+    // launchd-managed on 7777 and a dev binary on 7778) don't share state
+    // and wipe each other's tables during their periodic refreshes. Override
+    // with REPO_RECALL_CACHE_DIR. The cache file inside is `cache.redb` and
+    // is recreated on every startup (wipe-on-restart).
+    let cache_dir = std::env::var("REPO_RECALL_CACHE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join(format!("repo-recall-{port}.sqlite")));
+        .unwrap_or_else(|_| std::env::temp_dir().join(format!("repo-recall-{port}")));
 
-    tracing::info!("cwd: {}", cwd.display());
-    tracing::info!("db:  {}", db_path.display());
+    tracing::info!("cwd:   {}", cwd.display());
+    tracing::info!("cache: {}", cache_dir.display());
 
-    db::init(&db_path)?;
+    let cache_db = CacheDb::open_in_dir(&cache_dir)?;
 
     let index_dir = search::default_index_dir();
     tracing::info!("idx: {}", index_dir.display());
@@ -102,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState {
-        db_path,
+        cache_db,
         cwd,
         scan_depth,
         commits_per_repo,
@@ -214,7 +216,7 @@ Usage:
 
 Config is via env vars (or a .env file in cwd). See the README for the full
 list. Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD,
-REPO_RECALL_DEPTH.
+REPO_RECALL_DEPTH, REPO_RECALL_CACHE_DIR.
 ",
         ver = env!("REPO_RECALL_VERSION"),
     );

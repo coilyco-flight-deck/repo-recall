@@ -19,7 +19,7 @@ use maud::html;
 use serde::Deserialize;
 
 use crate::routes::templates::{LINK, PILL, PILL_ALERT};
-use crate::{db, AppState};
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct CloneForm {
@@ -85,11 +85,10 @@ pub async fn clone_active(
     // being a generic `gh` shell. The viewer can only clone repos `gh`
     // already listed for them in the most recent refresh.
     let known = {
-        let db_path = state.db_path.clone();
+        let cache = state.cache_db.clone();
         let fname = full_name.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let conn = db::open(&db_path)?;
-            Ok(db::get_active_repo_by_full_name(&conn, &fname)?.is_some())
+            Ok(cache.get_active_repo_by_full_name(&fname)?.is_some())
         })
         .await
     };
@@ -203,10 +202,9 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> GitOutput {
 }
 
 async fn repo_path(state: &AppState, id: i64) -> anyhow::Result<Option<PathBuf>> {
-    let db_path = state.db_path.clone();
+    let cache = state.cache_db.clone();
     let res = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<PathBuf>> {
-        let conn = db::open(&db_path)?;
-        Ok(db::get_repo(&conn, id)?.map(|r| PathBuf::from(r.path)))
+        Ok(cache.get_repo(id)?.map(|r| PathBuf::from(r.path)))
     })
     .await?;
     res

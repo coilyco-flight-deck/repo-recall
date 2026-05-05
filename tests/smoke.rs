@@ -5,24 +5,22 @@
 //! content bugs.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex};
 
-use repo_recall::{db, routes, state::StateDb, AppState};
+use repo_recall::{db::CacheDb, routes, state::StateDb, AppState};
 
 async fn boot() -> (String, tokio::task::JoinHandle<()>) {
     boot_with(repo_recall::commits::GhHealth::Ok).await
 }
 
 async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::JoinHandle<()>) {
-    // Unique DB per test run so parallel `cargo test` invocations don't collide.
-    let db_path: PathBuf =
-        std::env::temp_dir().join(format!("repo-recall-test-{}.sqlite", uuid_like()));
-    let _ = std::fs::remove_file(&db_path);
-    db::init(&db_path).expect("db init");
+    // Unique cache dir per test run so parallel `cargo test` invocations
+    // don't collide.
+    let cache_dir = std::env::temp_dir().join(format!("repo-recall-test-{}", uuid_like()));
+    let cache_db = CacheDb::open_in_dir(&cache_dir).expect("cache db");
 
     // Each test gets its own state DB too, so VAPID + subscriptions
     // do not bleed across parallel runs.
@@ -34,7 +32,7 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
-        db_path,
+        cache_db,
         cwd: std::env::temp_dir(),
         scan_depth: 0,
         commits_per_repo: 50,

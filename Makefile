@@ -86,6 +86,6 @@ docker-demo-run: docker-demo-build ## Run the demo image, port-forwarded to loca
 docker-demo-smoke: docker-demo-build ## Build, boot in background, curl /, assert non-empty repo list, kill
 	@bash scripts/docker-demo-smoke.sh $(demo_image) $(demo_port)
 
-clean: ## Remove target/ and the SQLite cache
+clean: ## Remove target/ and the redb cache
 	cargo clean
-	rm -f $${TMPDIR:-/tmp}/repo-recall.sqlite $${TMPDIR:-/tmp}/repo-recall.sqlite-wal $${TMPDIR:-/tmp}/repo-recall.sqlite-shm
+	rm -rf $${TMPDIR:-/tmp}/repo-recall-* $${TMPDIR:-/tmp}/repo-recall.sqlite $${TMPDIR:-/tmp}/repo-recall.sqlite-wal $${TMPDIR:-/tmp}/repo-recall.sqlite-shm

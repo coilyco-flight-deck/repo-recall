@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex as TokioMutex};
 
-use repo_recall::{db, routes, sessions, state::StateDb, AppState};
+use repo_recall::{db::CacheDb, routes, sessions, state::StateDb, AppState};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -216,11 +216,10 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
         &[sessions_dir.to_str().unwrap(), repos_dir.to_str().unwrap()],
     );
 
-    // Per-test SQLite + state DB so parallel `cargo test` invocations don't
+    // Per-test cache + state DB so parallel `cargo test` invocations don't
     // collide. Mirrors tests/smoke.rs.
-    let db_path = unique_tmp("repo-recall-demo-cache").with_extension("sqlite");
-    let _ = std::fs::remove_file(&db_path);
-    db::init(&db_path).unwrap();
+    let cache_dir = unique_tmp("repo-recall-demo-cache");
+    let cache_db = CacheDb::open_in_dir(&cache_dir).unwrap();
     let state_dir = unique_tmp("repo-recall-demo-state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let state_db = StateDb::open_at(state_dir.join("state.redb")).unwrap();
@@ -228,7 +227,7 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
-        db_path: db_path.clone(),
+        cache_db,
         cwd: repos_dir.clone(),
         scan_depth: 2,
         commits_per_repo: 50,
@@ -312,16 +311,15 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
     );
 
     let _ = std::fs::remove_dir_all(&workdir);
-    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&cache_dir);
     let _ = std::fs::remove_dir_all(&state_dir);
 }
 
 // ----- demo flag: banner + write-disable ------------------------------- //
 
 fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
-    let db_path = unique_tmp("repo-recall-demo-flag-cache").with_extension("sqlite");
-    let _ = std::fs::remove_file(&db_path);
-    db::init(&db_path).unwrap();
+    let cache_dir = unique_tmp("repo-recall-demo-flag-cache");
+    let cache_db = CacheDb::open_in_dir(&cache_dir).unwrap();
     let state_dir = unique_tmp("repo-recall-demo-flag-state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let state_db = StateDb::open_at(state_dir.join("state.redb")).unwrap();
@@ -329,7 +327,7 @@ fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
-        db_path: db_path.clone(),
+        cache_db,
         cwd: std::env::temp_dir(),
         scan_depth: 0,
         commits_per_repo: 50,
@@ -346,7 +344,7 @@ fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
         search_index: search_index.clone(),
         demo_mode,
     };
-    (state, db_path, state_dir)
+    (state, cache_dir, state_dir)
 }
 
 async fn serve(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
@@ -366,7 +364,7 @@ async fn demo_mode_banner_shows_in_layout() {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("REPO_RECALL_DEMO", "true");
 
-    let (state, db_path, state_dir) = boot_minimal(true);
+    let (state, cache_dir, state_dir) = boot_minimal(true);
     let (base, h) = serve(state).await;
 
     let body = reqwest::get(format!("{base}/"))
@@ -388,7 +386,7 @@ async fn demo_mode_banner_shows_in_layout() {
         "demo banner should link back to the source"
     );
 
-    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&cache_dir);
     let _ = std::fs::remove_dir_all(&state_dir);
 }
 
@@ -399,7 +397,7 @@ async fn demo_mode_blocks_mutating_endpoints() {
     // No env var needed for the gating itself - the handlers branch on
     // state.demo_mode. The env var only drives the banner.
 
-    let (state, db_path, state_dir) = boot_minimal(true);
+    let (state, cache_dir, state_dir) = boot_minimal(true);
     let (base, h) = serve(state).await;
 
     let client = reqwest::Client::builder()
@@ -452,7 +450,7 @@ async fn demo_mode_blocks_mutating_endpoints() {
     );
 
     h.abort();
-    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&cache_dir);
     let _ = std::fs::remove_dir_all(&state_dir);
 }
 
@@ -462,7 +460,7 @@ async fn non_demo_mode_has_no_banner() {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::remove_var("REPO_RECALL_DEMO");
 
-    let (state, db_path, state_dir) = boot_minimal(false);
+    let (state, cache_dir, state_dir) = boot_minimal(false);
     let (base, h) = serve(state).await;
 
     let body = reqwest::get(format!("{base}/"))
@@ -478,6 +476,6 @@ async fn non_demo_mode_has_no_banner() {
         "non-demo layout should not show the demo banner"
     );
 
-    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&cache_dir);
     let _ = std::fs::remove_dir_all(&state_dir);
 }
