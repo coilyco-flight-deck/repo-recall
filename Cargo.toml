@@ -27,6 +27,7 @@ aho-corasick = "1"
 web-push = "0.10"
 base64 = "0.22"
 dirs = "5"
+redb = "4"
 
 # MCP App server. Purely additive — `repo-recall mcp` runs a stdio MCP server
 # alongside the axum dashboard's brew-installed binary. The default invocation
