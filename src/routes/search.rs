@@ -11,6 +11,15 @@ use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{page, H2, LI, LINK, PANEL, PATH, ROW};
 use crate::AppState;
 
+fn to_db_hit(h: crate::search::SearchHit) -> db::SearchHit {
+    db::SearchHit {
+        kind: h.kind,
+        ref_id: h.ref_id,
+        text: h.text,
+        extra: None,
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct SearchParams {
     #[serde(default)]
@@ -36,19 +45,16 @@ pub async fn search(
     let q = params.q.unwrap_or_default();
     let q_trimmed = q.trim().to_string();
 
-    let hits = if q_trimmed.is_empty() {
+    let hits: Vec<db::SearchHit> = if q_trimmed.is_empty() {
         Vec::new()
     } else {
-        let query = q_trimmed.clone();
-        let state2 = state.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::SearchHit>> {
-            let conn = db::open(&state2.db_path)?;
-            db::search(&conn, &query, 100)
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default()
+        match state.search_index.search(&q_trimmed, 100) {
+            Ok(hits) => hits.into_iter().map(to_db_hit).collect(),
+            Err(e) => {
+                tracing::debug!("tantivy search failed for {q_trimmed:?}: {e:?}");
+                Vec::new()
+            }
+        }
     };
 
     // Partition by kind so we can render three focused sections.

@@ -226,17 +226,20 @@ pub async fn search(
     if args.q.trim().is_empty() {
         return Err(pmcp::Error::validation("query is empty"));
     }
-    let db_path = state.db_path.clone();
-    let q = args.q.clone();
     let limit = args.limit.unwrap_or(20);
-
-    let hits = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::SearchHit>> {
-        let conn = db::open(&db_path)?;
-        db::search(&conn, &q, limit)
-    })
-    .await
-    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-    .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+    let hits = state
+        .search_index
+        .search(&args.q, limit as usize)
+        .map_err(|e| pmcp::Error::internal(format!("search: {e}")))?;
+    let hits: Vec<db::SearchHit> = hits
+        .into_iter()
+        .map(|h| db::SearchHit {
+            kind: h.kind,
+            ref_id: h.ref_id,
+            text: h.text,
+            extra: None,
+        })
+        .collect();
 
     serde_json::to_value(json!({
         "query": args.q,

@@ -154,13 +154,10 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         // --- commits (git log per repo) ---
         let commits_n = ingest_commits(&conn, &repo_id_by_path, commits_per_repo, &tx)?;
 
-        // --- search index (rebuilt from the populated tables) ---
-        db::rebuild_search_index(&conn)?;
-        // Dual-write the same corpus into tantivy. Reader still flows
-        // through SQLite; step 3 of the redb migration flips it.
+        // --- search index (tantivy, rebuilt from the populated cache tables) ---
         let corpus = db::collect_search_corpus(&conn)?;
         if let Err(e) = search_index.rebuild(corpus) {
-            tracing::warn!("tantivy rebuild failed (search still served by sqlite): {e:?}");
+            tracing::warn!("tantivy rebuild failed (search will serve stale results): {e:?}");
         }
 
         Ok(RefreshStats {

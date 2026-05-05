@@ -16,7 +16,6 @@ pub fn init(path: &Path) -> Result<()> {
     let conn = open(path)?;
     conn.execute_batch(
         r#"
-        DROP TABLE IF EXISTS search_idx;
         DROP TABLE IF EXISTS file_changes;
         DROP TABLE IF EXISTS uncommitted_files;
         DROP TABLE IF EXISTS commits;
@@ -189,18 +188,6 @@ pub fn init(path: &Path) -> Result<()> {
             is_archived INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX idx_active_remote_repos_pushed ON active_remote_repos(pushed_at DESC);
-
-        -- FTS5 virtual table indexing the searchable text across every
-        -- domain entity we have. `kind` is 'repo' | 'session' | 'commit'
-        -- and `ref_id` is the source row's primary key (UNINDEXED so it's
-        -- stored without tokenisation overhead). Populated at the end of
-        -- every refresh.
-        CREATE VIRTUAL TABLE IF NOT EXISTS search_idx USING fts5(
-            kind UNINDEXED,
-            ref_id UNINDEXED,
-            text,
-            tokenize = 'porter unicode61 remove_diacritics 1'
-        );
         "#,
     )?;
     Ok(())
@@ -208,8 +195,7 @@ pub fn init(path: &Path) -> Result<()> {
 
 pub fn wipe(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "DELETE FROM search_idx; \
-         DELETE FROM file_changes; \
+        "DELETE FROM file_changes; \
          DELETE FROM uncommitted_files; \
          DELETE FROM commits; \
          DELETE FROM session_repos; \
@@ -312,60 +298,15 @@ pub fn collect_search_corpus(conn: &Connection) -> Result<Vec<crate::search::Ind
     Ok(out)
 }
 
-/// Populate the full-text index from every entity table in one sweep. Call
-/// this as the final step of a refresh, after every insert has landed.
-pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
-    // Separate INSERT per source so the text expression stays readable.
-    conn.execute_batch(
-        r#"
-        INSERT INTO search_idx (kind, ref_id, text)
-          SELECT 'repo', id, COALESCE(name, '') || ' ' || COALESCE(path, '') FROM repos;
-        INSERT INTO search_idx (kind, ref_id, text)
-          SELECT 'session', id, COALESCE(summary, '') FROM sessions WHERE summary IS NOT NULL;
-        INSERT INTO search_idx (kind, ref_id, text)
-          SELECT 'commit', id, COALESCE(subject, '') FROM commits;
-        "#,
-    )?;
-    Ok(())
-}
-
+/// JSON shape of a search hit. Returned by both the `/search` route and
+/// the `recall_search` MCP tool. The reader is now tantivy
+/// (`crate::search`), but this struct remains the public API contract.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub kind: String,
     pub ref_id: i64,
     pub text: String,
     pub extra: Option<String>,
-}
-
-/// Run a user query against the FTS index. Groups results by kind on the
-/// caller side. Uses `snippet()` to produce a highlighted excerpt.
-pub fn search(conn: &Connection, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
-    // FTS5 treats some characters specially ('"', ':', etc). For a
-    // user-facing search bar, quote the whole query as a phrase. Users who
-    // want AND/OR can still drop the quotes by embedding them themselves.
-    let q = format!("\"{}\"", query.replace('"', "\"\""));
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT kind, ref_id, text, rank
-        FROM search_idx
-        WHERE search_idx MATCH ?1
-        ORDER BY rank
-        LIMIT ?2
-        "#,
-    )?;
-    let rows = stmt.query_map(rusqlite::params![q, limit], |row| {
-        Ok(SearchHit {
-            kind: row.get(0)?,
-            ref_id: row.get(1)?,
-            text: row.get(2)?,
-            extra: None,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize)]
