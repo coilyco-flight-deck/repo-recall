@@ -186,6 +186,16 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             ),
         });
     }
+    if r.my_draft_prs > 0 {
+        let n = r.my_draft_prs;
+        out.push(DerivedSignal {
+            signal: "my_draft_pr",
+            detail: format!(
+                "{n} draft PR{} of yours - get into a reviewable state",
+                if n == 1 { "" } else { "s" },
+            ),
+        });
+    }
     if r.prs_mine_no_reviewer > 0 {
         let n = r.prs_mine_no_reviewer;
         out.push(DerivedSignal {
@@ -194,6 +204,16 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
                 "{n} of your open PR{} {} no reviewer - request one or self-merge",
                 if n == 1 { "" } else { "s" },
                 if n == 1 { "has" } else { "have" },
+            ),
+        });
+    }
+    if r.prs_mine_awaiting_review > 0 {
+        let n = r.prs_mine_awaiting_review;
+        out.push(DerivedSignal {
+            signal: "my_open_pr",
+            detail: format!(
+                "{n} open PR{} of yours - test it before they review",
+                if n == 1 { "" } else { "s" },
             ),
         });
     }

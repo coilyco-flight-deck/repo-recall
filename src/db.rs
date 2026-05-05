@@ -74,6 +74,10 @@ pub fn init(path: &Path) -> Result<()> {
             -- the blocker (request a reviewer, or self-merge on a solo repo).
             -- Action-required when > 0.
             prs_mine_no_reviewer INTEGER NOT NULL DEFAULT 0,
+            -- Open draft PRs authored by the authenticated `gh` user. Action-
+            -- required because Kai owes herself "get this into a reviewable
+            -- state" - distinct from `draft_prs`, which is the repo total.
+            my_draft_prs INTEGER NOT NULL DEFAULT 0,
             -- Open issues assigned to the authenticated `gh` user. Distinct
             -- from `open_issues` (the repo total) so a repo can have many
             -- issues without dragging this signal up. Action-required when > 0.
@@ -346,6 +350,7 @@ pub struct Repo {
     pub prs_awaiting_my_review: i64,
     pub prs_mine_awaiting_review: i64,
     pub prs_mine_no_reviewer: i64,
+    pub my_draft_prs: i64,
     pub issues_assigned_to_me: i64,
     pub deploy_workflow: Option<String>,
     pub deploy_status: Option<String>,
@@ -415,6 +420,7 @@ pub fn list_repos_with_counts(conn: &Connection) -> Result<Vec<Repo>> {
                r.prs_mine_no_reviewer,
                r.issues_assigned_to_me,
                r.deploy_workflow, r.deploy_status, r.deploy_last_success_ts,
+               r.my_draft_prs,
                (SELECT COUNT(*) FROM session_repos sr WHERE sr.repo_id = r.id) AS session_count,
                (SELECT COUNT(*) FROM commits c
                 WHERE c.repo_id = r.id AND c.timestamp >= ?1) AS commits_30d,
@@ -452,9 +458,10 @@ pub fn list_repos_with_counts(conn: &Connection) -> Result<Vec<Repo>> {
             deploy_workflow: row.get(21)?,
             deploy_status: row.get(22)?,
             deploy_last_success_ts: row.get(23)?,
-            session_count: row.get(24)?,
-            commits_30d: row.get(25)?,
-            authors_30d: row.get(26)?,
+            my_draft_prs: row.get(24)?,
+            session_count: row.get(25)?,
+            commits_30d: row.get(26)?,
+            authors_30d: row.get(27)?,
         })
     })?;
     let mut out = Vec::new();
@@ -477,6 +484,7 @@ pub fn get_repo(conn: &Connection, id: i64) -> Result<Option<Repo>> {
                r.prs_mine_no_reviewer,
                r.issues_assigned_to_me,
                r.deploy_workflow, r.deploy_status, r.deploy_last_success_ts,
+               r.my_draft_prs,
                (SELECT COUNT(*) FROM session_repos sr WHERE sr.repo_id = r.id) AS session_count,
                (SELECT COUNT(*) FROM commits c
                 WHERE c.repo_id = r.id AND c.timestamp >= ?2) AS commits_30d,
@@ -512,9 +520,10 @@ pub fn get_repo(conn: &Connection, id: i64) -> Result<Option<Repo>> {
             deploy_workflow: row.get(21)?,
             deploy_status: row.get(22)?,
             deploy_last_success_ts: row.get(23)?,
-            session_count: row.get(24)?,
-            commits_30d: row.get(25)?,
-            authors_30d: row.get(26)?,
+            my_draft_prs: row.get(24)?,
+            session_count: row.get(25)?,
+            commits_30d: row.get(26)?,
+            authors_30d: row.get(27)?,
         })
     })?;
     Ok(rows.next().transpose()?)
