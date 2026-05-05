@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod push;
 pub mod routes;
 pub mod scanner;
+pub mod search;
 pub mod sessions;
 pub mod state;
 
@@ -54,6 +55,10 @@ pub struct AppState {
     /// cache DB: VAPID keypair, push subscriptions, deduplication set of
     /// already-notified action-required signal ids.
     pub state_db: state::StateDb,
+    /// Tantivy full-text index, dual-written alongside the SQLite
+    /// `search_idx` virtual table on every refresh. Reader still flows
+    /// through SQLite until the redb migration's step 3 flips it.
+    pub search_index: search::SearchIndex,
     /// Public-demo mode (`REPO_RECALL_DEMO=true`). When true, host-mutating
     /// endpoints (push, pull, clone, push-notification subscribe/unsubscribe)
     /// return 403, and the page layout renders a "DEMO INSTANCE" banner.

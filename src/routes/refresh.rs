@@ -37,6 +37,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let db_path = state.db_path.clone();
     let scan_depth = state.scan_depth;
     let commits_per_repo = state.commits_per_repo;
+    let search_index = state.search_index.clone();
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RefreshStats> {
         let conn = db::open(&db_path)?;
@@ -155,6 +156,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 
         // --- search index (rebuilt from the populated tables) ---
         db::rebuild_search_index(&conn)?;
+        // Dual-write the same corpus into tantivy. Reader still flows
+        // through SQLite; step 3 of the redb migration flips it.
+        let corpus = db::collect_search_corpus(&conn)?;
+        if let Err(e) = search_index.rebuild(corpus) {
+            tracing::warn!("tantivy rebuild failed (search still served by sqlite): {e:?}");
+        }
 
         Ok(RefreshStats {
             repos: repos_n,

@@ -28,7 +28,9 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
     // do not bleed across parallel runs.
     let state_dir = std::env::temp_dir().join(format!("repo-recall-state-{}", uuid_like()));
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db = StateDb::open_at(state_dir.join("state.sqlite")).expect("state db");
+    let state_db = StateDb::open_at(state_dir.join("state.redb")).expect("state db");
+    let index_dir = state_dir.join("idx");
+    let search_index = repo_recall::search::SearchIndex::open_at(&index_dir).expect("search index");
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
@@ -46,6 +48,7 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         state_db,
+        search_index,
         demo_mode: false,
     };
 

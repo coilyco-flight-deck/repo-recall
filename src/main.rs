@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{commits, db, mcp, routes, state::StateDb, AppState};
+use repo_recall::{commits, db, mcp, routes, search, state::StateDb, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -66,6 +66,10 @@ async fn main() -> anyhow::Result<()> {
 
     db::init(&db_path)?;
 
+    let index_dir = search::default_index_dir();
+    tracing::info!("idx: {}", index_dir.display());
+    let search_index = search::SearchIndex::open_at(&index_dir)?;
+
     let state_db = StateDb::open_default()?;
     if let Err(e) = state_db.get_or_init_vapid() {
         tracing::warn!("VAPID keypair init failed; push notifications disabled: {e:?}");
@@ -112,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         state_db,
+        search_index,
         demo_mode,
     };
 

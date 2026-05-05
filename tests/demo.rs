@@ -223,7 +223,8 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
     db::init(&db_path).unwrap();
     let state_dir = unique_tmp("repo-recall-demo-state");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db = StateDb::open_at(state_dir.join("state.sqlite")).unwrap();
+    let state_db = StateDb::open_at(state_dir.join("state.redb")).unwrap();
+    let search_index = repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).unwrap();
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
@@ -243,6 +244,7 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
         my_git_email: Arc::new(TokioMutex::new(None)),
         scan_version: Arc::new(AtomicU64::new(0)),
         state_db,
+        search_index: search_index.clone(),
         demo_mode: false,
     };
 
@@ -322,7 +324,8 @@ fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
     db::init(&db_path).unwrap();
     let state_dir = unique_tmp("repo-recall-demo-flag-state");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db = StateDb::open_at(state_dir.join("state.sqlite")).unwrap();
+    let state_db = StateDb::open_at(state_dir.join("state.redb")).unwrap();
+    let search_index = repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).unwrap();
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
@@ -340,6 +343,7 @@ fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
         my_git_email: Arc::new(TokioMutex::new(None)),
         scan_version: Arc::new(AtomicU64::new(0)),
         state_db,
+        search_index: search_index.clone(),
         demo_mode,
     };
     (state, db_path, state_dir)

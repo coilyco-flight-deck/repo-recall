@@ -266,6 +266,52 @@ pub fn file_hotspots(
     Ok(out)
 }
 
+/// Read every row that would land in `search_idx` and return it as plain
+/// records. Step 2 of the redb migration uses this to dual-write the same
+/// corpus into tantivy alongside SQLite. Kept separate from
+/// `rebuild_search_index` so the SQLite read path is unchanged.
+pub fn collect_search_corpus(conn: &Connection) -> Result<Vec<crate::search::IndexDoc>> {
+    use crate::search::IndexDoc;
+    let mut out: Vec<IndexDoc> = Vec::new();
+
+    let mut stmt =
+        conn.prepare("SELECT id, COALESCE(name, '') || ' ' || COALESCE(path, '') FROM repos")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, text) = row?;
+        out.push(IndexDoc {
+            kind: "repo".into(),
+            ref_id: id,
+            text,
+        });
+    }
+
+    let mut stmt =
+        conn.prepare("SELECT id, COALESCE(summary, '') FROM sessions WHERE summary IS NOT NULL")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, text) = row?;
+        out.push(IndexDoc {
+            kind: "session".into(),
+            ref_id: id,
+            text,
+        });
+    }
+
+    let mut stmt = conn.prepare("SELECT id, COALESCE(subject, '') FROM commits")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, text) = row?;
+        out.push(IndexDoc {
+            kind: "commit".into(),
+            ref_id: id,
+            text,
+        });
+    }
+
+    Ok(out)
+}
+
 /// Populate the full-text index from every entity table in one sweep. Call
 /// this as the final step of a refresh, after every insert has landed.
 pub fn rebuild_search_index(conn: &Connection) -> Result<()> {
