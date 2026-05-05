@@ -8,8 +8,12 @@ name: release
 #      feat: ...  -> minor       feat!: ...   -> major  (also `BREAKING CHANGE:`)
 # 2. Tag is created at the pushed commit. No commit is written back to main.
 # 3. A GitHub Release is cut with the auto-generated changelog.
-# 4. The new tarball sha256 is computed and pushed *directly* to
-#    coilysiren/homebrew-tap. brew upgrade picks it up.
+# 4. The new tarball sha256 is computed, then a repository_dispatch is
+#    fired to coilysiren/homebrew-tap whose own bump-repo-recall workflow
+#    rewrites Formula/repo-recall.rb via the Contents API. The receiver
+#    lives in homebrew-tap so the commit is signed by GitHub's web-flow
+#    key (only installation-token API commits are auto-signed) and clears
+#    the signed-commits ruleset.
 #
 # Version source of truth at build time is build.rs, which reads
 # $REPO_RECALL_VERSION (set by the brew Formula and by anyone building from
@@ -17,6 +21,9 @@ name: release
 # field is pinned at 0.0.0-dev and is no longer touched by CI - that's the
 # whole point of this flow. The previous bump-commit hid CI status from the
 # prior commit by burying it under a green-by-default chore commit.
+#
+# All `${{ }}` interpolations below are repo-controlled (action outputs,
+# job needs, secrets) - no github.event.* untrusted input flows into run blocks.
 #
 # Manual setup (one-time, requires Kai):
 #   gh secret set HOMEBREW_TAP_TOKEN --repo coilysiren/repo-recall
@@ -68,6 +75,8 @@ jobs:
     steps:
       - name: Compute tarball sha256
         id: sha
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
         run: |
           set -euo pipefail
           url="https://github.com/coilysiren/repo-recall/archive/refs/tags/${TAG}.tar.gz"
@@ -82,34 +91,22 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout repo-recall (for source-of-truth Formula)
-        uses: actions/checkout@v4
-        with:
-          path: repo-recall
-
-      - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
-        with:
-          repository: coilysiren/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Bump Formula and push directly
+      - name: Dispatch bump to homebrew-tap
         env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
           NEW_URL: ${{ steps.sha.outputs.url }}
           NEW_SHA: ${{ steps.sha.outputs.sha }}
+        # The homebrew-tap ruleset requires signed commits. A PAT-driven
+        # `git push` or Contents-API call from this runner produces an
+        # unsigned commit and is rejected. Instead we trigger the
+        # bump-repo-recall workflow in homebrew-tap, where the built-in
+        # GITHUB_TOKEN (an installation token) drives the Contents API
+        # and the resulting commit is web-flow-signed by GitHub.
         run: |
           set -euo pipefail
-          cd homebrew-tap
-          file=Formula/repo-recall.rb
-          # Mirror the source-of-truth Formula from this repo, then patch
-          # url + sha256 to point at the new tarball. Keeps any non-version
-          # Formula edits (install steps, service env, etc.) in sync.
-          cp ../repo-recall/Formula/repo-recall.rb "$file"
-          sed -i "s|^  url \".*\"|  url \"${NEW_URL}\"|" "$file"
-          sed -i "s|^  sha256 \".*\"|  sha256 \"${NEW_SHA}\"|" "$file"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$file"
-          git commit -m "repo-recall: bump to ${TAG}"
-          git push origin HEAD:main
+          gh api -X POST repos/coilysiren/homebrew-tap/dispatches \
+            -f event_type=bump-repo-recall \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[url]=${NEW_URL}" \
+            -f "client_payload[sha]=${NEW_SHA}"

@@ -31,6 +31,15 @@ class RepoRecall < Formula
     )
   end
 
+  def caveats
+    <<~EOS
+      To configure repo-recall (working directory, port, scan depth, etc.):
+        brew services edit repo-recall
+        brew services restart repo-recall
+      Edits to the service file persist across `brew upgrade`.
+    EOS
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/repo-recall --version")
     assert_match "repo-recall", shell_output("#{bin}/repo-recall --help")

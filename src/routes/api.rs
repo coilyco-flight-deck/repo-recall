@@ -196,20 +196,23 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             ),
         });
     }
+    if r.prs_mine_no_reviewer > 0 {
+        let n = r.prs_mine_no_reviewer;
+        out.push(DerivedSignal {
+            signal: "pr_no_reviewer",
+            detail: format!(
+                "{n} of your open PR{} {} no reviewer - request one or self-merge",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "has" } else { "have" },
+            ),
+        });
+    }
     if r.prs_mine_awaiting_review > 0 {
         let n = r.prs_mine_awaiting_review;
-        // Solo repo (only Kai authoring in the last 30d): no one to ask.
-        // Drop the "ask for review" framing in that case.
-        let solo = r.authors_30d <= 1;
-        let suffix = if solo {
-            "test it"
-        } else {
-            "test and ask for review"
-        };
         out.push(DerivedSignal {
             signal: "my_open_pr",
             detail: format!(
-                "{n} open PR{} of yours - {suffix}",
+                "{n} open PR{} of yours - test it before they review",
                 if n == 1 { "" } else { "s" },
             ),
         });

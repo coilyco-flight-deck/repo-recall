@@ -223,6 +223,7 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - Detached HEAD
 /// - PR awaiting my review
 /// - My draft PR (push it into a reviewable state)
+/// - My open PR with no reviewer requested (you are the blocker)
 /// - My non-draft PR open (test it, ask for review)
 /// - Issue assigned to me
 /// - Deploy workflow's last run failed
@@ -235,6 +236,7 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.prs_awaiting_my_review > 0
         || r.my_draft_prs > 0
         || r.prs_mine_awaiting_review > 0
+        || r.prs_mine_no_reviewer > 0
         || r.issues_assigned_to_me > 0
         || is_deploy_failing(r)
         || is_deploy_stale(r)
@@ -310,6 +312,7 @@ mod tests {
             open_issues: 0,
             prs_awaiting_my_review: 0,
             prs_mine_awaiting_review: 0,
+            prs_mine_no_reviewer: 0,
             my_draft_prs: 0,
             issues_assigned_to_me: 0,
             deploy_workflow: None,
