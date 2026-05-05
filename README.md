@@ -186,24 +186,17 @@ The 200-char summary can still contain pasted credentials or sensitive text. Tre
 
 ## Prior art
 
-Session ↔ repo joining is the core, but the dashboard sits at the intersection of a few adjacent tools worth studying.
+Repo-recall sits at the intersection of GitHub-state dashboards, multi-repo git-status walkers, and Claude Code session tooling. Closest neighbours, ordered most-similar to least:
 
-### Claude Code session browsing
-- **[claude-code-history-viewer](https://github.com/jhlee0409/claude-code-history-viewer)** — desktop app, chat-style transcript rendering, covers Codex / Cursor / Aider / OpenCode too.
-- **[claude-devtools](https://github.com/matt1398/claude-devtools)** — "missing DevTools" for Claude Code: visual inspector for tool calls, subagents, token usage, context window.
-- **[Claudoscope](https://github.com/cordwainersmith/Claudoscope)** — native macOS menu bar with session analytics and cost estimation.
-
-### Git-aware multi-repo dashboards
-- **[mgitstatus](https://github.com/fboender/multi-git-status)** — scans N levels deep; prints uncommitted / untracked / unpushed / stashes per repo. Validates the depth-limited walk.
-- **[RepoBar](https://github.com/steipete/RepoBar)** — macOS menu bar with CI, issues, PRs, releases, branch + sync state. Closest analog to the deferred menu-bar direction.
-
-### Git log analytics
-- **[Code Maat](https://github.com/adamtornhill/code-maat)** — CLI that mines git logs for churn, contribution, coupling, hotspots. Pairs with Tornhill's *Your Code as a Crime Scene*. Our `loc_churn_30d` + `authors_30d` are primitive forms of what Code Maat does exhaustively.
-- **[RepoSense](https://github.com/reposense/RepoSense)** — cross-repo contribution analysis with per-author timelines. The explicit multi-repo framing matches our activity-scored ranking.
-- **[git-quick-stats](https://github.com/arzzen/git-quick-stats)** — interactive Bash CLI: ownership / churn / hotspots / branch health for one repo at a time.
-
-### "What did I do yesterday?"
-- **[git-standup](https://github.com/kamranahmedse/git-standup)** — walks `git log` across nested repos to recall yesterday's work. Pair its commit scraping with session scraping for a richer recap.
+- **[dlvhdr/gh-dash](https://github.com/dlvhdr/gh-dash)** - GitHub TUI dashboard for PRs and issues across repos. Closest analog for the `review_requested` / `issue_assigned` pillar; repo-recall adds local-clone state and Claude Code session joins on top.
+- **[steipete/RepoBar](https://github.com/steipete/RepoBar)** - macOS menu bar with CI, PRs, issues, releases, branch + sync state. Same dashboard surface in a different shape; repo-recall lives in the browser and MCP rather than the menu bar, and tracks sessions.
+- **[fboender/multi-git-status](https://github.com/fboender/multi-git-status)** - depth-limited walker that prints uncommitted / untracked / unpushed / stashes per repo. Validates the discovery model; repo-recall layers remote state, action-required signals, and an HTTP + MCP surface on top.
+- **[jhlee0409/claude-code-history-viewer](https://github.com/jhlee0409/claude-code-history-viewer)** - desktop app that renders chat-style transcripts for Claude Code, Codex, Cursor, Aider, OpenCode. Complementary; repo-recall surfaces session metadata and the repo each session worked on, not full transcripts.
+- **[matt1398/claude-devtools](https://github.com/matt1398/claude-devtools)** - "missing DevTools" for Claude Code: visual inspector for tool calls, subagents, token usage, context window. Complementary; claude-devtools lives inside one session, repo-recall lives across sessions and repos.
+- **[cordwainersmith/Claudoscope](https://github.com/cordwainersmith/Claudoscope)** - native macOS menu bar with session analytics and cost estimation. Overlaps the per-session metrics; repo-recall ties those metrics to the repo each session actually worked on.
+- **[safishamsi/graphify](https://github.com/safishamsi/graphify)** - tree-sitter code-knowledge graph exposed to AI assistants over MCP for within-repo "who calls what" questions. Different layer; graphify models code structure inside one repo, repo-recall models activity across many repos and sessions.
+- **[adamtornhill/code-maat](https://github.com/adamtornhill/code-maat)** - CLI that mines git logs for churn, coupling, hotspots, contribution. Deeper offline analysis on a single repo; `loc_churn_30d` and `authors_30d` are primitive online forms of what Code Maat does exhaustively.
+- **[kamranahmedse/git-standup](https://github.com/kamranahmedse/git-standup)** - walks `git log` across nested repos to recap yesterday's work. Pair its commit scraping with repo-recall's session scraping for a richer answer to "what was I doing?"
 
 ## Contributing
 
