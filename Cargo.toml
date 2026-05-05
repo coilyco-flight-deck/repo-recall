@@ -28,6 +28,13 @@ web-push = "0.10"
 base64 = "0.22"
 dirs = "5"
 
+# MCP App server. Purely additive — `repo-recall mcp` runs a stdio MCP server
+# alongside the axum dashboard's brew-installed binary. The default invocation
+# (`repo-recall`) still boots the axum dashboard.
+pmcp = { version = "2.6", features = ["mcp-apps", "schema-generation", "streamable-http"] }
+schemars = "1.0"
+async-trait = "0.1"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

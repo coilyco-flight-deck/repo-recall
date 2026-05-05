@@ -14,6 +14,21 @@
       ],
       "port": 7777,
       "url": "/"
+    },
+    {
+      "name": "repo-recall-pr-screenshots",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "REPO_RECALL_CWD=/Users/kai/projects/coilysiren",
+        "REPO_RECALL_PORT=7782",
+        "REPO_RECALL_DB=/tmp/repo-recall-pr-screenshots.sqlite",
+        "REPO_RECALL_DEPTH=4",
+        "REPO_RECALL_REFRESH_INTERVAL_SECS=0",
+        "RUST_LOG=warn",
+        "./target/debug/repo-recall"
+      ],
+      "port": 7782,
+      "url": "/"
     }
   ]
 }

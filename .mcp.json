@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "repo-recall": {
+      "type": "http",
+      "url": "https://repo-recall.localhost:7443/mcp"
+    }
+  }
+}

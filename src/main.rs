@@ -2,17 +2,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::Router;
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{commits, db, routes, state::StateDb, AppState};
+use repo_recall::{commits, db, mcp, routes, state::StateDb, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Tiny CLI surface — just enough that `brew test` has a deterministic
-    // smoke probe and `--help` doesn't dump an axum stack trace. Anything
-    // beyond `--version` / `--help` falls through to the server boot path.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("repo-recall {}", env!("REPO_RECALL_VERSION"));
@@ -27,12 +23,15 @@ async fn main() -> anyhow::Result<()> {
     // reading any env vars. Missing .env is not an error.
     let _ = dotenvy::dotenv();
 
+    // Single binary, both surfaces. The MCP server is purely additive.
+    // tracing-subscriber writer is stderr unconditionally because the MCP
+    // stdio transport reserves stdout for JSON-RPC framing.
     tracing_subscriber::registry()
         .with(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,repo_recall=debug")),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let cwd = match std::env::var_os("REPO_RECALL_CWD") {
@@ -65,13 +64,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("cwd: {}", cwd.display());
     tracing::info!("db:  {}", db_path.display());
 
-    // Initialize schema (wiping any prior data).
     db::init(&db_path)?;
 
-    // Persistent state DB: lives separately from the wipe-on-restart cache DB
-    // so the VAPID keypair and push subscriptions survive every reboot.
-    // Eagerly init the VAPID keypair so any "openssl not on PATH" failure
-    // surfaces at boot rather than on first /api/push/subscribe.
     let state_db = StateDb::open_default()?;
     if let Err(e) = state_db.get_or_init_vapid() {
         tracing::warn!("VAPID keypair init failed; push notifications disabled: {e:?}");
@@ -79,14 +73,8 @@ async fn main() -> anyhow::Result<()> {
 
     let (progress_tx, _) = broadcast::channel::<String>(128);
 
-    let scan_depth: usize = std::env::var("REPO_RECALL_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4);
-    let commits_per_repo: usize = std::env::var("REPO_RECALL_COMMITS_PER_REPO")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(500);
+    let scan_depth: usize = env_usize("REPO_RECALL_DEPTH", 4);
+    let commits_per_repo: usize = env_usize("REPO_RECALL_COMMITS_PER_REPO", 500);
 
     let gh_health = commits::gh_health();
     let my_gh_login = if gh_health == commits::GhHealth::Ok {
@@ -96,14 +84,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let my_git_email = detect_my_git_email();
 
-    let refresh_interval_secs: u64 = std::env::var("REPO_RECALL_REFRESH_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(150);
-    let remote_target_limit: usize = std::env::var("REPO_RECALL_REMOTE_TARGET_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(25);
+    let refresh_interval_secs: u64 = env_u64("REPO_RECALL_REFRESH_INTERVAL_SECS", 150);
+    let remote_target_limit: usize = env_usize("REPO_RECALL_REMOTE_TARGET_LIMIT", 25);
 
     // Public demo: turns the layout banner on and 403s host-mutating endpoints.
     // Off by default; only set to `true` for the public Docker image.
@@ -133,17 +115,8 @@ async fn main() -> anyhow::Result<()> {
         demo_mode,
     };
 
-    let app: Router = routes::router(state.clone());
-
-    let addr: SocketAddr = SocketAddr::new(host, port);
-    // Bind before launching any scan work. run_refresh wipes the SQLite file
-    // as its first step, so a doomed boot that loses the port race must not
-    // be allowed to touch the DB another instance is already serving from.
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("listening on http://{}", addr);
-
-    // Kick off initial scan in the background so the dashboard has data
-    // by the time the user finishes typing the URL.
+    // Initial scan in the background so the dashboard / first MCP tool call
+    // has data by the time the user finishes typing the URL.
     {
         let state = state.clone();
         tokio::spawn(async move {
@@ -153,9 +126,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Periodic refresh: fires every REPO_RECALL_REFRESH_INTERVAL_SECS. Set to
-    // 0 to disable. Uses the same `refresh_lock` as the manual /refresh, so a
-    // tick that overlaps an in-flight scan no-ops cleanly.
     if refresh_interval_secs > 0 {
         tracing::info!("periodic refresh: every {refresh_interval_secs}s");
         let state = state.clone();
@@ -163,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
             let mut ticker =
                 tokio::time::interval(std::time::Duration::from_secs(refresh_interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await; // skip the immediate first tick — initial scan covers it
+            ticker.tick().await; // skip first immediate tick — initial scan covers it
             loop {
                 ticker.tick().await;
                 if let Err(e) = routes::refresh::run_refresh(state.clone()).await {
@@ -175,8 +145,48 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("periodic refresh disabled (REPO_RECALL_REFRESH_INTERVAL_SECS=0)");
     }
 
-    axum::serve(listener, app).await?;
+    // Always start MCP. Tolerate dead-stdin: in the brew-services case, stdin
+    // is /dev/null so run_stdio returns Ok almost immediately and we keep
+    // running axum. In the Claude-Desktop-spawned case, stdin is a pipe from
+    // the host and run_stdio holds it open for the session's life.
+    let mcp_state = state.clone();
+    let mcp_handle = tokio::spawn(async move {
+        if let Err(e) = mcp::run_stdio(mcp_state).await {
+            tracing::warn!("mcp stdio server exited: {e:?}");
+        }
+    });
+
+    // Always try to bind axum. If the port is already in use (e.g. a brew
+    // service is already serving), log and fall back to MCP-only.
+    let addr: SocketAddr = SocketAddr::new(host, port);
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            tracing::info!("listening on http://{}", addr);
+            let app = routes::router(state.clone());
+            axum::serve(listener, app).await?;
+        }
+        Err(e) => {
+            tracing::warn!("could not bind {addr}: {e}. Skipping axum, running MCP only.");
+            // MCP becomes the only foreground task. Wait on it forever (or
+            // until stdin EOFs and the host disconnects).
+            let _ = mcp_handle.await;
+        }
+    }
     Ok(())
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn print_help() {
@@ -184,21 +194,27 @@ fn print_help() {
         "repo-recall {ver}
 Local dev dashboard that indexes Claude Code session history against your repos.
 
+Always runs both an axum dashboard (HTTP) and an MCP App server (stdio) in
+one process. The dashboard binds $REPO_RECALL_HOST:$REPO_RECALL_PORT (default
+127.0.0.1:7777). The MCP server reads JSON-RPC from stdin and writes to
+stdout, so wire it into your host's mcpServers config with the bare command.
+
+If the HTTP port is already in use (e.g. another instance is already running
+under brew services), this instance falls back to MCP-only.
+
 Usage:
-  repo-recall              start the server (binds $REPO_RECALL_HOST:$REPO_RECALL_PORT, default 127.0.0.1:7777)
+  repo-recall              start both (default)
   repo-recall --version    print version and exit
   repo-recall --help       print this help and exit
 
-Config is via env vars (or a .env file in cwd). See the README for the full list.
-Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD, REPO_RECALL_DEPTH.
+Config is via env vars (or a .env file in cwd). See the README for the full
+list. Common ones: REPO_RECALL_PORT, REPO_RECALL_HOST, REPO_RECALL_CWD,
+REPO_RECALL_DEPTH.
 ",
         ver = env!("REPO_RECALL_VERSION"),
     );
 }
 
-/// Detect the viewer's git identity so "my commits" author-filter works by
-/// default. Honors `REPO_RECALL_AUTHOR` env var if set, else falls back to
-/// `git config --global user.email`.
 fn detect_my_git_email() -> Option<String> {
     if let Ok(email) = std::env::var("REPO_RECALL_AUTHOR") {
         if !email.is_empty() && email != "all" {
