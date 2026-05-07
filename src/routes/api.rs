@@ -142,6 +142,9 @@ pub struct DerivedSignal {
 /// per-signal records.
 pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
     let mut out = Vec::new();
+    if activity::is_vendored(r) {
+        return out;
+    }
     if r.ci_status.as_deref() == Some("failure") {
         out.push(DerivedSignal {
             signal: "ci_failing",

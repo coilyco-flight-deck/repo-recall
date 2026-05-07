@@ -229,6 +229,9 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - Deploy workflow's last run failed
 /// - Deploy workflow has been silent for > 7d since its last green run
 pub fn is_action_required(r: &Repo) -> bool {
+    if is_vendored(r) {
+        return false;
+    }
     r.ci_status.as_deref() == Some("failure")
         || (r.untracked_files + r.modified_files) > 0
         || r.in_progress_op.is_some()
@@ -240,6 +243,22 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.issues_assigned_to_me > 0
         || is_deploy_failing(r)
         || is_deploy_stale(r)
+}
+
+/// Vendored / external repo: a third-party tree cloned for reading, not for
+/// work. Suppresses every action-required signal so detached-HEAD release-tag
+/// clones (e.g. `~/projects/virtualenv` checked out at tag `20.17.1`) and
+/// dirty trees in vendored sources don't flow into the dashboard's action
+/// queue.
+///
+/// Opt-in marker only. Drop a literal empty `.repo-recall-ignore` file at the
+/// repo root and the repo goes silent. No auto-detection - explicit beats
+/// clever, and the user is the only one who knows whether a repo is theirs
+/// or vendored.
+pub fn is_vendored(r: &Repo) -> bool {
+    std::path::Path::new(&r.path)
+        .join(".repo-recall-ignore")
+        .exists()
 }
 
 /// Last run of the deploy workflow on the default branch failed.
@@ -387,6 +406,29 @@ mod tests {
         let mut on_main = repo(3, "on-main", 0, 0);
         on_main.head_ref = Some("main".into());
         assert!(!is_action_required(&on_main));
+    }
+
+    #[test]
+    fn vendored_marker_silences_action_required() {
+        let dir = std::env::temp_dir().join(format!(
+            "repo-recall-vendored-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".repo-recall-ignore"), "").unwrap();
+
+        let mut detached = repo(1, "vendored", 0, 0);
+        detached.path = dir.to_string_lossy().to_string();
+        detached.head_ref = Some("detached".into());
+        detached.untracked_files = 5;
+        assert!(is_vendored(&detached));
+        assert!(!is_action_required(&detached));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -152,18 +152,24 @@ pub async fn index(
 
     // Aggregate banner counts and per-repo signal sets up front so both the
     // JSON branch and the HTML branch read from the same numbers.
+    // Banner counters: skip vendored repos. They're explicitly marked as
+    // not-mine so their CI failures, dirty trees, in-progress git ops, and
+    // detached HEADs are noise, not action items.
     let ci_failing_count = repos
         .iter()
-        .filter(|r| r.ci_status.as_deref() == Some("failure"))
+        .filter(|r| !activity::is_vendored(r) && r.ci_status.as_deref() == Some("failure"))
         .count();
     let dirty_count = repos
         .iter()
-        .filter(|r| (r.untracked_files + r.modified_files) > 0)
+        .filter(|r| !activity::is_vendored(r) && (r.untracked_files + r.modified_files) > 0)
         .count();
-    let in_progress_count = repos.iter().filter(|r| r.in_progress_op.is_some()).count();
+    let in_progress_count = repos
+        .iter()
+        .filter(|r| !activity::is_vendored(r) && r.in_progress_op.is_some())
+        .count();
     let detached_count = repos
         .iter()
-        .filter(|r| r.head_ref.as_deref() == Some("detached"))
+        .filter(|r| !activity::is_vendored(r) && r.head_ref.as_deref() == Some("detached"))
         .count();
     let review_requested_count: i64 = repos.iter().map(|r| r.prs_awaiting_my_review).sum();
     let issue_assigned_count: i64 = repos.iter().map(|r| r.issues_assigned_to_me).sum();
