@@ -2,13 +2,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use miette::{IntoDiagnostic, WrapErr};
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use repo_recall::{commits, db::CacheDb, mcp, routes, search, state::StateDb, AppState};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> miette::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("repo-recall {}", env!("REPO_RECALL_VERSION"));
@@ -36,7 +37,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cwd = match std::env::var_os("REPO_RECALL_CWD") {
         Some(p) => PathBuf::from(p),
-        None => std::env::current_dir()?,
+        None => std::env::current_dir()
+            .into_diagnostic()
+            .wrap_err("failed to read current working directory")?,
     };
     let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
 
@@ -66,13 +69,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("cwd:   {}", cwd.display());
     tracing::info!("cache: {}", cache_dir.display());
 
-    let cache_db = CacheDb::open_in_dir(&cache_dir)?;
+    // Underlying errors are `anyhow::Error`, which does not implement
+    // `std::error::Error`, so `.into_diagnostic()` won't see them. Render via
+    // `miette::miette!` and tack on a wrap_err for the labeled "failed to
+    // bootstrap because X" line.
+    let cache_db = CacheDb::open_in_dir(&cache_dir)
+        .map_err(|e| miette::miette!("{e:?}"))
+        .wrap_err_with(|| format!("failed to open cache db at {}", cache_dir.display()))?;
 
     let index_dir = search::default_index_dir();
     tracing::info!("idx: {}", index_dir.display());
-    let search_index = search::SearchIndex::open_at(&index_dir)?;
+    let search_index = search::SearchIndex::open_at(&index_dir)
+        .map_err(|e| miette::miette!("{e:?}"))
+        .wrap_err_with(|| format!("failed to open search index at {}", index_dir.display()))?;
 
-    let state_db = StateDb::open_default()?;
+    let state_db = StateDb::open_default()
+        .map_err(|e| miette::miette!("{e:?}"))
+        .wrap_err("failed to open persistent state db")?;
     if let Err(e) = state_db.get_or_init_vapid() {
         tracing::warn!("VAPID keypair init failed; push notifications disabled: {e:?}");
     }
@@ -170,7 +183,10 @@ async fn main() -> anyhow::Result<()> {
         Ok(listener) => {
             tracing::info!("listening on http://{}", addr);
             let app = routes::router(state.clone());
-            axum::serve(listener, app).await?;
+            axum::serve(listener, app)
+                .await
+                .into_diagnostic()
+                .wrap_err("axum serve loop failed")?;
         }
         Err(e) => {
             tracing::warn!("could not bind {addr}: {e}. Skipping axum, running MCP only.");
