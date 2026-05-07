@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch build release test fmt fmt-check lint check ci clean css css-check css-watch \
+.PHONY: help install run watch build release test smoke fmt fmt-check lint check ci clean css css-check css-watch \
         docker-demo-build docker-demo-run docker-demo-smoke
 
 # Demo image -----------------------------------------------------------------
@@ -62,6 +62,9 @@ release: ## cargo build --release
 
 test: ## Run cargo test (unit + integration)
 	cargo test --color always
+
+smoke: ## MCP-protocol integration smoke (spawns the binary, talks JSON-RPC over stdio)
+	cargo test --color always --test mcp_smoke
 
 fmt: ## Format everything with rustfmt
 	cargo fmt --all

@@ -48,7 +48,8 @@ static/
   livereload.js     # browser reconnect-and-reload loop
   favicon.svg       # 32×32 monochrome magnifying-glass
 tests/
-  smoke.rs          # integration tests: boot the router on port 0, hit every endpoint
+  smoke.rs          # axum integration tests: boot the router on port 0, hit every endpoint
+  mcp_smoke.rs      # MCP integration tests: spawn the binary, talk JSON-RPC over stdio
 Cargo.toml
 Makefile            # `make help` for the full target list
 .pre-commit-config.yaml
@@ -93,6 +94,7 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 - **Cache reads use redb's MVCC; the writer is the refresh path.** [`CacheDb`](./src/db.rs) wraps a single `Arc<Database>` shared in `AppState`. Reads open lightweight `begin_read()` transactions freely (no locking, no contention with the writer). All mutations route through `cache.write_batch(|w| { … })`, which opens one `begin_write()` per phase and commits atomically. Refresh holds `state.refresh_lock` so two refreshes never overlap, which keeps the single-writer rule honest.
 - **Every dashboard query has its own secondary index.** redb is a KV store, not a planner — every per-repo / per-session / per-timestamp scan needs a hand-designed index table. Aggregates the SQL layer used to compute via subqueries (`session_count`, `commits_30d`, `authors_30d`) are precomputed at the end of refresh by `finalize_repo_aggregates` and stored on the `Repo` record. If you add a new query, design the index alongside it.
 - **Integration tests boot the real router on port 0.** See [`tests/smoke.rs`](./tests/smoke.rs). Each test gets its own cache directory under `$TMPDIR` (nanos + PID + an atomic counter) so parallel `cargo test` invocations don't collide. Prefer adding tests here over writing manual-curl README snippets.
+- **MCP integration tests spawn the binary as a child process.** See [`tests/mcp_smoke.rs`](./tests/mcp_smoke.rs). Each test gets its own cache + state + tantivy directories under `$TMPDIR` so parallel runs don't collide on redb's exclusive file lock. The test polls the dashboard tool until the initial background scan bumps `scan_version` past 0 before exercising `recall_refresh` (otherwise the refresh coalesces into the still-running initial scan and `ran=false`). `make smoke` runs only this suite.
 - **Session parsing tolerates malformed lines.** Individual JSONL lines can be skipped with a `tracing::debug!` log; don't fail a whole file because one line is bad. The parser already handles the mix of `queue-operation` / `user` / `assistant` record shapes we've seen.
 - **Data sources are independent tables, not a single unified "events" table.** Sessions live in `sessions` + `session_repos`, commits live in `commits`. Both reference `repos.id` but don't join through each other. When future data sources arrive (GitHub PRs, CI runs, etc.) they each get their own table + refresh step. A cross-source "activity feed" is a query-time concern, not a schema-time one — don't pre-unify.
 - **Activity attributes fall into three categories**, declared via [`activity::Category`](./src/activity.rs): **Historical** (past activity, local, cheap), **LocalState** (working tree right now, local, cheap), **RemoteState** (requires a network call to a remote service — GitHub, CI, etc.). Each new attribute picks a category; the category drives *how* it's refreshed (main blocking pass vs. parallel async post-pass) and *how* it's rendered (alert-style pill vs. standard vs. silent-when-healthy).
