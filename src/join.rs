@@ -129,6 +129,18 @@ fn is_valid_name(s: &str) -> bool {
         && !s.ends_with('.')
 }
 
+fn is_ancestor_or_equal(ancestor: &Path, descendant: &Path) -> bool {
+    // Compare on macOS (case-insensitive by default) and Linux (case-sensitive)
+    // consistently by lowercasing on macOS-style targets. Simpler: compare
+    // components as-is; if that fails, fall back to case-insensitive.
+    if descendant.starts_with(ancestor) {
+        return true;
+    }
+    let a = ancestor.to_string_lossy().to_lowercase();
+    let d = descendant.to_string_lossy().to_lowercase();
+    d == a || d.starts_with(&format!("{a}/")) || d.starts_with(&format!("{a}\\"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::gh_refs_in_text;
@@ -188,16 +200,4 @@ mod tests {
         let hits = gh_refs_in_text("foo/bar#1 foo/bar#2");
         assert_eq!(hits.len(), 2);
     }
-}
-
-fn is_ancestor_or_equal(ancestor: &Path, descendant: &Path) -> bool {
-    // Compare on macOS (case-insensitive by default) and Linux (case-sensitive)
-    // consistently by lowercasing on macOS-style targets. Simpler: compare
-    // components as-is; if that fails, fall back to case-insensitive.
-    if descendant.starts_with(ancestor) {
-        return true;
-    }
-    let a = ancestor.to_string_lossy().to_lowercase();
-    let d = descendant.to_string_lossy().to_lowercase();
-    d == a || d.starts_with(&format!("{a}/")) || d.starts_with(&format!("{a}\\"))
 }
