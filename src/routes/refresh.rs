@@ -7,7 +7,7 @@ use chrono::Utc;
 
 use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::AppState;
-use crate::{commits, join, push, scanner, sessions};
+use crate::{commits, join, push, scanner, sessions, spans};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -62,6 +62,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         })?;
         let repos_n = repo_id_by_path.len();
 
+        // Phase 1.5: spans. Independent data source (LUCA substrate, luca#27).
+        // OTel spans dropped as JSON files into REPO_RECALL_SPANS_DIR get
+        // ingested every refresh. Source of truth is on disk; cache is
+        // derived. No Claude-projects-dir dependency.
+        let spans_n = ingest_spans(&cache_db, &tx)?;
+
         // Phase 2: sessions. Same wipe semantics as before — every record
         // in the cache lands inside the same refresh sweep.
         let Some(projects_dir) = sessions::default_projects_dir() else {
@@ -74,6 +80,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
                 links: 0,
                 commits: commits_n,
                 skipped: 0,
+                spans: spans_n,
             });
         };
         let files = sessions::list_session_files(&projects_dir)?;
@@ -150,6 +157,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
             links,
             commits: commits_n,
             skipped,
+            spans: spans_n,
         })
     })
     .await?;
@@ -157,9 +165,9 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let stats = match result {
         Ok(s) => {
             let msg = format!(
-                "done — {} repos, {} sessions, {} links, {} commits ({} skipped). \
-                 checking CI…",
-                s.repos, s.sessions, s.links, s.commits, s.skipped,
+                "done — {} repos, {} sessions, {} links, {} commits, {} spans \
+                 ({} skipped). checking CI…",
+                s.repos, s.sessions, s.links, s.commits, s.spans, s.skipped,
             );
             let _ = state.progress_tx.send(status_fragment(&msg));
             s
@@ -558,6 +566,62 @@ struct RefreshStats {
     links: usize,
     commits: usize,
     skipped: usize,
+    spans: usize,
+}
+
+/// Ingest every `.json` file under `REPO_RECALL_SPANS_DIR` (or the default
+/// `~/.local/share/repo-recall/spans/`) as an OTel span row. No-ops cleanly
+/// when the directory is unset or empty. One write transaction for the
+/// whole sweep so the spans table commits atomically alongside the rest of
+/// the refresh.
+fn ingest_spans(
+    cache_db: &CacheDb,
+    tx: &tokio::sync::broadcast::Sender<String>,
+) -> anyhow::Result<usize> {
+    let Some(spans_dir) = spans::default_spans_dir() else {
+        return Ok(0);
+    };
+    let files = spans::list_span_files(&spans_dir)?;
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let total = files.len();
+    let inserted = cache_db.write_batch(|w| {
+        let mut n = 0usize;
+        for (i, path) in files.iter().enumerate() {
+            match spans::parse_span_file(path) {
+                Ok(Some(rec)) => {
+                    let (_id, was_new) = w.upsert_span(
+                        &rec.trace_id,
+                        &rec.span_id,
+                        rec.parent_span_id.as_deref(),
+                        &rec.name,
+                        rec.start_time_unix_nano,
+                        rec.end_time_unix_nano,
+                        rec.agent_role.as_deref(),
+                        rec.session_uuid.as_deref(),
+                        rec.repo.as_deref(),
+                        &rec.attributes_json,
+                        &rec.source_file,
+                    )?;
+                    if was_new {
+                        n += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("span parse error {}: {}", path.display(), e),
+            }
+            if (i + 1).is_multiple_of(50) || i + 1 == total {
+                let _ = tx.send(status_fragment(&format!(
+                    "indexing spans… {}/{}",
+                    i + 1,
+                    total
+                )));
+            }
+        }
+        Ok(n)
+    })?;
+    Ok(inserted)
 }
 
 /// Run `git log` in every discovered repo and bulk-insert the results.

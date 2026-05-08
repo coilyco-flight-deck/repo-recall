@@ -15,6 +15,7 @@ pub mod scanner;
 pub mod search;
 pub mod sessions;
 pub mod signals;
+pub mod spans;
 pub mod state;
 
 #[derive(Clone)]

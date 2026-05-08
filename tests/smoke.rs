@@ -280,6 +280,105 @@ async fn gh_ok_hides_warning_banner() {
 }
 
 #[tokio::test]
+async fn span_ingest_round_trips_through_cache() {
+    // End-to-end exercise of the OTel-spans ingest path (luca#27, repo-recall#63).
+    // Drop two span files in a temp dir, run the producer pipeline
+    // (list + parse + upsert), then verify list_all_spans returns them
+    // both. Skips the env-var-resolution glue (default_spans_dir) on
+    // purpose — that's a thin shim and process-global env writes race
+    // other parallel tests.
+    use repo_recall::spans;
+
+    let cache_dir = std::env::temp_dir().join(format!("repo-recall-spans-{}", uuid_like()));
+    let cache_db = repo_recall::db::CacheDb::open_in_dir(&cache_dir).expect("cache db");
+
+    let spans_dir = std::env::temp_dir().join(format!("repo-recall-spansdir-{}", uuid_like()));
+    std::fs::create_dir_all(&spans_dir).unwrap();
+    std::fs::write(
+        spans_dir.join("first.json"),
+        r#"{"trace_id":"trace-a","span_id":"span-1","name":"agent.run",
+            "attributes":{"agent.role":"attacker","repo":"luca"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        spans_dir.join("second.json"),
+        r#"{"traceId":"trace-a","spanId":"span-2","parentSpanId":"span-1",
+            "name":"subagent.invoke","startTimeUnixNano":1700000000000000000,
+            "endTimeUnixNano":1700000001000000000,
+            "attributes":{"agent.role":"inspector","session.uuid":"sess-1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(spans_dir.join("ignored.txt"), "not a span").unwrap();
+
+    let files = spans::list_span_files(&spans_dir).expect("list");
+    assert_eq!(files.len(), 2, "list_span_files filters non-json");
+
+    cache_db
+        .write_batch(|w| {
+            for path in &files {
+                let rec = spans::parse_span_file(path).unwrap().expect("parsed");
+                w.upsert_span(
+                    &rec.trace_id,
+                    &rec.span_id,
+                    rec.parent_span_id.as_deref(),
+                    &rec.name,
+                    rec.start_time_unix_nano,
+                    rec.end_time_unix_nano,
+                    rec.agent_role.as_deref(),
+                    rec.session_uuid.as_deref(),
+                    rec.repo.as_deref(),
+                    &rec.attributes_json,
+                    &rec.source_file,
+                )?;
+            }
+            Ok(())
+        })
+        .expect("write");
+
+    let mut got = cache_db.list_all_spans().expect("read");
+    got.sort_by(|a, b| a.span_id.cmp(&b.span_id));
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].span_id, "span-1");
+    assert_eq!(got[0].agent_role.as_deref(), Some("attacker"));
+    assert_eq!(got[0].repo.as_deref(), Some("luca"));
+    assert_eq!(got[1].span_id, "span-2");
+    assert_eq!(got[1].parent_span_id.as_deref(), Some("span-1"));
+    assert_eq!(got[1].start_time_unix_nano, 1700000000000000000);
+    assert_eq!(got[1].session_uuid.as_deref(), Some("sess-1"));
+
+    // Idempotent: re-running the upsert produces no duplicates.
+    cache_db
+        .write_batch(|w| {
+            for path in &files {
+                let rec = spans::parse_span_file(path).unwrap().expect("parsed");
+                let (_id, was_new) = w.upsert_span(
+                    &rec.trace_id,
+                    &rec.span_id,
+                    rec.parent_span_id.as_deref(),
+                    &rec.name,
+                    rec.start_time_unix_nano,
+                    rec.end_time_unix_nano,
+                    rec.agent_role.as_deref(),
+                    rec.session_uuid.as_deref(),
+                    rec.repo.as_deref(),
+                    &rec.attributes_json,
+                    &rec.source_file,
+                )?;
+                assert!(
+                    !was_new,
+                    "second upsert of same (trace,span) should not insert"
+                );
+            }
+            Ok(())
+        })
+        .expect("write 2");
+    assert_eq!(cache_db.list_all_spans().expect("read").len(), 2);
+
+    std::fs::remove_dir_all(&spans_dir).ok();
+    std::fs::remove_dir_all(&cache_dir).ok();
+}
+
+#[tokio::test]
 async fn git_log_parses_commits() {
     // Build a throwaway repo in a tempdir, drop two commits, and assert
     // `commits::scan` pulls them back with correct SHAs + subjects. Catches

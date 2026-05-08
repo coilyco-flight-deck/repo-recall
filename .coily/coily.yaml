@@ -1,0 +1,28 @@
+# Per-repo command allowlist for repo-recall. Coily is the canonical entry
+# point for dev verbs here; the harness denies bare cargo/make invocations,
+# so operators (human or agent) type `coily <verb>`, not `cargo build` /
+# `make ci`.
+#
+# Names follow coily's [a-z0-9-] rule. Argv validation rejects shell
+# metacharacters at invocation time, so flags forward verbatim through
+# coily's user-extras mechanism.
+
+commands:
+  build:
+    run: cargo build
+    description: Compile the binary in debug mode. Forward extras (`--release`, `-p`) verbatim.
+  test:
+    run: cargo test
+    description: Run the integration smoke suite (tests/smoke.rs, tests/mcp_smoke.rs) plus unit tests. Forward extras (`--test`, `-- <filter>`) verbatim.
+  fmt-check:
+    run: cargo fmt --all -- --check
+    description: Verify rustfmt is clean. Mirrors the CI step.
+  clippy:
+    run: cargo clippy --all-targets --all-features -- -D warnings
+    description: Lint with clippy, treating warnings as errors. Mirrors the CI step.
+  check:
+    run: cargo check --all-targets
+    description: Type-check without producing artifacts. Faster than build.
+  ci:
+    run: make ci
+    description: Full pre-merge gate (fmt-check + clippy + check + test). Matches GitHub Actions.
