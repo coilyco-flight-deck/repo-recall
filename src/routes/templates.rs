@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use axum::response::Html;
 use chrono::{DateTime, Utc};
@@ -6,6 +7,10 @@ use maud::{html, Markup, DOCTYPE};
 
 use crate::commits::GhHealth;
 use crate::db;
+
+/// Set once at startup from `main.rs` so the layout header can show the scan
+/// root without threading it through every `page(..)` call site.
+pub static SCAN_CWD: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn page(title: &str, body: Markup) -> Html<String> {
     page_with_banners(title, body, None)
@@ -51,6 +56,12 @@ fn layout_with_banners(title: &str, body: Markup, gh_health: Option<GhHealth>) -
                 header class="flex items-baseline gap-4 px-6 py-4 border-b border-[#9e9fc2]/50 bg-[#c9dcd5]" {
                     a class="font-bold text-base text-[#3e375d] hover:no-underline" href="/" { "repo-recall" }
                     span class="text-[#574f7d]/70 text-xs" { "local claude code session index" }
+                    @if let Some(cwd) = SCAN_CWD.get() {
+                        span class="mx-auto font-mono font-bold text-xs text-[#3e375d] truncate max-w-[40rem]"
+                             title=(cwd.display().to_string()) {
+                            (cwd.display().to_string())
+                        }
+                    }
                     span id="push-slot" class="ml-auto flex items-center" {}
                     form method="get" action="/search" class="flex" {
                         input name="q" placeholder="search…"
