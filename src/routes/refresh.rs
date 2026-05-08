@@ -192,6 +192,15 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     // best-effort, so overcounting is OK and users see a "fuzzy" admission.
     let content_matches = ingest_content_mentions(state.clone()).await;
 
+    // Third-and-a-half pass: gh-ref join. Catches sessions started outside
+    // a repo's cwd that nonetheless touched it via `gh` shorthand
+    // (`owner/name#42`) or pasted PR/issue URLs. Cheaper than the
+    // content-mention scan — single string sweep per file, no per-repo
+    // automaton — and the contract is "find a known reference in any text
+    // field," so it's robust to JSONL schema changes upstream.
+    let gh_ref_matches = ingest_gh_refs(state.clone()).await;
+    let _ = gh_ref_matches;
+
     // Fourth pass: push-notify newly-appeared action-required signals.
     // Best-effort. Failures (no subscriptions, no openssl, FCM hiccup,
     // network down) are logged and swallowed. The diff_and_record_signals
@@ -255,6 +264,58 @@ async fn ingest_content_mentions(state: AppState) -> usize {
                 if (i + 1) % 25 == 0 || i + 1 == total {
                     let _ = tx.send(status_fragment(&format!(
                         "scanning sessions for repo mentions… {}/{}",
+                        i + 1,
+                        total
+                    )));
+                }
+            }
+            Ok(n)
+        })?;
+        Ok(inserted)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(0)
+}
+
+/// gh-ref pass. For each session JSONL, scan once for `<owner>/<repo>#<n>`
+/// and `github.com/<owner>/<repo>/(pull|issues)/<n>` references; resolve
+/// matches against discovered repos by `(owner, repo)` parsed from each
+/// repo's GitHub remote URL; write `match_type='gh-ref'` rows. Idempotent
+/// per `link_session_repo` (rejects duplicate keys at the redb layer).
+async fn ingest_gh_refs(state: AppState) -> usize {
+    let cache_db = state.cache_db.clone();
+    let tx = state.progress_tx.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        let remotes = cache_db.iter_repo_ids_and_remotes()?;
+        let mut by_slug: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::with_capacity(remotes.len());
+        for (id, url) in remotes {
+            if let Some(slug) = commits::github_owner_repo(&url) {
+                by_slug.entry(slug.to_ascii_lowercase()).or_insert(id);
+            }
+        }
+        if by_slug.is_empty() {
+            return Ok(0);
+        }
+        let sessions = cache_db.iter_session_source_files()?;
+        let total = sessions.len();
+        let inserted = cache_db.write_batch(|w| {
+            let mut n = 0usize;
+            for (i, (session_id, path)) in sessions.iter().enumerate() {
+                let hits = crate::sessions::gh_refs_in_file(std::path::Path::new(path));
+                for (owner, repo) in hits {
+                    let slug = format!("{owner}/{repo}");
+                    if let Some(repo_id) = by_slug.get(&slug) {
+                        if w.link_session_repo(*session_id, *repo_id, "gh-ref")? {
+                            n += 1;
+                        }
+                    }
+                }
+                if (i + 1).is_multiple_of(25) || i + 1 == total {
+                    let _ = tx.send(status_fragment(&format!(
+                        "scanning sessions for gh refs… {}/{}",
                         i + 1,
                         total
                     )));

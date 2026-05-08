@@ -467,11 +467,19 @@ impl CacheDb {
             v.sort_by_key(|r| r.1.to_lowercase());
         }
         let cwd = by_match.remove("cwd").unwrap_or_default();
+        let gh_ref = by_match.remove("gh-ref").unwrap_or_default();
         let content = by_match.remove("content_mention").unwrap_or_default();
         // Anything else (future match types) defaults into the cwd bucket
         // for the same reason the SQLite version's match arm did: callers
-        // treat non-content matches as the primary list.
+        // treat non-content matches as the primary list. `gh-ref` is named
+        // explicitly so it widens cwd without tripping the unknown-type
+        // debug log.
         let mut cwd_combined = cwd;
+        for r in gh_ref {
+            if !cwd_combined.iter().any(|x| x.0 == r.0) {
+                cwd_combined.push(r);
+            }
+        }
         for (mt, mut v) in by_match {
             tracing::debug!("session {session_id}: unknown match_type {mt:?}");
             cwd_combined.append(&mut v);
@@ -816,6 +824,24 @@ impl CacheDb {
             let (_k, v) = row?;
             let r: Repo = serde_json::from_slice(v.value())?;
             out.push((r.id, r.name));
+        }
+        Ok(out)
+    }
+
+    /// Pull every repo in the cache as `(id, remote_url)` pairs. Used by
+    /// the gh-ref session-link pass to map `<owner>/<repo>` references in
+    /// session text back onto a discovered repo's GitHub remote. Repos
+    /// without a remote (or with a non-GitHub remote) are filtered out by
+    /// the caller via `commits::github_owner_repo`.
+    pub fn iter_repo_ids_and_remotes(&self) -> Result<Vec<(i64, String)>> {
+        let read = self.db.begin_read()?;
+        let mut out = Vec::new();
+        for row in read.open_table(REPOS)?.iter()? {
+            let (_k, v) = row?;
+            let r: Repo = serde_json::from_slice(v.value())?;
+            if let Some(url) = r.remote_url {
+                out.push((r.id, url));
+            }
         }
         Ok(out)
     }

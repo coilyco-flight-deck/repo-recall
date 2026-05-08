@@ -348,6 +348,24 @@ pub fn parse_transcript(path: &Path) -> Result<Vec<Turn>> {
     Ok(out)
 }
 
+/// Scan a session file for `<owner>/<repo>#<n>` and PR / issue URL
+/// references. Returns the deduped set of `(owner, repo)` pairs found in
+/// any text or tool field of the JSONL — we use the whole-file string
+/// since the references are stable shape regardless of which Claude Code
+/// record type they land in.
+///
+/// Lower-cases names so the caller can match against repo remotes
+/// case-insensitively.
+pub fn gh_refs_in_file(path: &Path) -> Vec<(String, String)> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut hits = crate::join::gh_refs_in_text(&content);
+    hits.sort();
+    hits.dedup();
+    hits
+}
+
 /// Scan a single JSONL file for bare-word mentions of each repo name.
 /// `needles` is a list of `(repo_id, name)` pairs; the name is case-folded
 /// and matched with word boundaries (ASCII only — names with weird chars
