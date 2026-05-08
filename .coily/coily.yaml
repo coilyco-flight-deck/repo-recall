@@ -17,6 +17,9 @@ commands:
   fmt-check:
     run: cargo fmt --all -- --check
     description: Verify rustfmt is clean. Mirrors the CI step.
+  fmt:
+    run: cargo fmt --all
+    description: Apply rustfmt fixes in place.
   clippy:
     run: cargo clippy --all-targets --all-features -- -D warnings
     description: Lint with clippy, treating warnings as errors. Mirrors the CI step.

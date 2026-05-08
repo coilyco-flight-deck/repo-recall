@@ -369,6 +369,45 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// Filtered span read for the LUCA meta-loop (#64). Returns spans
+    /// matching the optional `repo` (typed column, exact match against
+    /// the `repo` attribute) with `start_time_unix_nano >= since_nanos`,
+    /// sorted newest-first, capped at `limit`.
+    ///
+    /// At tracer scale the SPANS table holds at most one refresh worth
+    /// of records (cache wipes on restart, refresh re-reads disk), so a
+    /// linear scan is correct. A secondary index on
+    /// `(start_time_unix_nano, span_id)` becomes load-bearing when span
+    /// volume crosses tens of thousands per refresh; revisit then.
+    pub fn query_spans(
+        &self,
+        repo: Option<&str>,
+        since_nanos: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Span>> {
+        let read = self.db.begin_read()?;
+        let t = read.open_table(SPANS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_k, v) = row?;
+            let s: Span = serde_json::from_slice(v.value())?;
+            if let Some(r) = repo {
+                if s.repo.as_deref() != Some(r) {
+                    continue;
+                }
+            }
+            if let Some(since) = since_nanos {
+                if s.start_time_unix_nano < since {
+                    continue;
+                }
+            }
+            out.push(s);
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.start_time_unix_nano));
+        out.truncate(limit);
+        Ok(out)
+    }
+
     pub fn list_repos_with_counts(&self) -> Result<Vec<Repo>> {
         let read = self.db.begin_read()?;
         let t = read.open_table(REPOS)?;

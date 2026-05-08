@@ -280,6 +280,160 @@ async fn gh_ok_hides_warning_banner() {
 }
 
 #[tokio::test]
+async fn api_spans_filters_by_repo_and_since() {
+    use repo_recall::db::CacheDb;
+
+    // Boot a fresh router and inject a few spans directly into its cache,
+    // then hit /api/spans with various filter combos.
+    let cache_dir = std::env::temp_dir().join(format!("repo-recall-spans-api-{}", uuid_like()));
+    let cache_db = CacheDb::open_in_dir(&cache_dir).expect("cache db");
+    cache_db
+        .write_batch(|w| {
+            // Older span in repo `luca`.
+            w.upsert_span(
+                "trace-a",
+                "span-old",
+                None,
+                "agent.run",
+                1_000_000_000_000_000_000,
+                1_000_000_000_000_000_000,
+                Some("attacker"),
+                Some("sess-1"),
+                Some("luca"),
+                "{}",
+                "/spans/old.json",
+            )?;
+            // Newer span in repo `luca`.
+            w.upsert_span(
+                "trace-a",
+                "span-new",
+                Some("span-old"),
+                "agent.run",
+                2_000_000_000_000_000_000,
+                2_000_000_000_000_000_000,
+                Some("inspector"),
+                Some("sess-1"),
+                Some("luca"),
+                "{}",
+                "/spans/new.json",
+            )?;
+            // Span in a different repo.
+            w.upsert_span(
+                "trace-b",
+                "span-other",
+                None,
+                "agent.run",
+                1_500_000_000_000_000_000,
+                1_500_000_000_000_000_000,
+                Some("attacker"),
+                Some("sess-2"),
+                Some("repo-recall"),
+                "{}",
+                "/spans/other.json",
+            )?;
+            Ok(())
+        })
+        .expect("seed");
+
+    // Hand-roll the AppState rather than using boot() so we can pre-seed
+    // the cache before the router starts serving.
+    let state_dir = std::env::temp_dir().join(format!("repo-recall-state-spans-{}", uuid_like()));
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db =
+        repo_recall::state::StateDb::open_at(state_dir.join("state.redb")).expect("state");
+    let search_index =
+        repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).expect("idx");
+    let (progress_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+    let state = repo_recall::AppState {
+        cache_db,
+        cwd: std::env::temp_dir(),
+        scan_depth: 0,
+        commits_per_repo: 50,
+        refresh_interval_secs: 0,
+        remote_target_limit: 0,
+        progress_tx,
+        refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        last_scan: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        gh_health: std::sync::Arc::new(tokio::sync::Mutex::new(repo_recall::commits::GhHealth::Ok)),
+        my_gh_login: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        my_git_email: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        scan_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        state_db,
+        search_index,
+        demo_mode: false,
+    };
+    let app = repo_recall::routes::router(state);
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    let _h = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{bound}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    // No filters: all three, newest-first.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/spans"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let spans = body["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 3);
+    assert_eq!(spans[0]["span_id"], "span-new");
+
+    // Filter by repo.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/spans?repo=luca"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let spans = body["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 2);
+    assert!(spans.iter().all(|s| s["repo"].as_str() == Some("luca")));
+
+    // Filter by since (in unix-seconds): drop the oldest.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/spans?since=1500000000"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let spans = body["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 2);
+    assert!(spans
+        .iter()
+        .all(|s| s["start_time_unix_nano"].as_i64().unwrap() >= 1_500_000_000_000_000_000));
+
+    // Combined filter + limit.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/spans?repo=luca&since=0&limit=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let spans = body["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0]["span_id"], "span-new");
+
+    std::fs::remove_dir_all(&cache_dir).ok();
+    std::fs::remove_dir_all(&state_dir).ok();
+}
+
+#[tokio::test]
 async fn span_ingest_round_trips_through_cache() {
     // End-to-end exercise of the OTel-spans ingest path (luca#27, repo-recall#63).
     // Drop two span files in a temp dir, run the producer pipeline

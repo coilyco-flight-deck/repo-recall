@@ -13,11 +13,12 @@
 
 use std::sync::atomic::Ordering;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::db::Span;
 use crate::routes::negotiate::json_with_etag;
 use crate::signals::derive_action_signals;
 use crate::AppState;
@@ -144,3 +145,54 @@ pub async fn refresh_sync(State(state): State<AppState>) -> Response {
 
 // Signal derivation lives in `crate::signals` so both the HTTP and MCP
 // surfaces (`routes::api`, `mcp::tools`) call into one helper.
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SpansQuery {
+    /// Filter to spans whose `repo` attribute matches exactly. Optional.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Lower-bound on `start_time_unix_nano`, expressed in unix seconds for
+    /// dictation friendliness. The handler converts to nanos before the
+    /// table scan.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Cap on the result count. Defaults to 100, hard-capped at 1000 so a
+    /// pathological producer cannot OOM the meta-loop.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpansResponse {
+    pub spans: Vec<Span>,
+    pub scan_version: u64,
+}
+
+/// `GET /api/spans` — query the LUCA substrate's inter-agent traffic
+/// (luca#27). JSON-only. Filters by repo and time window, returns spans
+/// newest-first. Designed for the meta-loop skill (coilyco-ai#224) to
+/// poll on a cadence; honors `If-None-Match` against the scan_version
+/// ETag so polls between refreshes return 304.
+pub async fn spans(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SpansQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let since_nanos = q.since.map(|s| s.saturating_mul(1_000_000_000));
+    let repo = q.repo.clone();
+    let cache = state.cache_db.clone();
+    let spans = match tokio::task::spawn_blocking(move || {
+        cache.query_spans(repo.as_deref(), since_nanos, limit)
+    })
+    .await
+    {
+        Ok(Ok(v)) => v,
+        _ => Vec::new(),
+    };
+    let body = SpansResponse {
+        spans,
+        scan_version: state.scan_version.load(Ordering::Acquire),
+    };
+    json_with_etag(&headers, body.scan_version, &body)
+}
