@@ -121,9 +121,13 @@ pub fn parse_span_file(path: &Path) -> Result<Option<SpanRecord>> {
         .get("agent.role")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // OTel + OpenInference protocol uses `session.id`; we keep `session.uuid`
+    // as a fallback alias for older / non-protocol producers (e.g., a hand-
+    // rolled Claude Code hook before it adopts the o2r emit lib).
     let session_uuid = raw
         .attributes
-        .get("session.uuid")
+        .get("session.id")
+        .or_else(|| raw.attributes.get("session.uuid"))
         .and_then(|v| v.as_str())
         .map(String::from);
     let repo = raw
@@ -197,7 +201,7 @@ mod tests {
             r#"{"traceId":"t2","spanId":"s2","parentSpanId":"s1","name":"subagent",
                 "startTimeUnixNano":1700000000000000000,
                 "endTimeUnixNano":1700000001000000000,
-                "attributes":{"agent.role":"attacker","session.uuid":"u","repo":"luca"}}"#,
+                "attributes":{"agent.role":"attacker","session.id":"u","repo":"luca"}}"#,
         );
         let rec = parse_span_file(&path).unwrap().expect("Some");
         assert_eq!(rec.trace_id, "t2");
@@ -207,6 +211,18 @@ mod tests {
         assert_eq!(rec.agent_role.as_deref(), Some("attacker"));
         assert_eq!(rec.session_uuid.as_deref(), Some("u"));
         assert_eq!(rec.repo.as_deref(), Some("luca"));
+    }
+
+    #[test]
+    fn session_uuid_is_legacy_fallback_for_session_id() {
+        let dir = tmpdir();
+        let path = write_span(
+            &dir,
+            "legacy.json",
+            r#"{"trace_id":"t","span_id":"s","attributes":{"session.uuid":"legacy"}}"#,
+        );
+        let rec = parse_span_file(&path).unwrap().expect("Some");
+        assert_eq!(rec.session_uuid.as_deref(), Some("legacy"));
     }
 
     #[test]

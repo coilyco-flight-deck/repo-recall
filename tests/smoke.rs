@@ -305,7 +305,7 @@ async fn span_ingest_round_trips_through_cache() {
         r#"{"traceId":"trace-a","spanId":"span-2","parentSpanId":"span-1",
             "name":"subagent.invoke","startTimeUnixNano":1700000000000000000,
             "endTimeUnixNano":1700000001000000000,
-            "attributes":{"agent.role":"inspector","session.uuid":"sess-1"}}"#,
+            "attributes":{"agent.role":"inspector","session.id":"sess-1"}}"#,
     )
     .unwrap();
     std::fs::write(spans_dir.join("ignored.txt"), "not a span").unwrap();
