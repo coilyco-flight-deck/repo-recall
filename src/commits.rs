@@ -683,7 +683,7 @@ pub fn fetch_deploy_health(
 /// Aggregated open-PR counts for one repo. Derived client-side from a
 /// single `gh pr list --json` call so we only pay one subprocess per repo
 /// for the PR view.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PrCounts {
     pub open: i64,
     pub draft: i64,
@@ -698,6 +698,13 @@ pub struct PrCounts {
     /// Open draft PRs authored by the viewer. Subset of `draft`. Drives the
     /// "get this into a reviewable state" action-required signal.
     pub my_draft: i64,
+    /// One entry per PR that contributed to `awaiting_my_review`. Each
+    /// carries the PR number and the list of changed-file paths, so the
+    /// dashboard can render the file list on the action-required card
+    /// without a second `gh pr view --json files` call. Files are capped
+    /// at 100 per PR (GraphQL connection limit) — sufficient for triage,
+    /// truncated silently beyond that.
+    pub review_requested_files: Vec<crate::db::ReviewRequestedPr>,
 }
 
 /// Issue counts for one repo. `open` is the repo total; `assigned_to_me` is
@@ -738,6 +745,7 @@ pub fn fetch_pr_and_issue_counts(
             issues(states: OPEN) { totalCount }
             pullRequests(first: 100, states: OPEN) {
               nodes {
+                number
                 isDraft
                 author { login }
                 reviewRequests(first: 50) {
@@ -746,6 +754,9 @@ pub fn fetch_pr_and_issue_counts(
                       ... on User { login }
                     }
                   }
+                }
+                files(first: 100) {
+                  nodes { path }
                 }
               }
             }
@@ -760,6 +771,7 @@ pub fn fetch_pr_and_issue_counts(
             assignedIssues: issues(states: OPEN, filterBy: { assignee: $login }) { totalCount }
             pullRequests(first: 100, states: OPEN) {
               nodes {
+                number
                 isDraft
                 author { login }
                 reviewRequests(first: 50) {
@@ -768,6 +780,9 @@ pub fn fetch_pr_and_issue_counts(
                       ... on User { login }
                     }
                   }
+                }
+                files(first: 100) {
+                  nodes { path }
                 }
               }
             }
@@ -849,6 +864,20 @@ pub fn fetch_pr_and_issue_counts(
             .unwrap_or_default();
         if !my_login.is_empty() && reviewers.contains(&my_login) {
             counts.awaiting_my_review += 1;
+            let number = pr.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
+            let files: Vec<String> = pr
+                .get("files")
+                .and_then(|v| v.get("nodes"))
+                .and_then(|n| n.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|f| f.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            counts
+                .review_requested_files
+                .push(crate::db::ReviewRequestedPr { number, files });
         }
         if !my_login.is_empty() && author_login == my_login && !is_draft {
             if reviewers.is_empty() {

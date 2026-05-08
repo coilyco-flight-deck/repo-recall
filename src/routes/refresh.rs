@@ -372,7 +372,8 @@ async fn ingest_ci_status(state: AppState) -> usize {
         cache_db.write_batch(|w| {
             let mut n = 0usize;
             for snap in results {
-                let prs = snap.prs.unwrap_or_default();
+                let mut prs = snap.prs.unwrap_or_default();
+                let review_files = std::mem::take(&mut prs.review_requested_files);
                 let issues_total: Option<i64> = snap.issues.map(|i| i.open);
                 let issues_assigned: Option<i64> = snap.issues.map(|i| i.assigned_to_me);
                 let (deploy_wf, deploy_status, deploy_last_success) = match snap.deploy {
@@ -393,6 +394,7 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     deploy_wf,
                     deploy_status,
                     deploy_last_success,
+                    review_files,
                 )?;
                 n += 1;
             }

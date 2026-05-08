@@ -36,6 +36,12 @@ pub struct ActionRequiredItem {
     /// the count when relevant ("4 uncommitted files"), the op name
     /// (`rebase` / `merge` / etc.), or the failing CI text.
     pub detail: String,
+    /// One entry per outstanding review-requested PR (only set when
+    /// `signal == "review_requested"`). Each carries the PR number and the
+    /// list of changed-file paths fetched alongside the count during the
+    /// remote-state pass. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_requested_files: Vec<crate::db::ReviewRequestedPr>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +66,11 @@ pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) 
     let mut items = Vec::new();
     for r in &repos {
         for sig in derive_action_signals(r) {
+            let review_requested_files = if sig.signal == "review_requested" {
+                r.review_requested_pr_files.clone()
+            } else {
+                Vec::new()
+            };
             items.push(ActionRequiredItem {
                 id: format!("{}:{}", r.id, sig.signal),
                 repo_id: r.id,
@@ -68,6 +79,7 @@ pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) 
                 remote_url: r.remote_url.clone(),
                 signal: sig.signal,
                 detail: sig.detail,
+                review_requested_files,
             });
         }
     }
