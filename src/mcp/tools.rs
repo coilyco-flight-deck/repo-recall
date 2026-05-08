@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::signals::derive_action_signals as derive_signals;
 use crate::{activity, db, routes, AppState};
 
 // -----------------------------------------------------------------------------
@@ -309,85 +310,4 @@ pub async fn refresh(
         "ran": after > before,
         "last_scan": last_scan,
     }))
-}
-
-// -----------------------------------------------------------------------------
-// shared signal-derivation helper (was: routes::api::derive_action_signals)
-// -----------------------------------------------------------------------------
-
-struct DerivedSignal {
-    signal: &'static str,
-    detail: String,
-}
-
-fn derive_signals(r: &db::Repo) -> Vec<DerivedSignal> {
-    let mut out = Vec::new();
-    if activity::is_vendored(r) {
-        return out;
-    }
-    if r.ci_status.as_deref() == Some("failure") {
-        out.push(DerivedSignal {
-            signal: "ci_failing",
-            detail: "default-branch CI failed".into(),
-        });
-    }
-    let dirty = r.untracked_files + r.modified_files;
-    if dirty > 0 {
-        out.push(DerivedSignal {
-            signal: "dirty_tree",
-            detail: format!(
-                "{dirty} uncommitted file{} ({} modified, {} untracked)",
-                if dirty == 1 { "" } else { "s" },
-                r.modified_files,
-                r.untracked_files,
-            ),
-        });
-    }
-    if let Some(op) = r.in_progress_op.as_deref() {
-        out.push(DerivedSignal {
-            signal: "in_progress_op",
-            detail: format!("{op} in progress"),
-        });
-    }
-    if r.head_ref.as_deref() == Some("detached") {
-        out.push(DerivedSignal {
-            signal: "detached_head",
-            detail: "HEAD is detached".into(),
-        });
-    }
-    if r.prs_awaiting_my_review > 0 {
-        let n = r.prs_awaiting_my_review;
-        out.push(DerivedSignal {
-            signal: "review_requested",
-            detail: format!(
-                "{n} PR{} awaiting your review",
-                if n == 1 { "" } else { "s" },
-            ),
-        });
-    }
-    if r.issues_assigned_to_me > 0 {
-        let n = r.issues_assigned_to_me;
-        out.push(DerivedSignal {
-            signal: "issue_assigned",
-            detail: format!("{n} issue{} assigned to you", if n == 1 { "" } else { "s" }),
-        });
-    }
-    if activity::is_deploy_failing(r) {
-        let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
-        out.push(DerivedSignal {
-            signal: "deploy_failing",
-            detail: format!("last `{wf}` run on the default branch failed"),
-        });
-    } else if activity::is_deploy_stale(r) {
-        let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
-        let days = r
-            .deploy_last_success_ts
-            .map(|ts| (chrono::Utc::now().timestamp() - ts) / 86_400)
-            .unwrap_or(0);
-        out.push(DerivedSignal {
-            signal: "deploy_stale",
-            detail: format!("`{wf}` last green {days}d ago"),
-        });
-    }
-    out
 }

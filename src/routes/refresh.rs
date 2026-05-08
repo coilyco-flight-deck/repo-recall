@@ -457,7 +457,7 @@ async fn dispatch_pending_pushes(state: AppState) -> push::DispatchOutcome {
     let mut all_ids: Vec<String> = Vec::new();
     let mut all_payloads: Vec<push::PushPayload> = Vec::new();
     for r in &repos {
-        for sig in crate::routes::api::derive_action_signals(r) {
+        for sig in crate::signals::derive_action_signals(r) {
             let payload = push::payload_for(r.id, &r.name, sig.signal, &sig.detail);
             all_ids.push(payload.signal_id.clone());
             all_payloads.push(payload);

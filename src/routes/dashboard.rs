@@ -7,13 +7,14 @@ use axum::response::{IntoResponse, Response};
 use maud::{html, Markup};
 use serde::{Deserialize, Serialize};
 
-use crate::routes::api::{derive_action_signals, ActionRequiredItem};
+use crate::routes::api::ActionRequiredItem;
 use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
     absolute_time, compact_count, display_name, page, page_with_banners, relative_time,
     ACTION_PILL, H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW,
     SCAN_STATUS,
 };
+use crate::signals::derive_action_signals;
 use crate::{activity, db, AppState};
 
 #[derive(Debug, Deserialize, Default)]
@@ -835,7 +836,7 @@ fn render_repos(repos: &[db::Repo], scan_cwd: &Path) -> Markup {
                 @for r in repos {
                     @let action_required = activity::is_action_required(r);
                     @let signals: Vec<&'static str> =
-                        crate::routes::api::derive_action_signals(r)
+                        derive_action_signals(r)
                             .into_iter().map(|s| s.signal).collect();
                     @let signal_attr = signals.join(" ");
                     li class={
