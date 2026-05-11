@@ -28,9 +28,6 @@ pub struct CloneForm {
 
 /// `POST /api/repos/{id}/push` — `git push` in the repo's working tree.
 pub async fn push(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    if state.demo_mode {
-        return demo_disabled_fragment("git push");
-    }
     let path = match repo_path(&state, id).await {
         Ok(Some(p)) => p,
         Ok(None) => return error_fragment("repo not found", id, "push"),
@@ -48,9 +45,6 @@ pub async fn push(State(state): State<AppState>, Path(id): Path<i64>) -> Respons
 /// `POST /api/repos/{id}/pull` — `git pull --ff-only`. ff-only avoids
 /// conjuring an unintentional merge commit when the local branch has diverged.
 pub async fn pull(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    if state.demo_mode {
-        return demo_disabled_fragment("git pull");
-    }
     let path = match repo_path(&state, id).await {
         Ok(Some(p)) => p,
         Ok(None) => return error_fragment("repo not found", id, "pull"),
@@ -73,9 +67,6 @@ pub async fn clone_active(
     State(state): State<AppState>,
     axum::extract::Form(form): axum::extract::Form<CloneForm>,
 ) -> Response {
-    if state.demo_mode {
-        return demo_disabled_fragment("gh repo clone");
-    }
     let full_name = form.full_name.trim().to_string();
     if !valid_full_name(&full_name) {
         return clone_error_fragment(&full_name, "invalid repo name");
@@ -243,18 +234,6 @@ fn result_fragment(id: i64, action: &str, label: &str, result: GitOutput) -> Res
         .into_string(),
     )
     .into_response()
-}
-
-/// 403 used by every host-mutating handler when REPO_RECALL_DEMO=true is in
-/// effect. Returns plain text instead of an htmx fragment because the demo
-/// dashboard hides the buttons that would surface a fragment - if a request
-/// reaches here at all it's an agent or curl probe, not a UI click.
-fn demo_disabled_fragment(action: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        format!("disabled in demo mode: {action}\n"),
-    )
-        .into_response()
 }
 
 fn error_fragment(msg: &str, id: i64, action: &str) -> Response {

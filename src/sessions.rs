@@ -25,9 +25,9 @@ pub struct SessionRecord {
 }
 
 /// Returns the directory we'll parse session files from. Honors the
-/// `REPO_RECALL_SESSIONS_DIR` env override (used by demo mode and tests to
-/// point at a fixture tree) and otherwise falls back to the canonical Claude
-/// Code projects directory at `~/.claude/projects/`.
+/// `REPO_RECALL_SESSIONS_DIR` env override (point it at a fixture tree for
+/// tests) and otherwise falls back to the canonical Claude Code projects
+/// directory at `~/.claude/projects/`.
 pub fn default_projects_dir() -> Option<PathBuf> {
     if let Some(over) = std::env::var_os("REPO_RECALL_SESSIONS_DIR") {
         let dir = PathBuf::from(over);

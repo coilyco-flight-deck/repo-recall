@@ -68,7 +68,6 @@ fn layout_with_banners(title: &str, body: Markup, gh_health: Option<GhHealth>) -
                                      focus:outline-none focus:border-[#574f7d] focus:bg-white";
                     }
                 }
-                (demo_banner())
                 (gh_health_banner(gh_health))
                 main class="max-w-7xl mx-auto p-6" { (body) }
             }
@@ -186,36 +185,6 @@ pub const SCAN_STATUS: &str =
 
 /// Warning banner for missing / unauthenticated `gh`. Full-width strip
 /// between the site header and the main content. Empty markup when `gh` is
-/// "DEMO INSTANCE" stripe rendered above the gh-health banner when
-/// `REPO_RECALL_DEMO=true` is set in the process env. The env is the source
-/// of truth so this stays in sync with `AppState.demo_mode` without having
-/// to plumb the bool into every template caller.
-fn demo_banner() -> Markup {
-    if !is_demo_mode() {
-        return html! {};
-    }
-    html! {
-        div class="px-6 py-2 border-b border-amber-700/40 bg-amber-300/90 text-amber-950 text-xs
-                   flex items-baseline gap-2 flex-wrap" {
-            span class="text-base leading-none" { "🎭" }
-            span class="font-semibold" { "DEMO INSTANCE" }
-            span class="opacity-80" {
-                "Sessions and repos are synthetic fixtures. Mutating actions are disabled."
-            }
-            a class="ml-auto underline" href="https://github.com/coilysiren/repo-recall" {
-                "github.com/coilysiren/repo-recall"
-            }
-        }
-    }
-}
-
-pub fn is_demo_mode() -> bool {
-    matches!(
-        std::env::var("REPO_RECALL_DEMO").as_deref(),
-        Ok("true") | Ok("TRUE") | Ok("True")
-    )
-}
-
 /// healthy or when the caller didn't pass a health value (internal pages
 /// that don't care).
 fn gh_health_banner(health: Option<GhHealth>) -> Markup {

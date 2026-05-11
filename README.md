@@ -90,20 +90,6 @@ open http://127.0.0.1:7777
 
 That's it. No config file, no setup wizard. The server walks its cwd + 4 levels deep for `.git`, parses `~/.claude/projects/**/*.jsonl`, joins them by the session's recorded `cwd`, and ships HTML.
 
-## Try it without indexing your stuff
-
-If you want to see what repo-recall looks like before pointing it at your own session history, the public demo image runs the same binary against synthetic fixtures (three fake repos, five fake sessions). Everything is bound inside the container; mutating endpoints (push, pull, clone) return 403, the dashboard renders a "DEMO INSTANCE" banner.
-
-```sh
-docker run --rm -p 7777:7777 ghcr.io/coilysiren/repo-recall-demo:latest
-# then:
-open http://127.0.0.1:7777
-```
-
-The image is rebuilt on every push to `main` and gates on a smoke test that asserts the dashboard came up with non-empty repo, session, and join counts, that the banner rendered, and that a mutating endpoint 403s. If a parser refactor breaks fixture compatibility, the gate trips before the image promotes to `latest`.
-
-`make docker-demo-build` and `make docker-demo-smoke` run the same flow locally if you want to iterate on the fixtures or the Dockerfile.
-
 ## Install via Homebrew
 
 For long-lived background use, install via the [`coilysiren/tap`](https://github.com/coilysiren/homebrew-tap) and let `brew services` manage the daemon:

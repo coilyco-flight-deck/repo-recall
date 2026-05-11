@@ -55,9 +55,4 @@ pub struct AppState {
     /// `search_idx` virtual table on every refresh. Reader still flows
     /// through SQLite until the redb migration's step 3 flips it.
     pub search_index: search::SearchIndex,
-    /// Public-demo mode (`REPO_RECALL_DEMO=true`). When true, host-mutating
-    /// endpoints (push, pull, clone) return 403, and the page layout renders
-    /// a "DEMO INSTANCE" banner. Re-scans, dashboards, and read endpoints
-    /// stay live.
-    pub demo_mode: bool,
 }

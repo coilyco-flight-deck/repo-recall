@@ -22,7 +22,7 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 
 - **Commit analysis** - `git log --all --no-merges` per repo, aggregates 30-day commits, authors, LOC churn.
 - **Working-tree inspection** - Untracked + modified counts, stash count, branch, ahead/behind, in-progress op detection (rebase, merge, cherry-pick, revert, bisect), detached HEAD.
-- **Inline git actions** - `POST /api/repos/{id}/push` and `/pull` return htmx fragments. Disabled in demo mode.
+- **Inline git actions** - `POST /api/repos/{id}/push` and `/pull` return htmx fragments.
 
 ## GitHub integration (remote state)
 
@@ -57,11 +57,6 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 - **Co-hosted MCP server** - Same binary runs axum HTTP and MCP stdio server (pmcp 2.6, `mcp-apps` feature). Falls back to MCP-only if HTTP port is bound.
 - **Six MCP tools** - `recall_dashboard` (with widget), `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_refresh`.
 - **Streamable widget** - `src/widgets/dashboard.html` rendered inside MCP host iframe (Claude Desktop, mcp-preview, ChatGPT plugins).
-
-## Demo and public access
-
-- **Public demo image** - `ghcr.io/coilysiren/repo-recall-demo:latest`, synthetic fixtures, mutating endpoints return 403, rebuilt on push to main with smoke-test gate.
-- **Demo mode flag** - `REPO_RECALL_DEMO=true` disables mutations and renders the demo banner.
 
 ## Activity scoring
 
@@ -100,7 +95,7 @@ Single binary, no subcommands.
 - `repo-recall` - boots HTTP dashboard + MCP stdio server.
 - `repo-recall --version` / `-V`.
 
-Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL_PORT`, `REPO_RECALL_HOST`, `REPO_RECALL_COMMITS_PER_REPO`, `REPO_RECALL_CACHE_DIR`, `REPO_RECALL_REFRESH_INTERVAL_SECS`, `REPO_RECALL_REMOTE_TARGET_LIMIT`, `REPO_RECALL_SPANS_DIR`, `REPO_RECALL_AUTHOR`, `REPO_RECALL_DEMO`, `REPO_RECALL_STATIC`, `RUST_LOG`.
+Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL_PORT`, `REPO_RECALL_HOST`, `REPO_RECALL_COMMITS_PER_REPO`, `REPO_RECALL_CACHE_DIR`, `REPO_RECALL_REFRESH_INTERVAL_SECS`, `REPO_RECALL_REMOTE_TARGET_LIMIT`, `REPO_RECALL_SPANS_DIR`, `REPO_RECALL_AUTHOR`, `REPO_RECALL_STATIC`, `RUST_LOG`.
 
 ## HTTP surface
 
@@ -108,7 +103,7 @@ Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL
 
 **JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/spans`, `POST /api/refresh`.
 
-**Actions (htmx fragments, demo mode 403s)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`.
+**Actions (htmx fragments)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`.
 
 **WebSocket** - `GET /ws`, `GET /livereload`.
 

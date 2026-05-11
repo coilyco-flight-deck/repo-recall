@@ -104,16 +104,6 @@ async fn main() -> miette::Result<()> {
     let refresh_interval_secs: u64 = env_u64("REPO_RECALL_REFRESH_INTERVAL_SECS", 150);
     let remote_target_limit: usize = env_usize("REPO_RECALL_REMOTE_TARGET_LIMIT", 25);
 
-    // Public demo: turns the layout banner on and 403s host-mutating endpoints.
-    // Off by default; only set to `true` for the public Docker image.
-    let demo_mode = matches!(
-        std::env::var("REPO_RECALL_DEMO").as_deref(),
-        Ok("true") | Ok("TRUE") | Ok("True")
-    );
-    if demo_mode {
-        tracing::info!("REPO_RECALL_DEMO=true: banner on, mutating endpoints disabled");
-    }
-
     let state = AppState {
         cache_db,
         cwd,
@@ -129,7 +119,6 @@ async fn main() -> miette::Result<()> {
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
-        demo_mode,
     };
 
     // Initial scan in the background so the dashboard / first MCP tool call

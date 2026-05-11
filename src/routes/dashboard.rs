@@ -1037,20 +1037,18 @@ fn render_uncloned(repos: &[db::ActiveRemoteRepo]) -> Markup {
             @for r in repos {
                 li class=(LI) {
                     div class=(ROW) {
-                        @if !crate::routes::templates::is_demo_mode() {
-                            div id={ "clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
-                                class="flex items-baseline gap-2 shrink-0" {
-                                form hx-post="/api/clone"
-                                     hx-target={ "#clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
-                                     hx-swap="outerHTML"
-                                     class="contents" {
-                                    input type="hidden" name="full_name" value=(r.full_name);
-                                    button type="submit"
-                                        class="bg-[#574f7d] text-white px-2 py-0.5 rounded text-[10px]
-                                               font-bold tracking-wide hover:bg-[#3e375d]
-                                               transition-colors cursor-pointer shadow-sm" {
-                                        "clone ↓"
-                                    }
+                        div id={ "clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                            class="flex items-baseline gap-2 shrink-0" {
+                            form hx-post="/api/clone"
+                                 hx-target={ "#clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                                 hx-swap="outerHTML"
+                                 class="contents" {
+                                input type="hidden" name="full_name" value=(r.full_name);
+                                button type="submit"
+                                    class="bg-[#574f7d] text-white px-2 py-0.5 rounded text-[10px]
+                                           font-bold tracking-wide hover:bg-[#3e375d]
+                                           transition-colors cursor-pointer shadow-sm" {
+                                    "clone ↓"
                                 }
                             }
                         }
