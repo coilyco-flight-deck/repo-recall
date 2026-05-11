@@ -52,11 +52,10 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 - **ETag + If-None-Match** - JSON responses carry `ETag: "<scan_version>"`. Clients get `304 Not Modified` between refreshes.
 - **WebSocket progress** - `/ws` streams htmx out-of-band fragments during refresh. `/livereload` signals dev reconnect.
 
-## MCP App integration
+## MCP integration
 
-- **Co-hosted MCP server** - Same binary runs axum HTTP and MCP stdio server (pmcp 2.6, `mcp-apps` feature). Falls back to MCP-only if HTTP port is bound.
-- **Six MCP tools** - `recall_dashboard` (with widget), `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_refresh`.
-- **Streamable widget** - `src/widgets/dashboard.html` rendered inside MCP host iframe (Claude Desktop, mcp-preview, ChatGPT plugins).
+- **Co-hosted MCP server** - Same binary runs axum HTTP and MCP stdio server (pmcp 2.6). Falls back to MCP-only if HTTP port is bound.
+- **Six MCP tools** - `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_refresh`. JSON-only responses.
 
 ## Activity scoring
 

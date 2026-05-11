@@ -211,7 +211,7 @@ fn initialize_returns_real_server_info() {
 }
 
 #[test]
-fn tools_list_exposes_six_tools_with_dashboard_widget_uri() {
+fn tools_list_exposes_six_tools() {
     let mut client = McpClient::spawn();
     let res = client.request("tools/list", json!({}));
     let tools = res
@@ -242,47 +242,6 @@ fn tools_list_exposes_six_tools_with_dashboard_widget_uri() {
             "missing tool {required}: {names:?}"
         );
     }
-
-    let dashboard = tools
-        .iter()
-        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("recall_dashboard"))
-        .expect("recall_dashboard present");
-    let resource_uri = dashboard
-        .pointer("/_meta/openai~1outputTemplate")
-        .or_else(|| dashboard.pointer("/_meta/ui/resourceUri"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            panic!("recall_dashboard missing widget resource URI: {dashboard}");
-        });
-    assert!(
-        resource_uri.starts_with("ui://"),
-        "expected ui:// resource URI, got {resource_uri}"
-    );
-}
-
-#[test]
-fn resources_list_returns_dashboard_widget() {
-    let mut client = McpClient::spawn();
-    let res = client.request("resources/list", json!({}));
-    let resources = res
-        .get("resources")
-        .and_then(|v| v.as_array())
-        .expect("resources array");
-    assert_eq!(
-        resources.len(),
-        1,
-        "expected 1 widget resource, got {}: {res}",
-        resources.len()
-    );
-    let widget = &resources[0];
-    let mime = widget
-        .get("mimeType")
-        .and_then(|m| m.as_str())
-        .unwrap_or_default();
-    assert!(
-        mime.starts_with("text/html"),
-        "expected text/html MIME, got {mime}"
-    );
 }
 
 /// Pull the JSON payload out of a `tools/call` result. pmcp returns either

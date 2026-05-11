@@ -1,9 +1,8 @@
-//! MCP App server. Tools expose repo-recall's data layer to MCP hosts;
-//! widgets render the dashboard inside the host's iframe.
+//! MCP App server. Tools expose repo-recall's data layer to MCP hosts.
 //!
-//! Six tools, one widget (so far):
+//! Six tools:
 //!
-//! - `recall_dashboard` (with widget) — repo list + action-required + counts.
+//! - `recall_dashboard` — repo list + action-required + counts.
 //! - `recall_repo` — single repo detail.
 //! - `recall_session` — single session detail.
 //! - `recall_search` — unified search.
@@ -15,32 +14,16 @@ use std::sync::Arc;
 
 use axum::Router;
 use pmcp::server::axum_router::{router_with_config, AllowedOrigins, RouterConfig};
-use pmcp::{ResourceCollection, Server, ServerCapabilities, TypedTool, UIResourceBuilder};
+use pmcp::{Server, ServerCapabilities, TypedTool};
 use tokio::sync::Mutex;
 
 use crate::AppState;
 
 mod tools;
 
-const DASHBOARD_HTML: &str = include_str!("../widgets/dashboard.html");
-const DASHBOARD_URI: &str = "ui://repo-recall/dashboard.html";
-
-/// Build the MCP `Server` (tools + widget resource) without binding any
-/// transport. Shared by stdio and HTTP entrypoints.
+/// Build the MCP `Server` (tools) without binding any transport. Shared by
+/// stdio and HTTP entrypoints.
 pub fn build_server(state: AppState) -> anyhow::Result<Server> {
-    // Widget resources. Dashboard is the only one with a widget so far;
-    // every other tool returns text content the host displays directly.
-    let (dashboard_resource, dashboard_contents) =
-        UIResourceBuilder::new(DASHBOARD_URI, "repo-recall dashboard")
-            .description("Ranked repo list with action-required signals and session counts.")
-            .html_template(DASHBOARD_HTML)
-            .build_with_contents()
-            .map_err(|e| anyhow::anyhow!("UIResourceBuilder failed: {e:?}"))?;
-
-    let resources =
-        ResourceCollection::new().add_ui_resource(dashboard_resource, dashboard_contents);
-
-    // Tools.
     let dashboard = {
         let state = state.clone();
         TypedTool::new("recall_dashboard", move |args, extra| {
@@ -49,9 +32,8 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         })
         .with_description(
             "Ranked list of repos discovered on disk with their action-required signals, \
-             session counts, and 30-day activity. Returns structured data for the dashboard widget.",
+             session counts, and 30-day activity.",
         )
-        .with_ui(DASHBOARD_URI)
     };
 
     let repo = {
@@ -117,7 +99,6 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .name("repo-recall")
         .version(env!("REPO_RECALL_VERSION"))
         .capabilities(ServerCapabilities::default())
-        .resources(resources)
         .tool("recall_dashboard", dashboard)
         .tool("recall_repo", repo)
         .tool("recall_session", session)

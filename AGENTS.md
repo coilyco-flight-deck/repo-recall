@@ -10,7 +10,7 @@
 Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort).
 
 - **Language**: Rust (edition 2021, stable toolchain)
-- **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [redb](https://docs.rs/redb) (embedded ACID KV, pure-Rust), [tantivy](https://docs.rs/tantivy) (full-text search), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 with `mcp-apps` feature for the MCP App server (the `mcp` subcommand). Hand-rolled widget JS, no JS toolchain.
+- **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [redb](https://docs.rs/redb) (embedded ACID KV, pure-Rust), [tantivy](https://docs.rs/tantivy) (full-text search), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 for the co-hosted MCP stdio server.
 - **Runtime deps**: none beyond the bundled crates. No config file. Discovery is lazy — the server scans from whatever directory it was launched in.
 
 ## Repository structure
@@ -36,10 +36,8 @@ src/
     fallback.rs     # 404 handler
     templates.rs    # maud layout + reusable Tailwind class bundles (PANEL, PILL, ...)
   mcp/
-    mod.rs          # `repo-recall mcp` server bootstrap (pmcp 2.6, stdio transport)
+    mod.rs          # MCP server bootstrap (pmcp 2.6, stdio + streamable-HTTP)
     tools.rs        # six tool handlers wrapping the same data layer the axum routes use
-  widgets/
-    dashboard.html  # self-contained widget HTML rendered inside the MCP host's iframe
 static/
   tailwind.input.css # source for the standalone Tailwind v4 CLI (custom CSS lives here)
   tailwind.css      # build artifact, committed to git so brew users do not need the CLI
@@ -103,8 +101,7 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 - **Templates are maud macros; CSS/JS are files.** The HTML lives in Rust (compile-time-checked), but Tailwind handles nearly all styling as utility classes on the markup. Anything awkward as a utility goes in [`static/tailwind.input.css`](./static/tailwind.input.css) below the `@import "tailwindcss"` line. Client JS lives under [`static/`](./static/) too — no inline `<script>` blocks. Served via `tower_http::services::ServeDir` mounted at `/static/*`.
 - **Tailwind compiles via the v4 standalone CLI.** Single self-contained binary (`brew install tailwindcss`), no node, no npm, no PostCSS, no `tailwind.config.js`. `make css` builds `static/tailwind.css` from `static/tailwind.input.css`; `make css-watch` rebuilds on input or `src/**/*.rs` change. Output is committed so `brew install` consumers do not need the CLI. CI runs `make css-check` to fail if the committed output is stale; the pre-commit hook regenerates it on every relevant edit. For reused class bundles (panel, pill, list-row) define a `pub const` in [`src/routes/templates.rs`](./src/routes/templates.rs) rather than repeating the same 6-class string across files.
 - **WebSocket fragments use HTMX out-of-band swaps.** The server sends `<div id="scan-status" hx-swap-oob="true">…</div>` fragments; HTMX pulls them out by id and swaps them in. Don't invent a JSON progress protocol — HTML fragments over the socket is the whole point of `hx-ext="ws"`.
-- **MCP App is purely additive and always co-runs with axum.** A single binary starts BOTH the axum HTTP dashboard and the MCP stdio server in one process. `src/mcp/` exposes the same data layer the axum routes use (`db`, `scanner`, `sessions`, `commits`, `activity`, `join`, `routes::refresh`). Six tools, one widget. Don't move scan logic into `src/mcp/` — call into existing modules. `recall_refresh` calls `routes::refresh::run_refresh` so both surfaces share the scan implementation and the periodic refresh loop. Port-bind failures (e.g. `brew services` already serving) fall back to MCP-only with a warning.
-- **MCP widget is hand-rolled, no JS toolchain.** [`src/widgets/dashboard.html`](./src/widgets/dashboard.html) is included via `include_str!` and bundled into the binary. Pattern matches [`eco-mcp-app/src/eco_mcp_app/templates/eco.html`](https://github.com/coilysiren/eco-mcp-app/blob/main/src/eco_mcp_app/templates/eco.html) (the canonical reference for Kai's MCP App frontend style). Use DOM methods, never `innerHTML` on untrusted data. Migration to `@modelcontextprotocol/ext-apps` SDK is tracked in [#33](https://github.com/coilysiren/repo-recall/issues/33).
+- **MCP server is purely additive and always co-runs with axum.** A single binary starts BOTH the axum HTTP dashboard and the MCP stdio server in one process. `src/mcp/` exposes the same data layer the axum routes use (`db`, `scanner`, `sessions`, `commits`, `activity`, `join`, `routes::refresh`). Six tools, JSON-only responses. Don't move scan logic into `src/mcp/` — call into existing modules. `recall_refresh` calls `routes::refresh::run_refresh` so both surfaces share the scan implementation and the periodic refresh loop. Port-bind failures (e.g. `brew services` already serving) fall back to MCP-only with a warning.
 - **MCP `stdout` is reserved for JSON-RPC framing.** In `mcp` mode the tracing-subscriber writer is `stderr`. axum mode writes to stdout as usual. See [`init_tracing`](./src/main.rs).
 
 ## Privacy

@@ -31,10 +31,9 @@ aho-corasick = "1"
 redb = "4"
 tantivy = "0.26"
 
-# MCP App server. Purely additive — `repo-recall mcp` runs a stdio MCP server
-# alongside the axum dashboard's brew-installed binary. The default invocation
-# (`repo-recall`) still boots the axum dashboard.
-pmcp = { version = "2.6", features = ["mcp-apps", "schema-generation", "streamable-http"] }
+# MCP server. Purely additive — runs a stdio MCP server alongside the axum
+# dashboard. The default invocation (`repo-recall`) boots both.
+pmcp = { version = "2.6", features = ["schema-generation", "streamable-http"] }
 schemars = "1.0"
 async-trait = "0.1"
 

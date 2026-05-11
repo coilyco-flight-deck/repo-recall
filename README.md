@@ -54,9 +54,9 @@ Every JSON response carries `ETag: "<scan_version>"`. Send `If-None-Match` on th
 
 The HTML repo-list cards also carry `data-repo-id`, `data-repo-name`, `data-action-required`, and `data-signals` attributes, plus `data-flag` on each action pill. Lets you parse the dashboard without regex on Tailwind class soup if you'd rather not switch to JSON.
 
-## Use it as an MCP App
+## Use it from an MCP host
 
-repo-recall is also an [MCP App](https://github.com/modelcontextprotocol/ext-apps) server. Same data, same scan loop, but exposed to MCP hosts (Claude Desktop, ChatGPT, mcp-preview, ...) as tools and a renderable widget. Both surfaces always run in one process: the binary boots the axum dashboard *and* the MCP stdio server simultaneously, so a single brew-installed binary serves your browser AND your MCP host without needing two installs.
+repo-recall also runs an MCP server. Same data, same scan loop, but exposed to MCP hosts (Claude Desktop, mcp-preview, ...) as JSON tools. Both surfaces always run in one process: the binary boots the axum dashboard and the MCP stdio server simultaneously, so a single brew-installed binary serves your browser and your MCP host without needing two installs.
 
 If the HTTP port is already in use (because another instance is already serving under `brew services` for example), the new instance falls back gracefully to MCP-only.
 
@@ -76,7 +76,7 @@ For Claude Desktop, drop this into `~/Library/Application Support/Claude/claude_
 }
 ```
 
-Six tools are exposed: `recall_dashboard` (with widget), `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_refresh`. The dashboard widget renders inside the host's iframe.
+Six tools are exposed: `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_refresh`. All return JSON.
 
 ## Quick start
 
