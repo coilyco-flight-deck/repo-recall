@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/openapi.json", get(openapi::spec))
         .route("/api/action-required", get(api::action_required))
         .route("/api/spans", get(api::spans))
+        .route("/api/traces/{trace_id}", get(api::trace))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
         .route("/api/repos/{id}/push", post(actions::push))

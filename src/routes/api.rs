@@ -13,7 +13,7 @@
 
 use std::sync::atomic::Ordering;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -190,6 +190,29 @@ pub async fn spans(
         Ok(Ok(v)) => v,
         _ => Vec::new(),
     };
+    let body = SpansResponse {
+        spans,
+        scan_version: state.scan_version.load(Ordering::Acquire),
+    };
+    json_with_etag(&headers, body.scan_version, &body)
+}
+
+/// `GET /api/traces/{trace_id}` - all spans for one trace, chronological.
+/// Reuses `SpansResponse`. Caller assembles the parent/child tree from
+/// `parent_span_id`. Exists so consumers (LUCA meta-loop) can see agent
+/// call shape - depth, fan-out, dead-end subagents - which the flat
+/// `/api/spans` list hides. JSON-only, ETag on `scan_version`.
+pub async fn trace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(trace_id): Path<String>,
+) -> Response {
+    let cache = state.cache_db.clone();
+    let spans =
+        match tokio::task::spawn_blocking(move || cache.query_spans_by_trace(&trace_id)).await {
+            Ok(Ok(v)) => v,
+            _ => Vec::new(),
+        };
     let body = SpansResponse {
         spans,
         scan_version: state.scan_version.load(Ordering::Acquire),

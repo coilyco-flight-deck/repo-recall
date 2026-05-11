@@ -411,6 +411,32 @@ async fn api_spans_filters_by_repo_and_since() {
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0]["span_id"], "span-new");
 
+    // /api/traces/{trace_id}: returns all spans for the trace, ascending by
+    // start_time, regardless of repo. trace-a has two spans, trace-b has one.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/traces/trace-a"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let spans = body["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0]["span_id"], "span-old");
+    assert_eq!(spans[1]["span_id"], "span-new");
+    assert_eq!(spans[1]["parent_span_id"], "span-old");
+
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/traces/trace-missing"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["spans"].as_array().unwrap().len(), 0);
+
     std::fs::remove_dir_all(&cache_dir).ok();
     std::fs::remove_dir_all(&state_dir).ok();
 }

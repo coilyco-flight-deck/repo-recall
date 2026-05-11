@@ -408,6 +408,27 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// All spans for a single `trace_id`, sorted by `start_time_unix_nano`
+    /// ascending so the caller can walk the trace chronologically and
+    /// assemble the tree from `parent_span_id`. No limit: a trace is the
+    /// natural unit of trace-assembly, not paginated. Same full-table-scan
+    /// shape as `query_spans` because span volume is currently far below
+    /// the "needs an index" threshold; revisit when it isn't.
+    pub fn query_spans_by_trace(&self, trace_id: &str) -> Result<Vec<Span>> {
+        let read = self.db.begin_read()?;
+        let t = read.open_table(SPANS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_k, v) = row?;
+            let s: Span = serde_json::from_slice(v.value())?;
+            if s.trace_id == trace_id {
+                out.push(s);
+            }
+        }
+        out.sort_by_key(|s| s.start_time_unix_nano);
+        Ok(out)
+    }
+
     pub fn list_repos_with_counts(&self) -> Result<Vec<Repo>> {
         let read = self.db.begin_read()?;
         let t = read.open_table(REPOS)?;
