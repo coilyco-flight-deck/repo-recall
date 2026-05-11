@@ -48,7 +48,7 @@ Three endpoints exist purely for orchestrators that don't want HTML at all:
 
 - `GET /api/action-required` — thin slice of just the action-required list. Each item carries `id = "<repo_id>:<signal>"` so you can tell "same broken thing, still broken" from "this one cleared and a different one appeared." Signals: `ci_failing`, `dirty_tree`, `in_progress_op`, `detached_head`, `review_requested`.
 - `GET /api/scan-version` — single-integer poll target so you can ask "did anything change" without paying the JSON projection cost.
-- `POST /api/refresh` — sync refresh. Awaits the scan, returns the new `scan_version`. Sibling of `POST /refresh`, which returns 202 and asks you to watch the WebSocket.
+- `POST /api/refresh` — sync refresh. Awaits the scan, returns the new `scan_version`. Sibling of `POST /refresh`, which returns 202 and lets you poll `GET /api/scan-version`.
 
 Every JSON response carries `ETag: "<scan_version>"`. Send `If-None-Match` on the next poll and you'll get `304 Not Modified` between scans for free.
 
@@ -163,7 +163,7 @@ Each source gets its own redb table. No unified "events" table — cross-source 
 
 **Commits.** `git log --all --no-merges` as a subprocess per repo, NUL-separated, capped at `REPO_RECALL_COMMITS_PER_REPO`. Shelling out to system `git` beats libgit2's build pain. Per-repo errors are swallowed at `debug!` — one weird repo doesn't abort the whole scan.
 
-**UI.** Server-rendered HTML via [maud](https://maud.lambda.xyz) (compile-time checked templates), styled with [Tailwind v4](https://tailwindcss.com) compiled via the standalone CLI (`make css`, output committed to `static/tailwind.css`), interactivity via [htmx](https://htmx.org) + `htmx-ext-ws`. Scan progress streams as out-of-band HTML fragments over a WebSocket — htmx pulls them out by id and swaps them in. No JSON progress protocol, no client JS to speak of.
+**UI.** Server-rendered HTML via [maud](https://maud.lambda.xyz) (compile-time checked templates), styled with [Tailwind v4](https://tailwindcss.com) compiled via the standalone CLI (`make css`, output committed to `static/tailwind.css`), interactivity via [htmx](https://htmx.org). The dashboard polls `/api/scan-version` and reloads when the counter bumps. No JSON progress protocol, no client JS to speak of.
 
 ## Privacy
 

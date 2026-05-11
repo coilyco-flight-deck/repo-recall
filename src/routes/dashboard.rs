@@ -12,7 +12,6 @@ use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
     absolute_time, compact_count, display_name, page, page_with_banners, relative_time,
     ACTION_PILL, H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW,
-    SCAN_STATUS,
 };
 use crate::signals::derive_action_signals;
 use crate::{activity, db, AppState};
@@ -413,12 +412,8 @@ pub async fn index(
 
         (standup_details(&repos, &recent_commits, &recent_sessions, filter_label.as_deref()))
 
-        div id="scan-status" hx-ext="ws" ws-connect="/ws" class=(SCAN_STATUS) {
-            "waiting for scan status…"
-        }
-        // dashboard-reload.js opens its own /ws subscription to catch the
-        // refresh-complete sentinel and call location.reload(). Scoped to
-        // the dashboard so detail pages don't reload mid-read.
+        // dashboard-reload.js polls /api/scan-version and reloads on bump.
+        // Scoped to the dashboard so detail pages don't reload mid-read.
         script src="/static/dashboard-reload.js" defer {}
 
         @let uncommitted_total: i64 = uncommitted_groups.iter().map(|g| g.total).sum();

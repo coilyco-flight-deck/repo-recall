@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use miette::{IntoDiagnostic, WrapErr};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use repo_recall::{commits, db::CacheDb, mcp, routes, search, AppState};
@@ -88,8 +88,6 @@ async fn main() -> miette::Result<()> {
         .map_err(|e| miette::miette!("{e:?}"))
         .wrap_err_with(|| format!("failed to open search index at {}", index_dir.display()))?;
 
-    let (progress_tx, _) = broadcast::channel::<String>(128);
-
     let scan_depth: usize = env_usize("REPO_RECALL_DEPTH", 4);
     let commits_per_repo: usize = env_usize("REPO_RECALL_COMMITS_PER_REPO", 500);
 
@@ -111,7 +109,6 @@ async fn main() -> miette::Result<()> {
         commits_per_repo,
         refresh_interval_secs,
         remote_target_limit,
-        progress_tx,
         refresh_lock: Arc::new(Mutex::new(())),
         last_scan: Arc::new(Mutex::new(None)),
         gh_health: Arc::new(Mutex::new(gh_health)),

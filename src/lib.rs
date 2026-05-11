@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 pub mod activity;
 pub mod commits;
@@ -30,9 +30,6 @@ pub struct AppState {
     /// timestamp. Caps `gh` rate consumption on workspaces that grow past
     /// the bucket math. `0` means no cap (every GH-hosted repo is queried).
     pub remote_target_limit: usize,
-    /// HTML-fragment broadcast for the axum dashboard's `/ws` listener. In
-    /// `mcp` subcommand mode there are no listeners, so the broadcast no-ops.
-    pub progress_tx: broadcast::Sender<String>,
     pub refresh_lock: Arc<Mutex<()>>,
     pub last_scan: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
     /// State of the local `gh` CLI. Updated at startup and re-checked at the

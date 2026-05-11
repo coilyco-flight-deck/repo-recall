@@ -23,15 +23,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let _guard = match state.refresh_lock.try_lock() {
         Ok(g) => g,
         Err(_) => {
-            let _ = state
-                .progress_tx
-                .send(status_fragment("refresh already in progress…"));
+            tracing::debug!("refresh already in progress");
             return Ok(());
         }
     };
 
-    let tx = state.progress_tx.clone();
-    let _ = tx.send(status_fragment("starting refresh…"));
+    tracing::debug!("starting refresh");
 
     let cwd = state.cwd.clone();
     let cache_db = state.cache_db.clone();
@@ -66,13 +63,13 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         // OTel spans dropped as JSON files into REPO_RECALL_SPANS_DIR get
         // ingested every refresh. Source of truth is on disk; cache is
         // derived. No Claude-projects-dir dependency.
-        let spans_n = ingest_spans(&cache_db, &tx)?;
+        let spans_n = ingest_spans(&cache_db)?;
 
         // Phase 2: sessions. Same wipe semantics as before — every record
         // in the cache lands inside the same refresh sweep.
         let Some(projects_dir) = sessions::default_projects_dir() else {
             // No Claude projects dir — still try commits before bailing.
-            let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo, &tx)?;
+            let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
             cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
             return Ok(RefreshStats {
                 repos: repos_n,
@@ -84,14 +81,13 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
             });
         };
         let files = sessions::list_session_files(&projects_dir)?;
-        let total_files = files.len();
 
         let mut inserted = 0usize;
         let mut skipped = 0usize;
         let mut links = 0usize;
 
         cache_db.write_batch(|w| {
-            for (i, path) in files.iter().enumerate() {
+            for path in files.iter() {
                 match sessions::parse_session_file(path) {
                     Ok(Some(rec)) => {
                         let (session_id, was_new) = w.upsert_session(
@@ -131,16 +127,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
                         skipped += 1;
                     }
                 }
-                if (i + 1) % 50 == 0 || i + 1 == total_files {
-                    let msg = format!("indexing sessions… {}/{}", i + 1, total_files);
-                    let _ = tx.send(status_fragment(&msg));
-                }
             }
             Ok(())
         })?;
 
         // Phase 3: commits + per-repo state.
-        let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo, &tx)?;
+        let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
 
         // Phase 4: precompute aggregates the dashboard reads back.
         cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
@@ -164,18 +156,14 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 
     let stats = match result {
         Ok(s) => {
-            let msg = format!(
-                "done — {} repos, {} sessions, {} links, {} commits, {} spans \
-                 ({} skipped). checking CI…",
+            tracing::info!(
+                "refresh: {} repos, {} sessions, {} links, {} commits, {} spans ({} skipped). checking CI…",
                 s.repos, s.sessions, s.links, s.commits, s.spans, s.skipped,
             );
-            let _ = state.progress_tx.send(status_fragment(&msg));
             s
         }
         Err(e) => {
-            let _ = state
-                .progress_tx
-                .send(status_fragment(&format!("error: {e}")));
+            tracing::warn!("refresh error: {e}");
             return Ok(());
         }
     };
@@ -213,8 +201,8 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     state
         .scan_version
         .fetch_add(1, std::sync::atomic::Ordering::Release);
-    let msg = format!(
-        "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches ({} skipped)",
+    tracing::info!(
+        "refresh done: {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches ({} skipped)",
         stats.repos,
         stats.sessions,
         stats.links,
@@ -222,17 +210,6 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         ci_updated,
         content_matches,
         stats.skipped,
-    );
-    let _ = state.progress_tx.send(status_fragment(&msg));
-    // Sentinel: tells the dashboard's reload observer that fresh data is
-    // available. OOB-swap outerHTML of the hidden #dashboard-reload-sentinel
-    // span so a MutationObserver in dashboard-reload.js sees the
-    // `data-reload-trigger` attribute and fires location.reload(). The span
-    // only exists on the dashboard — detail pages have no swap target, so
-    // they don't reload mid-read.
-    let _ = state.progress_tx.send(
-        r#"<span id="dashboard-reload-sentinel" hx-swap-oob="true" data-reload-trigger="1" style="display:none"></span>"#
-            .to_string(),
     );
     Ok(())
 }
@@ -244,26 +221,17 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 /// CPU-heavy, and serial is fine since a few dozen MB of JSONL parses fast.
 async fn ingest_content_mentions(state: AppState) -> usize {
     let cache_db = state.cache_db.clone();
-    let tx = state.progress_tx.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
         let needles = cache_db.iter_repo_ids_and_names()?;
         let sessions = cache_db.iter_session_source_files()?;
-        let total = sessions.len();
         let inserted = cache_db.write_batch(|w| {
             let mut n = 0usize;
-            for (i, (session_id, path)) in sessions.iter().enumerate() {
+            for (session_id, path) in sessions.iter() {
                 let hits = crate::sessions::mentions_in_file(std::path::Path::new(path), &needles);
                 for repo_id in hits {
                     if w.link_session_repo(*session_id, repo_id, "content_mention")? {
                         n += 1;
                     }
-                }
-                if (i + 1) % 25 == 0 || i + 1 == total {
-                    let _ = tx.send(status_fragment(&format!(
-                        "scanning sessions for repo mentions… {}/{}",
-                        i + 1,
-                        total
-                    )));
                 }
             }
             Ok(n)
@@ -283,7 +251,6 @@ async fn ingest_content_mentions(state: AppState) -> usize {
 /// per `link_session_repo` (rejects duplicate keys at the redb layer).
 async fn ingest_gh_refs(state: AppState) -> usize {
     let cache_db = state.cache_db.clone();
-    let tx = state.progress_tx.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
         let remotes = cache_db.iter_repo_ids_and_remotes()?;
         let mut by_slug: std::collections::HashMap<String, i64> =
@@ -297,10 +264,9 @@ async fn ingest_gh_refs(state: AppState) -> usize {
             return Ok(0);
         }
         let sessions = cache_db.iter_session_source_files()?;
-        let total = sessions.len();
         let inserted = cache_db.write_batch(|w| {
             let mut n = 0usize;
-            for (i, (session_id, path)) in sessions.iter().enumerate() {
+            for (session_id, path) in sessions.iter() {
                 let hits = crate::sessions::gh_refs_in_file(std::path::Path::new(path));
                 for (owner, repo) in hits {
                     let slug = format!("{owner}/{repo}");
@@ -309,13 +275,6 @@ async fn ingest_gh_refs(state: AppState) -> usize {
                             n += 1;
                         }
                     }
-                }
-                if (i + 1).is_multiple_of(25) || i + 1 == total {
-                    let _ = tx.send(status_fragment(&format!(
-                        "scanning sessions for gh refs… {}/{}",
-                        i + 1,
-                        total
-                    )));
                 }
             }
             Ok(n)
@@ -413,15 +372,9 @@ async fn ingest_ci_status(state: AppState) -> usize {
 
     // Collect + write in one sweep. Keeps the cache write window short.
     let mut results: Vec<RemoteSnapshot> = Vec::with_capacity(total);
-    let tx = state.progress_tx.clone();
-    let mut done = 0usize;
     while let Some(res) = set.join_next().await {
-        done += 1;
         if let Ok(Some(snap)) = res {
             results.push(snap);
-        }
-        if done.is_multiple_of(10) || done == total {
-            let _ = tx.send(status_fragment(&format!("remote state… {done}/{total}")));
         }
     }
 
@@ -525,10 +478,7 @@ struct RefreshStats {
 /// when the directory is unset or empty. One write transaction for the
 /// whole sweep so the spans table commits atomically alongside the rest of
 /// the refresh.
-fn ingest_spans(
-    cache_db: &CacheDb,
-    tx: &tokio::sync::broadcast::Sender<String>,
-) -> anyhow::Result<usize> {
+fn ingest_spans(cache_db: &CacheDb) -> anyhow::Result<usize> {
     let Some(spans_dir) = spans::default_spans_dir() else {
         return Ok(0);
     };
@@ -536,10 +486,9 @@ fn ingest_spans(
     if files.is_empty() {
         return Ok(0);
     }
-    let total = files.len();
     let inserted = cache_db.write_batch(|w| {
         let mut n = 0usize;
-        for (i, path) in files.iter().enumerate() {
+        for path in files.iter() {
             match spans::parse_span_file(path) {
                 Ok(Some(rec)) => {
                     let (_id, was_new) = w.upsert_span(
@@ -562,13 +511,6 @@ fn ingest_spans(
                 Ok(None) => {}
                 Err(e) => tracing::debug!("span parse error {}: {}", path.display(), e),
             }
-            if (i + 1).is_multiple_of(50) || i + 1 == total {
-                let _ = tx.send(status_fragment(&format!(
-                    "indexing spans… {}/{}",
-                    i + 1,
-                    total
-                )));
-            }
         }
         Ok(n)
     })?;
@@ -576,21 +518,17 @@ fn ingest_spans(
 }
 
 /// Run `git log` in every discovered repo and bulk-insert the results.
-/// Progress events go out every 5 repos so the user sees movement on large
-/// workspaces without drowning the socket in HTML fragments.
 /// Also computes 30-day LOC churn in the same sweep (second git subprocess
 /// per repo) and updates the `repos` row.
 fn ingest_commits(
     cache_db: &CacheDb,
     repos: &[(i64, PathBuf)],
     limit_per_repo: usize,
-    tx: &tokio::sync::broadcast::Sender<String>,
 ) -> anyhow::Result<usize> {
-    let total_repos = repos.len();
     let churn_cutoff = chrono::Utc::now().timestamp() - 30 * 86_400;
     cache_db.write_batch(|w| {
         let mut total_commits = 0usize;
-        for (i, (repo_id, repo_path)) in repos.iter().enumerate() {
+        for (repo_id, repo_path) in repos.iter() {
             match commits::scan(repo_path, limit_per_repo) {
                 Ok(records) => {
                     for rec in &records {
@@ -646,27 +584,7 @@ fn ingest_commits(
             for f in &snap.files {
                 w.insert_uncommitted_file(*repo_id, &f.path, f.kind.as_str())?;
             }
-            if (i + 1) % 5 == 0 || i + 1 == total_repos {
-                let _ = tx.send(status_fragment(&format!(
-                    "indexing commits + churn… {}/{}",
-                    i + 1,
-                    total_repos
-                )));
-            }
         }
         Ok(total_commits)
     })
-}
-
-/// HTML fragment that HTMX will swap into #scan-status via out-of-band swap.
-/// Carries the same class string as the initial template render — without
-/// it, every status update strips the banner's styling. Built with `maud`
-/// so escaping is handled by the template engine rather than by hand.
-fn status_fragment(text: &str) -> String {
-    maud::html! {
-        div id="scan-status" hx-swap-oob="true" class=(crate::routes::templates::SCAN_STATUS) {
-            (text)
-        }
-    }
-    .into_string()
 }

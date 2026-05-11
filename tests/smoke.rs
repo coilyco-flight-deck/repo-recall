@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 use repo_recall::{db::CacheDb, routes, AppState};
 
@@ -27,7 +27,6 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
     let index_dir = state_dir.join("idx");
     let search_index = repo_recall::search::SearchIndex::open_at(&index_dir).expect("search index");
 
-    let (progress_tx, _) = broadcast::channel::<String>(16);
     let state = AppState {
         cache_db,
         cwd: std::env::temp_dir(),
@@ -35,7 +34,6 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
         commits_per_repo: 50,
         refresh_interval_secs: 0,
         remote_target_limit: 0,
-        progress_tx,
         refresh_lock: Arc::new(Mutex::new(())),
         last_scan: Arc::new(Mutex::new(None)),
         gh_health: Arc::new(Mutex::new(gh)),
@@ -79,10 +77,6 @@ async fn dashboard_renders() {
     assert_eq!(res.status(), 200);
     let body = res.text().await.unwrap();
     assert!(body.contains("<title>repo-recall"), "missing title tag");
-    assert!(
-        body.contains("id=\"scan-status\""),
-        "missing scan-status element"
-    );
     assert!(
         body.contains("/livereload"),
         "livereload script not wired in"
@@ -335,7 +329,6 @@ async fn api_spans_filters_by_repo_and_since() {
     std::fs::create_dir_all(&state_dir).unwrap();
     let search_index =
         repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).expect("idx");
-    let (progress_tx, _) = tokio::sync::broadcast::channel::<String>(16);
     let state = repo_recall::AppState {
         cache_db,
         cwd: std::env::temp_dir(),
@@ -343,7 +336,6 @@ async fn api_spans_filters_by_repo_and_since() {
         commits_per_repo: 50,
         refresh_interval_secs: 0,
         remote_target_limit: 0,
-        progress_tx,
         refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_scan: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         gh_health: std::sync::Arc::new(tokio::sync::Mutex::new(repo_recall::commits::GhHealth::Ok)),

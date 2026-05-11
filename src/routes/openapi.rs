@@ -5,8 +5,8 @@
 //! header back to a machine-readable description of what's callable. Keep
 //! the document narrow: dashboard JSON view + the `/api/*` orchestrator
 //! slice. UI-only routes (`/repos/{id}`, `/sessions/{id}`, `/search`,
-//! `/livereload`, `/ws`, push wiring) stay out — they're HTML or
-//! WebSocket and not useful to an API consumer.
+//! `/livereload`) stay out — they're HTML or WebSocket and not useful
+//! to an API consumer.
 
 use axum::response::IntoResponse;
 use axum::Json;
@@ -52,7 +52,7 @@ pub async fn spec() -> impl IntoResponse {
             "/api/refresh": {
                 "post": {
                     "summary": "Synchronous refresh",
-                    "description": "Awaits the scan and returns the new scan_version. Sync sibling of `POST /refresh` (which fires-and-forgets and uses HTMX/WebSocket for progress).",
+                    "description": "Awaits the scan and returns the new scan_version. Sync sibling of `POST /refresh` (which fires-and-forgets).",
                     "responses": {"200": {"description": "Refresh complete", "content": {"application/json": {}}}}
                 }
             }

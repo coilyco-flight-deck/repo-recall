@@ -44,7 +44,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/repos/{id}/push", post(actions::push))
         .route("/api/repos/{id}/pull", post(actions::pull))
         .route("/api/clone", post(actions::clone_active))
-        .route("/ws", get(ws::ws_handler))
         .route("/livereload", get(ws::livereload_handler))
         .nest_service("/static", ServeDir::new(static_dir))
         .fallback(fallback::not_found)

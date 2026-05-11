@@ -10,7 +10,7 @@
 Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort).
 
 - **Language**: Rust (edition 2021, stable toolchain)
-- **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [redb](https://docs.rs/redb) (embedded ACID KV, pure-Rust), [tantivy](https://docs.rs/tantivy) (full-text search), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 for the co-hosted MCP stdio server.
+- **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP), [redb](https://docs.rs/redb) (embedded ACID KV, pure-Rust), [tantivy](https://docs.rs/tantivy) (full-text search), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) (loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 for the co-hosted MCP stdio server.
 - **Runtime deps**: none beyond the bundled crates. No config file. Discovery is lazy — the server scans from whatever directory it was launched in.
 
 ## Repository structure
@@ -32,7 +32,7 @@ src/
     sessions.rs     # GET /sessions/{id}
     search.rs       # GET /search
     refresh.rs      # POST /refresh (kicks off async scan+index)
-    ws.rs           # GET /ws (progress broadcast), GET /livereload (dev reload)
+    ws.rs           # GET /livereload (dev reload)
     fallback.rs     # 404 handler
     templates.rs    # maud layout + reusable Tailwind class bundles (PANEL, PILL, ...)
   mcp/
@@ -100,7 +100,7 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 - **Git log is shelled out, not linked.** `src/commits.rs` runs `git log --all --no-merges` as a subprocess per repo and parses NUL-separated fields. Reasons: system `git` is everywhere, no libgit2 build pain, one subprocess per repo is cheap. Individual-repo errors are swallowed (logged at `debug!`) rather than aborting the whole scan.
 - **Templates are maud macros; CSS/JS are files.** The HTML lives in Rust (compile-time-checked), but Tailwind handles nearly all styling as utility classes on the markup. Anything awkward as a utility goes in [`static/tailwind.input.css`](./static/tailwind.input.css) below the `@import "tailwindcss"` line. Client JS lives under [`static/`](./static/) too — no inline `<script>` blocks. Served via `tower_http::services::ServeDir` mounted at `/static/*`.
 - **Tailwind compiles via the v4 standalone CLI.** Single self-contained binary (`brew install tailwindcss`), no node, no npm, no PostCSS, no `tailwind.config.js`. `make css` builds `static/tailwind.css` from `static/tailwind.input.css`; `make css-watch` rebuilds on input or `src/**/*.rs` change. Output is committed so `brew install` consumers do not need the CLI. CI runs `make css-check` to fail if the committed output is stale; the pre-commit hook regenerates it on every relevant edit. For reused class bundles (panel, pill, list-row) define a `pub const` in [`src/routes/templates.rs`](./src/routes/templates.rs) rather than repeating the same 6-class string across files.
-- **WebSocket fragments use HTMX out-of-band swaps.** The server sends `<div id="scan-status" hx-swap-oob="true">…</div>` fragments; HTMX pulls them out by id and swaps them in. Don't invent a JSON progress protocol — HTML fragments over the socket is the whole point of `hx-ext="ws"`.
+- **Refresh signal is `GET /api/scan-version`.** The endpoint returns a monotonic counter bumped at the end of every successful refresh. The dashboard polls it every 5 seconds and reloads on bump. ETag on JSON responses keys on the same counter so `If-None-Match` short-circuits between scans. There is no progress channel — keep refresh logging at `tracing` level.
 - **MCP server is purely additive and always co-runs with axum.** A single binary starts BOTH the axum HTTP dashboard and the MCP stdio server in one process. `src/mcp/` exposes the same data layer the axum routes use (`db`, `scanner`, `sessions`, `commits`, `activity`, `join`, `routes::refresh`). Six tools, JSON-only responses. Don't move scan logic into `src/mcp/` — call into existing modules. `recall_refresh` calls `routes::refresh::run_refresh` so both surfaces share the scan implementation and the periodic refresh loop. Port-bind failures (e.g. `brew services` already serving) fall back to MCP-only with a warning.
 - **MCP `stdout` is reserved for JSON-RPC framing.** In `mcp` mode the tracing-subscriber writer is `stderr`. axum mode writes to stdout as usual. See [`init_tracing`](./src/main.rs).
 
@@ -145,7 +145,6 @@ For repo-recall as a tool, a future `LocalState` (or `RemoteState`) attribute ca
 ## Key references
 
 - [Claude Code session file format](https://docs.claude.com/en/docs/claude-code/settings) — sessions live in `~/.claude/projects/<encoded-project-dir>/*.jsonl`. Each line is an independent JSON record. Record shapes vary: `queue-operation` lines, `user`/`assistant` message lines, etc. `sessions.rs` ignores unknown shapes rather than failing.
-- [htmx WebSocket extension](https://htmx.org/extensions/ws/) — how the server's OOB HTML fragments make it into the DOM without any client JS of our own.
 - [axum 0.8 migration notes](https://github.com/tokio-rs/axum/blob/main/axum/CHANGELOG.md) — path params use `{id}` syntax, not `:id`. This is the most common thing that breaks when copying axum snippets from the internet.
 
 ---

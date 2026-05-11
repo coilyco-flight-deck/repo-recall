@@ -50,7 +50,7 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 
 - **HTML or JSON per endpoint** - `Accept: application/json` or `?format=json`. Advertises JSON alternate via `Link` and `Vary: Accept`.
 - **ETag + If-None-Match** - JSON responses carry `ETag: "<scan_version>"`. Clients get `304 Not Modified` between refreshes.
-- **WebSocket progress** - `/ws` streams htmx out-of-band fragments during refresh. `/livereload` signals dev reconnect.
+- **Dev livereload** - `/livereload` holds a WebSocket open; the client reconnects + reloads when the process restarts under `cargo watch`.
 
 ## MCP integration
 
@@ -104,7 +104,7 @@ Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL
 
 **Actions (htmx fragments)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`.
 
-**WebSocket** - `GET /ws`, `GET /livereload`.
+**WebSocket** - `GET /livereload` (dev reconnect).
 
 **Admin** - `POST /refresh`, `GET /openapi.json`.
 
