@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex as TokioMutex};
 
-use repo_recall::{db::CacheDb, routes, sessions, state::StateDb, AppState};
+use repo_recall::{db::CacheDb, routes, sessions, AppState};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -222,7 +222,6 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
     let cache_db = CacheDb::open_in_dir(&cache_dir).unwrap();
     let state_dir = unique_tmp("repo-recall-demo-state");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db = StateDb::open_at(state_dir.join("state.redb")).unwrap();
     let search_index = repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).unwrap();
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
@@ -242,7 +241,6 @@ async fn demo_fixtures_boot_and_join_through_the_router() {
         my_gh_login: Arc::new(TokioMutex::new(None)),
         my_git_email: Arc::new(TokioMutex::new(None)),
         scan_version: Arc::new(AtomicU64::new(0)),
-        state_db,
         search_index: search_index.clone(),
         demo_mode: false,
     };
@@ -322,7 +320,6 @@ fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
     let cache_db = CacheDb::open_in_dir(&cache_dir).unwrap();
     let state_dir = unique_tmp("repo-recall-demo-flag-state");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db = StateDb::open_at(state_dir.join("state.redb")).unwrap();
     let search_index = repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).unwrap();
 
     let (progress_tx, _) = broadcast::channel::<String>(16);
@@ -340,7 +337,6 @@ fn boot_minimal(demo_mode: bool) -> (AppState, PathBuf, PathBuf) {
         my_gh_login: Arc::new(TokioMutex::new(None)),
         my_git_email: Arc::new(TokioMutex::new(None)),
         scan_version: Arc::new(AtomicU64::new(0)),
-        state_db,
         search_index: search_index.clone(),
         demo_mode,
     };
@@ -428,18 +424,6 @@ async fn demo_mode_blocks_mutating_endpoints() {
         .await
         .unwrap();
     assert_eq!(res.status(), 403, "clone should 403 in demo mode");
-
-    // push-notification subscribe
-    let res = client
-        .post(format!("{base}/api/push/subscribe"))
-        .json(&serde_json::json!({
-            "endpoint": "https://example.invalid/p",
-            "keys": {"p256dh": "x", "auth": "y"}
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 403, "push subscribe should 403 in demo mode");
 
     // refresh stays open: re-scanning fixtures is harmless.
     let res = client.post(format!("{base}/refresh")).send().await.unwrap();

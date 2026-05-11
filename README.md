@@ -7,7 +7,7 @@ You've got dozens of repos on disk, hundreds of [Claude Code](https://claude.com
 - **Which sessions touched this repo?** — open the repo, see every session that had it as `cwd`.
 - **Which repos did this session touch?** — open the session, see every repo it crossed.
 
-Everything is local. The server binds `127.0.0.1` only, and the cache lives in `$TMPDIR`. Outbound calls are limited to `gh run list` for CI status and (if you opt into push notifications) signed Web Push deliveries to FCM.
+Everything is local. The server binds `127.0.0.1` only, and the cache lives in `$TMPDIR`. Outbound calls are limited to `gh run list` for CI status.
 
 ![Dashboard — repos, sessions, commits, CI status, uncommitted work](docs/dashboard.png)
 
@@ -92,7 +92,7 @@ That's it. No config file, no setup wizard. The server walks its cwd + 4 levels 
 
 ## Try it without indexing your stuff
 
-If you want to see what repo-recall looks like before pointing it at your own session history, the public demo image runs the same binary against synthetic fixtures (three fake repos, five fake sessions). Everything is bound inside the container; mutating endpoints (push, pull, clone, push-notification subscribe) return 403, the dashboard renders a "DEMO INSTANCE" banner.
+If you want to see what repo-recall looks like before pointing it at your own session history, the public demo image runs the same binary against synthetic fixtures (three fake repos, five fake sessions). Everything is bound inside the container; mutating endpoints (push, pull, clone) return 403, the dashboard renders a "DEMO INSTANCE" banner.
 
 ```sh
 docker run --rm -p 7777:7777 ghcr.io/coilysiren/repo-recall-demo:latest
@@ -184,7 +184,7 @@ Each source gets its own redb table. No unified "events" table — cross-source 
 - Stores **metadata + a truncated 200-char summary only** — not full transcripts on disk. The transcript page re-reads the JSONL at request time.
 - Loopback only. Never listens on `0.0.0.0`, never on a shared-box socket.
 - Tailwind ships as a same-origin compiled CSS file; htmx still loads from a CDN in the browser, not from the server process.
-- Outbound calls: `gh run list` for CI status (reuses your existing `gh` auth, no tokens stored, no tokens read from env; no `gh` and the CI column stays blank), and Web Push deliveries to `fcm.googleapis.com` if you opt into PWA notifications. Push is off until you grant permission and subscribe; the VAPID keypair lives in `~/.local/share/repo-recall/state.redb`.
+- Outbound calls: `gh run list` for CI status (reuses your existing `gh` auth, no tokens stored, no tokens read from env; no `gh` and the CI column stays blank).
 
 The 200-char summary can still contain pasted credentials or sensitive text. Treat the redb cache as sensitive (it defaults to `$TMPDIR/repo-recall-<port>/cache.redb`, which most OSes wipe on reboot).
 

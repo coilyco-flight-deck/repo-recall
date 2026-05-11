@@ -6,7 +6,7 @@ use miette::{IntoDiagnostic, WrapErr};
 use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{commits, db::CacheDb, mcp, routes, search, state::StateDb, AppState};
+use repo_recall::{commits, db::CacheDb, mcp, routes, search, AppState};
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -88,13 +88,6 @@ async fn main() -> miette::Result<()> {
         .map_err(|e| miette::miette!("{e:?}"))
         .wrap_err_with(|| format!("failed to open search index at {}", index_dir.display()))?;
 
-    let state_db = StateDb::open_default()
-        .map_err(|e| miette::miette!("{e:?}"))
-        .wrap_err("failed to open persistent state db")?;
-    if let Err(e) = state_db.get_or_init_vapid() {
-        tracing::warn!("VAPID keypair init failed; push notifications disabled: {e:?}");
-    }
-
     let (progress_tx, _) = broadcast::channel::<String>(128);
 
     let scan_depth: usize = env_usize("REPO_RECALL_DEPTH", 4);
@@ -135,7 +128,6 @@ async fn main() -> miette::Result<()> {
         my_gh_login: Arc::new(Mutex::new(my_gh_login)),
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        state_db,
         search_index,
         demo_mode,
     };

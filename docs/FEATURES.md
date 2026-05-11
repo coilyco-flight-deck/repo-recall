@@ -45,14 +45,6 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 
 - **Curated derivation** - Failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, your draft PRs, your PRs with no reviewer, issues assigned to you. Each carries a detail string.
 - **JSON API with stable ids** - `GET /api/action-required` returns `<repo_id>:<signal>` ids so orchestrators can distinguish "still broken" from "different problem now."
-- **Notification dedup** - Persistent seen-signal set prevents re-notifying for the same broken repo across restarts.
-
-## Push notifications (PWA)
-
-- **Web Push subscription** - Browser registers with FCM, posts subscription, server persists in state DB.
-- **Service worker** - `static/sw.js`, handles push events, click-to-focus, app-shell caching (HTML/CSS/JS cached, `/api/*` not).
-- **VAPID signing and FCM delivery** - Server signs payloads with ECDSA P-256, POSTs encrypted messages to FCM. Reaches device when app is closed.
-- **Dispatch after each scan** - Detects newly-appeared signals, fires notifications, increments dedup set.
 
 ## HTTP and content negotiation
 
@@ -89,10 +81,9 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 
 ## Data model
 
-Two redb databases plus a tantivy index.
+One redb database plus a tantivy index.
 
 - **Cache DB** (`cache.redb`, wipe-on-restart) - repos, sessions, commits, file_changes, uncommitted_files, active_remote_repos, spans. Hand-designed secondary indexes per query path.
-- **State DB** (`state.redb`, persistent at `~/.local/share/repo-recall/state.redb`) - VAPID keypair, push subscriptions, seen_signals dedup set.
 - **Search index** (tantivy, wipe-on-restart) - repos, sessions, commits. Unicode + lowercase + Porter stemming.
 
 ## Integrations
@@ -100,7 +91,6 @@ Two redb databases plus a tantivy index.
 - **GitHub** - via `gh` CLI: `run list`, `api repos/.../pulls`, `api repos/.../issues`, `api user`.
 - **Claude Code** - reads `~/.claude/projects/**/*.jsonl`.
 - **OTel** - file-drop JSON in `$REPO_RECALL_SPANS_DIR`.
-- **FCM** - HTTPS POST for encrypted Web Push.
 - **git** - subprocess (`log`, `push`, `pull --ff-only`, `status`, `describe`).
 
 ## CLI surface
@@ -119,8 +109,6 @@ Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL
 **JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/spans`, `POST /api/refresh`.
 
 **Actions (htmx fragments, demo mode 403s)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`.
-
-**Push** - `GET /sw.js`, `GET /api/push/vapid-key`, `POST /api/push/subscribe`, `POST /api/push/unsubscribe`.
 
 **WebSocket** - `GET /ws`, `GET /livereload`.
 

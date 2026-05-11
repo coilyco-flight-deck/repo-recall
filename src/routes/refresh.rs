@@ -7,7 +7,7 @@ use chrono::Utc;
 
 use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::AppState;
-use crate::{commits, join, push, scanner, sessions, spans};
+use crate::{commits, join, scanner, sessions, spans};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -209,29 +209,18 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let gh_ref_matches = ingest_gh_refs(state.clone()).await;
     let _ = gh_ref_matches;
 
-    // Fourth pass: push-notify newly-appeared action-required signals.
-    // Best-effort. Failures (no subscriptions, no openssl, FCM hiccup,
-    // network down) are logged and swallowed. The diff_and_record_signals
-    // call in dispatch_pending_pushes is the source of truth for "new since
-    // last scan" so a server restart does not re-fire every broken repo.
-    let push_outcome = dispatch_pending_pushes(state.clone()).await;
-
     *state.last_scan.lock().await = Some(Utc::now());
     state
         .scan_version
         .fetch_add(1, std::sync::atomic::Ordering::Release);
     let msg = format!(
-        "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches, {} push (sent {}, gone {}, fail {}) ({} skipped)",
+        "done — {} repos, {} sessions, {} links, {} commits, {} remote, {} content-matches ({} skipped)",
         stats.repos,
         stats.sessions,
         stats.links,
         stats.commits,
         ci_updated,
         content_matches,
-        push_outcome.new_signals,
-        push_outcome.pushes_sent,
-        push_outcome.gone_subscriptions,
-        push_outcome.pushes_failed,
         stats.skipped,
     );
     let _ = state.progress_tx.send(status_fragment(&msg));
@@ -512,44 +501,6 @@ async fn ingest_active_repos(state: AppState) -> usize {
     .ok()
     .and_then(|r| r.ok())
     .unwrap_or(0)
-}
-
-/// Reconcile the persistent seen-signals set with this scan's
-/// action-required ids and fire one push per stored subscription for
-/// each genuinely-new id. Always returns an outcome (never errors out
-/// of the refresh) — push is best-effort.
-async fn dispatch_pending_pushes(state: AppState) -> push::DispatchOutcome {
-    let cache_db = state.cache_db.clone();
-    let repos = match tokio::task::spawn_blocking(move || cache_db.list_repos_with_counts()).await {
-        Ok(Ok(rs)) => rs,
-        _ => return push::DispatchOutcome::default(),
-    };
-
-    let mut all_ids: Vec<String> = Vec::new();
-    let mut all_payloads: Vec<push::PushPayload> = Vec::new();
-    for r in &repos {
-        for sig in crate::signals::derive_action_signals(r) {
-            let payload = push::payload_for(r.id, &r.name, sig.signal, &sig.detail);
-            all_ids.push(payload.signal_id.clone());
-            all_payloads.push(payload);
-        }
-    }
-
-    let new_ids = match state.state_db.diff_and_record_signals(&all_ids) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("diff_and_record_signals failed: {e:?}");
-            return push::DispatchOutcome::default();
-        }
-    };
-
-    let new_set: std::collections::HashSet<&String> = new_ids.iter().collect();
-    let new_payloads: Vec<push::PushPayload> = all_payloads
-        .into_iter()
-        .filter(|p| new_set.contains(&p.signal_id))
-        .collect();
-
-    push::dispatch_for_signals(&state.state_db, new_payloads).await
 }
 
 struct RemoteSnapshot {

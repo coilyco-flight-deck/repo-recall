@@ -7,7 +7,7 @@
 - *What Claude Code sessions have I had about this repo?*
 - *What repos has this session touched?*
 
-Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort) and, when push notifications are enabled, signed Web Push deliveries to `fcm.googleapis.com`.
+Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort).
 
 - **Language**: Rust (edition 2021, stable toolchain)
 - **Stack**: [axum](https://docs.rs/axum) 0.8 + [tokio](https://tokio.rs) (HTTP + WebSocket), [redb](https://docs.rs/redb) (embedded ACID KV, pure-Rust), [tantivy](https://docs.rs/tantivy) (full-text search), [maud](https://maud.lambda.xyz) (compile-time HTML), [htmx](https://htmx.org) + `htmx-ext-ws` (UI reactivity, loaded from CDN). [pmcp](https://crates.io/crates/pmcp) 2.6 with `mcp-apps` feature for the MCP App server (the `mcp` subcommand). Hand-rolled widget JS, no JS toolchain.
@@ -35,8 +35,6 @@ src/
     ws.rs           # GET /ws (progress broadcast), GET /livereload (dev reload)
     fallback.rs     # 404 handler
     templates.rs    # maud layout + reusable Tailwind class bundles (PANEL, PILL, ...)
-  push.rs           # web-push dispatcher (encrypt + sign + POST to FCM)
-  state.rs          # persistent state DB (VAPID keypair, push subscriptions, dedup)
   mcp/
     mod.rs          # `repo-recall mcp` server bootstrap (pmcp 2.6, stdio transport)
     tools.rs        # six tool handlers wrapping the same data layer the axum routes use
@@ -87,7 +85,7 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 
 ## Conventions
 
-- **Three stores, no SQLite.** The persistence surface is exactly three things: `state.redb` (durable, lives in `~/.local/share/repo-recall/`), `cache.redb` (wipe-on-restart, lives in `$REPO_RECALL_CACHE_DIR` or `$TMPDIR/repo-recall-<port>/`), and the tantivy full-text index next to the cache. Cache + tantivy are derived from disk on every refresh, so neither needs migrations. State carries the VAPID keypair, push subscriptions, and the seen-signal dedup set.
+- **Two stores, no SQLite.** The persistence surface is exactly two things: `cache.redb` (wipe-on-restart, lives in `$REPO_RECALL_CACHE_DIR` or `$TMPDIR/repo-recall-<port>/`) and the tantivy full-text index next to the cache. Both are derived from disk on every refresh, so neither needs migrations.
 - **The cache is wipe-on-restart.** `CacheDb::open_in_dir` deletes the prior `cache.redb` before opening a fresh one, and every refresh starts with `wipe()` to truncate every table. No migrations, no `INSERT OR REPLACE` heroics, no stale-state bugs. Schema changes live in [`src/db.rs`](./src/db.rs); restart picks them up.
 - **Discovery is lazy.** No config file, no root-dir setting. The server walks its cwd + `REPO_RECALL_DEPTH` levels deep (default 4). If you want it to index a different tree, run it there (or set `REPO_RECALL_CWD`).
 - **`session_repos.match_type` is the extension point.** MVP writes only `'cwd'`. Additional signals (file paths touched in a session, branch-name matches, etc.) go in as new rows with new `match_type` values — don't replace the `cwd` row, add to it.
@@ -105,7 +103,7 @@ Browser auto-reload: every page includes a small script that opens a WebSocket t
 - **Templates are maud macros; CSS/JS are files.** The HTML lives in Rust (compile-time-checked), but Tailwind handles nearly all styling as utility classes on the markup. Anything awkward as a utility goes in [`static/tailwind.input.css`](./static/tailwind.input.css) below the `@import "tailwindcss"` line. Client JS lives under [`static/`](./static/) too — no inline `<script>` blocks. Served via `tower_http::services::ServeDir` mounted at `/static/*`.
 - **Tailwind compiles via the v4 standalone CLI.** Single self-contained binary (`brew install tailwindcss`), no node, no npm, no PostCSS, no `tailwind.config.js`. `make css` builds `static/tailwind.css` from `static/tailwind.input.css`; `make css-watch` rebuilds on input or `src/**/*.rs` change. Output is committed so `brew install` consumers do not need the CLI. CI runs `make css-check` to fail if the committed output is stale; the pre-commit hook regenerates it on every relevant edit. For reused class bundles (panel, pill, list-row) define a `pub const` in [`src/routes/templates.rs`](./src/routes/templates.rs) rather than repeating the same 6-class string across files.
 - **WebSocket fragments use HTMX out-of-band swaps.** The server sends `<div id="scan-status" hx-swap-oob="true">…</div>` fragments; HTMX pulls them out by id and swaps them in. Don't invent a JSON progress protocol — HTML fragments over the socket is the whole point of `hx-ext="ws"`.
-- **MCP App is purely additive and always co-runs with axum.** A single binary starts BOTH the axum HTTP dashboard and the MCP stdio server in one process. `src/mcp/` exposes the same data layer the axum routes use (`db`, `scanner`, `sessions`, `commits`, `activity`, `join`, `routes::refresh`). Six tools, one widget. Don't move scan logic into `src/mcp/` — call into existing modules. `recall_refresh` calls `routes::refresh::run_refresh` so both surfaces share the scan implementation, push dispatch, and the periodic refresh loop. Port-bind failures (e.g. `brew services` already serving) fall back to MCP-only with a warning.
+- **MCP App is purely additive and always co-runs with axum.** A single binary starts BOTH the axum HTTP dashboard and the MCP stdio server in one process. `src/mcp/` exposes the same data layer the axum routes use (`db`, `scanner`, `sessions`, `commits`, `activity`, `join`, `routes::refresh`). Six tools, one widget. Don't move scan logic into `src/mcp/` — call into existing modules. `recall_refresh` calls `routes::refresh::run_refresh` so both surfaces share the scan implementation and the periodic refresh loop. Port-bind failures (e.g. `brew services` already serving) fall back to MCP-only with a warning.
 - **MCP widget is hand-rolled, no JS toolchain.** [`src/widgets/dashboard.html`](./src/widgets/dashboard.html) is included via `include_str!` and bundled into the binary. Pattern matches [`eco-mcp-app/src/eco_mcp_app/templates/eco.html`](https://github.com/coilysiren/eco-mcp-app/blob/main/src/eco_mcp_app/templates/eco.html) (the canonical reference for Kai's MCP App frontend style). Use DOM methods, never `innerHTML` on untrusted data. Migration to `@modelcontextprotocol/ext-apps` SDK is tracked in [#33](https://github.com/coilysiren/repo-recall/issues/33).
 - **MCP `stdout` is reserved for JSON-RPC framing.** In `mcp` mode the tracing-subscriber writer is `stderr`. axum mode writes to stdout as usual. See [`init_tracing`](./src/main.rs).
 
@@ -116,7 +114,7 @@ Claude Code session files can contain code, pasted credentials, and internal dis
 - Stores **only metadata and a truncated 200-char summary** — not full transcripts.
 - Binds the web server to **loopback by default** (`127.0.0.1`). The `REPO_RECALL_HOST` env var can override this to bind a non-loopback address - only do this when access is gated at a different layer (e.g. `tailscale serve` on a tailnet-only host). Never bind a non-loopback address on a shared or public-facing box.
 - Writes the redb cache to `$TMPDIR` by default, which most OSes wipe on reboot.
-- **Outbound network calls** are limited to `RemoteState` refresh (`gh run list` for CI status, reusing the user's existing `gh` auth) and Web Push delivery to `fcm.googleapis.com` when the user has opted in to PWA notifications. `gh` not installed or not authenticated leaves the remote-state column blank; nothing else breaks. Add new remote calls only when a new `RemoteState` attribute genuinely needs them, and keep them best-effort.
+- **Outbound network calls** are limited to `RemoteState` refresh (`gh run list` for CI status, reusing the user's existing `gh` auth). `gh` not installed or not authenticated leaves the remote-state column blank; nothing else breaks. Add new remote calls only when a new `RemoteState` attribute genuinely needs them, and keep them best-effort.
 
 The 200-char summary can still leak sensitive content. Redaction is future work.
 

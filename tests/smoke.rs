@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex};
 
-use repo_recall::{db::CacheDb, routes, state::StateDb, AppState};
+use repo_recall::{db::CacheDb, routes, AppState};
 
 async fn boot() -> (String, tokio::task::JoinHandle<()>) {
     boot_with(repo_recall::commits::GhHealth::Ok).await
@@ -22,11 +22,8 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
     let cache_dir = std::env::temp_dir().join(format!("repo-recall-test-{}", uuid_like()));
     let cache_db = CacheDb::open_in_dir(&cache_dir).expect("cache db");
 
-    // Each test gets its own state DB too, so VAPID + subscriptions
-    // do not bleed across parallel runs.
     let state_dir = std::env::temp_dir().join(format!("repo-recall-state-{}", uuid_like()));
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db = StateDb::open_at(state_dir.join("state.redb")).expect("state db");
     let index_dir = state_dir.join("idx");
     let search_index = repo_recall::search::SearchIndex::open_at(&index_dir).expect("search index");
 
@@ -45,7 +42,6 @@ async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::
         my_gh_login: Arc::new(Mutex::new(None)),
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        state_db,
         search_index,
         demo_mode: false,
     };
@@ -140,7 +136,6 @@ async fn static_assets_are_served() {
         "/static/icons/icon-192.png",
         "/static/icons/icon-512.png",
         "/static/manifest.webmanifest",
-        "/sw.js",
     ] {
         let res = client.get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(res.status(), 200, "expected 200 for {path}");
@@ -339,8 +334,6 @@ async fn api_spans_filters_by_repo_and_since() {
     // the cache before the router starts serving.
     let state_dir = std::env::temp_dir().join(format!("repo-recall-state-spans-{}", uuid_like()));
     std::fs::create_dir_all(&state_dir).unwrap();
-    let state_db =
-        repo_recall::state::StateDb::open_at(state_dir.join("state.redb")).expect("state");
     let search_index =
         repo_recall::search::SearchIndex::open_at(&state_dir.join("idx")).expect("idx");
     let (progress_tx, _) = tokio::sync::broadcast::channel::<String>(16);
@@ -358,7 +351,6 @@ async fn api_spans_filters_by_repo_and_since() {
         my_gh_login: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         my_git_email: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         scan_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        state_db,
         search_index,
         demo_mode: false,
     };

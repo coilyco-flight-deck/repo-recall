@@ -9,14 +9,12 @@ pub mod commits;
 pub mod db;
 pub mod join;
 pub mod mcp;
-pub mod push;
 pub mod routes;
 pub mod scanner;
 pub mod search;
 pub mod sessions;
 pub mod signals;
 pub mod spans;
-pub mod state;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -53,17 +51,13 @@ pub struct AppState {
     /// on cacheable endpoints, so a polling orchestrator can short-circuit
     /// with `304 Not Modified` between scans.
     pub scan_version: Arc<AtomicU64>,
-    /// Persistent state for things that must outlive the wipe-on-restart
-    /// cache DB: VAPID keypair, push subscriptions, deduplication set of
-    /// already-notified action-required signal ids.
-    pub state_db: state::StateDb,
     /// Tantivy full-text index, dual-written alongside the SQLite
     /// `search_idx` virtual table on every refresh. Reader still flows
     /// through SQLite until the redb migration's step 3 flips it.
     pub search_index: search::SearchIndex,
     /// Public-demo mode (`REPO_RECALL_DEMO=true`). When true, host-mutating
-    /// endpoints (push, pull, clone, push-notification subscribe/unsubscribe)
-    /// return 403, and the page layout renders a "DEMO INSTANCE" banner.
-    /// Re-scans, dashboards, and read endpoints stay live.
+    /// endpoints (push, pull, clone) return 403, and the page layout renders
+    /// a "DEMO INSTANCE" banner. Re-scans, dashboards, and read endpoints
+    /// stay live.
     pub demo_mode: bool,
 }
