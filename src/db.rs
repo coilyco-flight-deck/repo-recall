@@ -876,15 +876,22 @@ impl CacheDb {
             }
             set
         };
+        // "Active" means pushed within the last 30 days. A repo high in the
+        // top-100-by-pushedAt window with a years-old last push is not
+        // meaningfully active, just less stale than the rest.
+        let cutoff = chrono::Utc::now().timestamp() - 30 * 24 * 60 * 60;
         let mut out: Vec<ActiveRemoteRepo> = Vec::new();
         for row in by_pushed.iter()?.rev() {
             let (k, _) = row?;
-            let (_ts, aid) = k.value();
+            let (ts, aid) = k.value();
+            if ts < cutoff {
+                break;
+            }
             let Some(g) = active_t.get(aid)? else {
                 continue;
             };
             let a: ActiveRemoteRepo = serde_json::from_slice(g.value())?;
-            if a.is_archived {
+            if a.is_archived || a.is_fork {
                 continue;
             }
             if repos_by_remote.contains(&a.https_url) {
