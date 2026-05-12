@@ -109,3 +109,11 @@ Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL
 **Admin** - `POST /refresh`, `GET /openapi.json`.
 
 **MCP bridge** - `GET /mcp/*` (pmcp web-bridging).
+
+## See also
+
+- [README.md](../README.md) - human-facing intro.
+- [AGENTS.md](../AGENTS.md) - agent-facing operating rules.
+- [.coily/coily.yaml](../.coily/coily.yaml) - allowlisted commands.
+
+Cross-reference convention from [coilysiren/coilyco-ai#313](https://github.com/coilysiren/coilyco-ai/issues/313).
