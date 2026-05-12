@@ -157,3 +157,7 @@ Per the workspace "Default to proactive scheduling" rule: after pushing to `main
 - **Verify CI**: `coily gh run list --repo coilysiren/repo-recall --limit 1` should show `completed/success`. Re-schedule once at +180s if in progress; stop on failure.
 - **Upgrade**: `brew outdated coilysiren/tap/repo-recall` - if upgradeable, `brew upgrade coilysiren/tap/repo-recall`. No sudo.
 - **Skip** for docs-only pushes.
+
+## Commands
+
+Route every dev command through coily, which reads [`.coily/coily.yaml`](.coily/coily.yaml). The lockdown denies bare invocations of the underlying tools (`cargo`, `make`, etc.). Add new verbs to that file before invoking them.

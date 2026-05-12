@@ -191,3 +191,7 @@ Repo-recall sits at the intersection of GitHub-state dashboards, multi-repo git-
 ## Contributing
 
 See [`AGENTS.md`](./AGENTS.md) for the conventions — what's a cache vs. a database, how to add new session↔repo match types, why DB access uses `spawn_blocking`, why data sources stay as separate tables, and so on.
+
+## Commands
+
+Dev commands are declared in [`.coily/coily.yaml`](.coily/coily.yaml). Run them as `coily exec <verb>`.
