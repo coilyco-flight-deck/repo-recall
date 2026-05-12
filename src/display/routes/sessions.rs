@@ -6,11 +6,11 @@ use axum::response::{IntoResponse, Response};
 use maud::html;
 use serde::{Deserialize, Serialize};
 
-use crate::ingest::claude::sessions_jsonl as sess;
-use crate::routes::negotiate::{json_with_etag, wants_json};
-use crate::routes::templates::{
+use crate::display::routes::negotiate::{json_with_etag, wants_json};
+use crate::display::routes::templates::{
     absolute_time, compact_count, page, relative_time, H2, LI, LINK, PANEL, PATH, ROW,
 };
+use crate::ingest::claude::sessions_jsonl as sess;
 use crate::{db, AppState};
 
 #[derive(Debug, Deserialize, Default)]

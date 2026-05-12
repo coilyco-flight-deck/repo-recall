@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use repo_recall::{db::CacheDb, routes, AppState};
+use repo_recall::{db::CacheDb, display::routes, AppState};
 
 async fn boot() -> (String, tokio::task::JoinHandle<()>) {
     boot_with(repo_recall::ingest::git::log::GhHealth::Ok).await
@@ -348,7 +348,7 @@ async fn api_spans_filters_by_repo_and_since() {
         scan_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
     };
-    let app = repo_recall::routes::router(state);
+    let app = repo_recall::display::routes::router(state);
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let bound = listener.local_addr().unwrap();

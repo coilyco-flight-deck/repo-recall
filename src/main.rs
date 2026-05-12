@@ -6,7 +6,7 @@ use miette::{IntoDiagnostic, WrapErr};
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{db::CacheDb, ingest::git, mcp, routes, search, AppState};
+use repo_recall::{db::CacheDb, display::routes, ingest::git, mcp, search, AppState};
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -72,7 +72,7 @@ async fn main() -> miette::Result<()> {
     // Publish cwd so the layout header can render it without threading state
     // through every `page(..)` call site. Set-once; ignored if already set
     // (e.g. across hot reloads in tests).
-    let _ = repo_recall::routes::templates::SCAN_CWD.set(cwd.clone());
+    let _ = repo_recall::display::routes::templates::SCAN_CWD.set(cwd.clone());
 
     // Underlying errors are `anyhow::Error`, which does not implement
     // `std::error::Error`, so `.into_diagnostic()` won't see them. Render via

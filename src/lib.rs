@@ -9,7 +9,6 @@ pub mod display;
 pub mod ingest;
 pub mod mcp;
 pub mod process;
-pub mod routes;
 pub mod search;
 pub mod signals;
 pub mod spans;

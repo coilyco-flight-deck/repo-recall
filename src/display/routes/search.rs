@@ -7,8 +7,8 @@ use maud::html;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
-use crate::routes::negotiate::{json_with_etag, wants_json};
-use crate::routes::templates::{page, H2, LI, LINK, PANEL, PATH, ROW};
+use crate::display::routes::negotiate::{json_with_etag, wants_json};
+use crate::display::routes::templates::{page, H2, LI, LINK, PANEL, PATH, ROW};
 use crate::AppState;
 
 fn to_db_hit(h: crate::search::SearchHit) -> db::SearchHit {

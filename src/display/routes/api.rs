@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Span;
-use crate::routes::negotiate::json_with_etag;
+use crate::display::routes::negotiate::json_with_etag;
 use crate::signals::derive_action_signals;
 use crate::AppState;
 
@@ -129,7 +129,7 @@ pub struct RefreshSyncResponse {
 /// semantics as the HTML refresh button.
 pub async fn refresh_sync(State(state): State<AppState>) -> Response {
     let before = state.scan_version.load(Ordering::Acquire);
-    let res = crate::routes::refresh::run_refresh(state.clone()).await;
+    let res = crate::display::routes::refresh::run_refresh(state.clone()).await;
     let after = state.scan_version.load(Ordering::Acquire);
     let last = state.last_scan.lock().await.map(|t| t.timestamp());
     let body = RefreshSyncResponse {

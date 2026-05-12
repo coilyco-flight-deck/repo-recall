@@ -7,13 +7,13 @@ use axum::response::{IntoResponse, Response};
 use maud::{html, Markup};
 use serde::{Deserialize, Serialize};
 
-use crate::process::activity;
-use crate::routes::api::ActionRequiredItem;
-use crate::routes::negotiate::{json_with_etag, wants_json};
-use crate::routes::templates::{
+use crate::display::routes::api::ActionRequiredItem;
+use crate::display::routes::negotiate::{json_with_etag, wants_json};
+use crate::display::routes::templates::{
     absolute_time, compact_count, display_name, page, page_with_banners, relative_time,
     ACTION_PILL, H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW,
 };
+use crate::process::activity;
 use crate::signals::derive_action_signals;
 use crate::{db, AppState};
 
@@ -1033,10 +1033,10 @@ fn render_uncloned(repos: &[db::ActiveRemoteRepo]) -> Markup {
             @for r in repos {
                 li class=(LI) {
                     div class=(ROW) {
-                        div id={ "clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                        div id={ "clone-row-" (crate::display::routes::actions::slugify(&r.full_name)) }
                             class="flex items-baseline gap-2 shrink-0" {
                             form hx-post="/api/clone"
-                                 hx-target={ "#clone-row-" (crate::routes::actions::slugify(&r.full_name)) }
+                                 hx-target={ "#clone-row-" (crate::display::routes::actions::slugify(&r.full_name)) }
                                  hx-swap="outerHTML"
                                  class="contents" {
                                 input type="hidden" name="full_name" value=(r.full_name);

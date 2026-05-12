@@ -2,7 +2,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use maud::html;
 
-use crate::routes::templates::{page, LINK, PANEL, PATH};
+use crate::display::routes::templates::{page, LINK, PANEL, PATH};
 
 pub async fn not_found(uri: Uri) -> impl IntoResponse {
     let body = html! {

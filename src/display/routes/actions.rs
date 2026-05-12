@@ -18,7 +18,7 @@ use axum::response::{Html, IntoResponse, Response};
 use maud::html;
 use serde::Deserialize;
 
-use crate::routes::templates::{LINK, PILL, PILL_ALERT};
+use crate::display::routes::templates::{LINK, PILL, PILL_ALERT};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -122,7 +122,7 @@ pub async fn clone_active(
         // dashboard render. Spawned, not awaited — UX stays snappy.
         let s = state.clone();
         tokio::spawn(async move {
-            let _ = crate::routes::refresh::run_refresh(s).await;
+            let _ = crate::display::routes::refresh::run_refresh(s).await;
         });
     }
 
@@ -206,7 +206,7 @@ async fn bump_scan_after(state: &AppState) {
     // commits_behind / dirty tree) reflect the post-push/pull state.
     let s = state.clone();
     tokio::spawn(async move {
-        let _ = crate::routes::refresh::run_refresh(s).await;
+        let _ = crate::display::routes::refresh::run_refresh(s).await;
     });
 }
 
