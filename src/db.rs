@@ -331,6 +331,45 @@ pub struct DispatchRow {
     pub tracking_issue: Option<(String, String, u32)>,
 }
 
+/// Aggregate of dispatch outcomes for one repo (or rolled up across
+/// the workspace). Computed on demand by `autonomy_metrics` (#92, #116).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DispatchBucket {
+    pub successes: i64,
+    pub abandons: i64,
+    pub blocks: i64,
+    pub open: i64,
+    pub total: i64,
+}
+
+impl DispatchBucket {
+    pub fn success_rate(&self) -> f64 {
+        let closed = self.successes + self.abandons + self.blocks;
+        if closed == 0 {
+            0.0
+        } else {
+            self.successes as f64 / closed as f64
+        }
+    }
+}
+
+/// Per-repo aggregate row.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoDispatchMetrics {
+    pub repo_id: i64,
+    pub repo_name: String,
+    pub bucket: DispatchBucket,
+    pub success_rate: f64,
+}
+
+/// Top-level rollup returned by `autonomy_metrics`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AutonomyMetrics {
+    pub overall: DispatchBucket,
+    pub overall_success_rate: f64,
+    pub per_repo: Vec<RepoDispatchMetrics>,
+}
+
 /// One dispatch-substrate signal (#92, #115). Distinct from the
 /// per-Repo `derive_action_signals` because the input rows live in
 /// `LABELED_ISSUES`, not on the `Repo` row itself.
@@ -1078,6 +1117,102 @@ impl CacheDb {
             }
         }
         Ok(out)
+    }
+
+    /// Compute the AFK success-rate rollup (#92, #116). Walks every
+    /// repo-dispatch tracking issue (open + closed) and classifies the
+    /// closed ones as success / abandon / block by joining against
+    /// the issue-ref table.
+    ///
+    /// Classification:
+    /// - `successes` — closed and at least one commit in `ISSUE_REFS`
+    ///   references this issue (auto-close trailer landed real code).
+    /// - `abandons` — closed with no referencing commit (manual close
+    ///   without a fix).
+    /// - `blocks` — closed but at least one open `autonomous-block`
+    ///   issue exists in the same repo created within 7 days of the
+    ///   close. Lossy heuristic; refine later via dispatch-file link.
+    /// - `open` — still open.
+    pub fn autonomy_metrics(&self) -> Result<AutonomyMetrics> {
+        let open = self.labeled_issues_by_state("repo-dispatch", "open")?;
+        let closed = self.labeled_issues_by_state("repo-dispatch", "closed")?;
+        let blocks = self.labeled_issues_by_state("autonomous-block", "open")?;
+        let block_windows: BTreeMap<i64, Vec<i64>> =
+            blocks
+                .iter()
+                .fold(BTreeMap::new(), |mut acc: BTreeMap<i64, Vec<i64>>, b| {
+                    acc.entry(b.repo_id).or_default().push(b.created_at);
+                    acc
+                });
+
+        let mut per_repo: BTreeMap<i64, DispatchBucket> = BTreeMap::new();
+        for o in &open {
+            let b = per_repo.entry(o.repo_id).or_default();
+            b.open += 1;
+            b.total += 1;
+        }
+        for c in &closed {
+            let history = self.ticket_history(c.repo_id, c.number as u32)?;
+            let close_ts = c.closed_at.unwrap_or(c.created_at);
+            let blocked_window_secs = 7 * 86_400;
+            let blocked_nearby = block_windows
+                .get(&c.repo_id)
+                .map(|ts| {
+                    ts.iter()
+                        .any(|bt| (close_ts - bt).abs() < blocked_window_secs)
+                })
+                .unwrap_or(false);
+            let b = per_repo.entry(c.repo_id).or_default();
+            if !history.commits.is_empty() {
+                b.successes += 1;
+            } else if blocked_nearby {
+                b.blocks += 1;
+            } else {
+                b.abandons += 1;
+            }
+            b.total += 1;
+        }
+
+        // Build per-repo with names.
+        let name_lookup: BTreeMap<i64, String> = self
+            .list_repos_with_counts()?
+            .into_iter()
+            .map(|r| (r.id, r.name))
+            .collect();
+        let mut per_repo_out: Vec<RepoDispatchMetrics> = per_repo
+            .into_iter()
+            .map(|(repo_id, bucket)| {
+                let success_rate = bucket.success_rate();
+                RepoDispatchMetrics {
+                    repo_id,
+                    repo_name: name_lookup
+                        .get(&repo_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("repo {repo_id}")),
+                    bucket,
+                    success_rate,
+                }
+            })
+            .collect();
+        per_repo_out.sort_by_key(|r| std::cmp::Reverse(r.bucket.total));
+
+        let overall = per_repo_out
+            .iter()
+            .fold(DispatchBucket::default(), |mut acc, r| {
+                acc.successes += r.bucket.successes;
+                acc.abandons += r.bucket.abandons;
+                acc.blocks += r.bucket.blocks;
+                acc.open += r.bucket.open;
+                acc.total += r.bucket.total;
+                acc
+            });
+        let overall_success_rate = overall.success_rate();
+
+        Ok(AutonomyMetrics {
+            overall,
+            overall_success_rate,
+            per_repo: per_repo_out,
+        })
     }
 
     /// Per-repo signal entries derived from the labeled-issues table.

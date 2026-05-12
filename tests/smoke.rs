@@ -186,6 +186,19 @@ async fn action_required_endpoint_returns_json() {
 }
 
 #[tokio::test]
+async fn autonomy_metrics_endpoint_returns_zero_rollup_in_empty_workspace() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/api/autonomy/metrics"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["overall"]["total"], 0);
+    assert_eq!(body["overall_success_rate"], 0.0);
+    assert!(body["per_repo"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn ticket_history_endpoint_returns_empty_for_unknown_issue() {
     // No repos / issues exist in the test boot. Endpoint should still
     // return a well-shaped envelope rather than 404, since "unindexed

@@ -550,8 +550,12 @@ fn ingest_spans(cache_db: &CacheDb) -> anyhow::Result<usize> {
 /// `(label, state)` tuples drive a fan-out of `gh issue list` calls per
 /// GitHub-hosted repo. Add new entries when new labels join the
 /// dispatch convention.
-const LABEL_INGEST_TARGETS: &[(&str, &str)] =
-    &[("structural-ask", "open"), ("autonomous-block", "open")];
+const LABEL_INGEST_TARGETS: &[(&str, &str)] = &[
+    ("structural-ask", "open"),
+    ("autonomous-block", "open"),
+    ("repo-dispatch", "open"),
+    ("repo-dispatch", "closed"),
+];
 
 /// Fan out `gh issue list --label LABEL --state STATE` across every
 /// GitHub-hosted repo for each configured `(label, state)` target.

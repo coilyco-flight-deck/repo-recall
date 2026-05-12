@@ -229,6 +229,22 @@ pub async fn spans(
     json_with_etag(&headers, body.scan_version, &body)
 }
 
+/// `GET /api/autonomy/metrics` - AFK success-rate rollup from closed
+/// repo-dispatch tracking issues (#92, #116). ETag on `scan_version`.
+pub async fn autonomy_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let cache = state.cache_db.clone();
+    let metrics = match tokio::task::spawn_blocking(move || cache.autonomy_metrics()).await {
+        Ok(Ok(m)) => m,
+        _ => crate::db::AutonomyMetrics {
+            overall: crate::db::DispatchBucket::default(),
+            overall_success_rate: 0.0,
+            per_repo: Vec::new(),
+        },
+    };
+    let v = state.scan_version.load(Ordering::Acquire);
+    json_with_etag(&headers, v, &metrics)
+}
+
 /// `GET /api/structural-asks` - every open `structural-ask` issue across
 /// the workspace, newest-first. Used by the recall-dispatch preflight
 /// (#92, #114) and the dashboard Autonomy panel.

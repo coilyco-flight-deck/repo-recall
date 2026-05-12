@@ -337,6 +337,31 @@ pub async fn ticket_history(
 }
 
 // -----------------------------------------------------------------------------
+// recall_autonomy_metrics
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AutonomyMetricsArgs {}
+
+/// Aggregate AFK success rate from closed `repo-dispatch` tracking
+/// issues, joined against `ISSUE_REFS` to detect commit-backed closes.
+/// Returns overall + per-repo rates plus the bucketed counts. Empty
+/// `per_repo` is the expected normal state until dispatches start
+/// landing (#92, #116).
+pub async fn autonomy_metrics(
+    state: AppState,
+    _args: AutonomyMetricsArgs,
+    _extra: RequestHandlerExtra,
+) -> pmcp::Result<Value> {
+    let cache = state.cache_db.clone();
+    let metrics = tokio::task::spawn_blocking(move || cache.autonomy_metrics())
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+    serde_json::to_value(metrics).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+}
+
+// -----------------------------------------------------------------------------
 // recall_refresh
 // -----------------------------------------------------------------------------
 
