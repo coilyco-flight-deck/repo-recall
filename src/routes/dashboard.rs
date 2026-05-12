@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use maud::{html, Markup};
 use serde::{Deserialize, Serialize};
 
+use crate::process::activity;
 use crate::routes::api::ActionRequiredItem;
 use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
@@ -14,7 +15,7 @@ use crate::routes::templates::{
     ACTION_PILL, H2, LI, LINK, META, PANEL, PANEL_ALERT, PATH, PILL, PILL_ALERT, PILL_FAINT, ROW,
 };
 use crate::signals::derive_action_signals;
-use crate::{activity, db, AppState};
+use crate::{db, AppState};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct DashboardParams {

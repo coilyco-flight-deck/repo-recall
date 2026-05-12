@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-pub mod activity;
 pub mod db;
 pub mod display;
 pub mod ingest;

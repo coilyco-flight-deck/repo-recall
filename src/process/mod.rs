@@ -4,4 +4,5 @@
 //! cross-repo block clustering, dispatch-ledger assembly. No I/O. See
 //! issue #92 for the design.
 
+pub mod activity;
 pub mod join;

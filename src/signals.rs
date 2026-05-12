@@ -2,10 +2,11 @@
 //! surface and the MCP `mcp::tools` surface call into this. Adding a new
 //! signal here lights it up on both paths at once.
 //!
-//! Keep this list in sync with [`crate::activity::is_action_required`] —
+//! Keep this list in sync with [`crate::process::activity::is_action_required`] —
 //! same triggers, just exploded into per-signal records.
 
-use crate::{activity, db};
+use crate::db;
+use crate::process::activity;
 
 pub struct DerivedSignal {
     pub signal: &'static str,
