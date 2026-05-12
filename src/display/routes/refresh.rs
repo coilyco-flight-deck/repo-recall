@@ -269,13 +269,28 @@ async fn ingest_gh_refs(state: AppState) -> usize {
         let inserted = cache_db.write_batch(|w| {
             let mut n = 0usize;
             for (session_id, path) in sessions.iter() {
-                let hits = sessions::gh_refs_in_file(std::path::Path::new(path));
-                for (owner, repo) in hits {
-                    let slug = format!("{owner}/{repo}");
-                    if let Some(repo_id) = by_slug.get(&slug) {
-                        if w.link_session_repo(*session_id, *repo_id, "gh-ref")? {
+                let hits = sessions::issue_refs_in_file(std::path::Path::new(path));
+                // Track which repo links we've already added per session
+                // so the link write-amplification stays at one row per
+                // (session, repo).
+                let mut linked: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                for hit in hits {
+                    let slug = format!("{}/{}", hit.owner, hit.repo);
+                    if let Some(&repo_id) = by_slug.get(&slug) {
+                        if linked.insert(repo_id)
+                            && w.link_session_repo(*session_id, repo_id, "gh-ref")?
+                        {
                             n += 1;
                         }
+                        // Record the issue-level reference. Idempotent on
+                        // (repo, issue_number, source_kind, source_id) so
+                        // duplicate hits in the same file are absorbed.
+                        w.record_issue_ref(
+                            repo_id,
+                            hit.issue,
+                            crate::db::issue_ref_source::SESSION,
+                            *session_id,
+                        )?;
                     }
                 }
             }
@@ -534,7 +549,7 @@ fn ingest_commits(
             match git::log::scan(repo_path, limit_per_repo) {
                 Ok(records) => {
                     for rec in &records {
-                        w.upsert_commit(
+                        let (commit_id, _new) = w.upsert_commit(
                             *repo_id,
                             &rec.sha,
                             &rec.author_name,
@@ -542,6 +557,19 @@ fn ingest_commits(
                             rec.timestamp,
                             &rec.subject,
                         )?;
+                        // Auto-close trailers (`closes #N`, `fixes #N`, ...)
+                        // are repo-implicit: the issue lives in the same
+                        // repo as the commit. Cross-repo references are
+                        // emitted as `<owner>/<repo>#N` and handled by the
+                        // gh-refs pass below.
+                        for issue_n in crate::process::join::closes_refs_in_text(&rec.subject) {
+                            w.record_issue_ref(
+                                *repo_id,
+                                issue_n,
+                                crate::db::issue_ref_source::COMMIT,
+                                commit_id,
+                            )?;
+                        }
                     }
                     total_commits += records.len();
                 }

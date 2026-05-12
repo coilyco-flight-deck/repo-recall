@@ -79,6 +79,17 @@ const ACTIVE_REPOS_BY_PUSHED_AT: TableDefinition<(i64, u64), ()> =
 const SPANS_BY_TRACE_SPAN: TableDefinition<(&str, &str), u64> =
     TableDefinition::new("spans_by_trace_span");
 
+// Issue refs: which sessions/commits touch which issue in which repo.
+// Designed in #92 to let recall-dispatch ground per-ticket context in real
+// prior work, instead of guessing from in-session reasoning.
+const ISSUE_REFS: TableDefinition<u64, &[u8]> = TableDefinition::new("issue_refs");
+// (repo_id, issue_number, source_kind, source_id) -> issue_ref_id.
+const ISSUE_REFS_BY_REPO_ISSUE: TableDefinition<(u64, u32, &str, u64), u64> =
+    TableDefinition::new("issue_refs_by_repo_issue");
+// (source_kind, source_id, repo_id, issue_number) -> ().
+const ISSUE_REFS_BY_SOURCE: TableDefinition<(&str, u64, u64, u32), ()> =
+    TableDefinition::new("issue_refs_by_source");
+
 const META_NEXT_REPO: &str = "next_repo_id";
 const META_NEXT_SESSION: &str = "next_session_id";
 const META_NEXT_COMMIT: &str = "next_commit_id";
@@ -86,6 +97,7 @@ const META_NEXT_FILE_CHANGE: &str = "next_file_change_id";
 const META_NEXT_UNCOMMITTED: &str = "next_uncommitted_id";
 const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
 const META_NEXT_SPAN: &str = "next_span_id";
+const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
@@ -233,6 +245,39 @@ pub struct CiFailure {
     pub default_branch: Option<String>,
 }
 
+/// A reference from a session or commit to a GitHub issue or PR in a
+/// known repo. Populated during ingest from extractors in
+/// `process::join` (`gh_refs_with_issue_in_text`, `closes_refs_in_text`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueRef {
+    pub id: i64,
+    pub repo_id: i64,
+    pub issue_number: u32,
+    /// `"session"` or `"commit"` — kept as a string to leave room for
+    /// future sources (PR review comments, dispatch files) without
+    /// breaking the redb schema.
+    pub source_kind: String,
+    pub source_id: i64,
+}
+
+/// Source-kind sentinels for `record_issue_ref`. Defined here so callers
+/// can't typo the string at the call site.
+pub mod issue_ref_source {
+    pub const SESSION: &str = "session";
+    pub const COMMIT: &str = "commit";
+}
+
+/// Bundle returned by `ticket_history`: the sessions and commits that
+/// reference a given issue in a given repo. Consumers (recall-dispatch,
+/// JSON API) decide how to render.
+#[derive(Debug, Clone, Serialize)]
+pub struct TicketHistory {
+    pub repo_id: i64,
+    pub issue_number: u32,
+    pub sessions: Vec<Session>,
+    pub commits: Vec<Commit>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveRemoteRepo {
     pub id: i64,
@@ -325,6 +370,9 @@ impl CacheDb {
             let _ = write.open_table(ACTIVE_REPOS_BY_PUSHED_AT)?;
             let _ = write.open_table(SPANS)?;
             let _ = write.open_table(SPANS_BY_TRACE_SPAN)?;
+            let _ = write.open_table(ISSUE_REFS)?;
+            let _ = write.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
+            let _ = write.open_table(ISSUE_REFS_BY_SOURCE)?;
         }
         write.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -953,6 +1001,51 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// Return the sessions and commits in the cache that reference a
+    /// given issue in a given repo. Walks the `ISSUE_REFS_BY_REPO_ISSUE`
+    /// secondary index, then loads source records. Empty result is the
+    /// expected normal case for unindexed tickets — never errors.
+    ///
+    /// Used by `recall_ticket_history` (#92) to ground per-ticket
+    /// dispatch context in real prior work.
+    pub fn ticket_history(&self, repo_id: i64, issue_number: u32) -> Result<TicketHistory> {
+        let read = self.db.begin_read()?;
+        let by_repo_issue = read.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
+        let sessions_t = read.open_table(SESSIONS)?;
+        let commits_t = read.open_table(COMMITS)?;
+        let start = (id_to_u64(repo_id), issue_number, "", 0u64);
+        let end = (id_to_u64(repo_id), issue_number + 1, "", 0u64);
+        let mut sessions = Vec::new();
+        let mut commits = Vec::new();
+        for row in by_repo_issue.range(start..end)? {
+            let (k, _v) = row?;
+            let (_rid, _iss, source_kind, source_id) = k.value();
+            match source_kind {
+                issue_ref_source::SESSION => {
+                    if let Some(g) = sessions_t.get(source_id)? {
+                        sessions.push(serde_json::from_slice(g.value())?);
+                    }
+                }
+                issue_ref_source::COMMIT => {
+                    if let Some(g) = commits_t.get(source_id)? {
+                        commits.push(serde_json::from_slice(g.value())?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Newest-first within each list keeps the dashboard view sensible
+        // without forcing the caller to re-sort.
+        sessions.sort_by_key(|s: &Session| std::cmp::Reverse(s.started_at.unwrap_or(i64::MIN)));
+        commits.sort_by_key(|c: &Commit| std::cmp::Reverse(c.timestamp));
+        Ok(TicketHistory {
+            repo_id,
+            issue_number,
+            sessions,
+            commits,
+        })
+    }
+
     /// Pull every indexed session as `(id, source_file)` pairs for the
     /// content-mention scan to drive its file walk.
     pub fn iter_session_source_files(&self) -> Result<Vec<(i64, String)>> {
@@ -1039,6 +1132,9 @@ impl CacheWriter<'_> {
         clear_table::<(i64, u64), ()>(self.txn, ACTIVE_REPOS_BY_PUSHED_AT)?;
         clear_table::<u64, &[u8]>(self.txn, SPANS)?;
         clear_table::<(&str, &str), u64>(self.txn, SPANS_BY_TRACE_SPAN)?;
+        clear_table::<u64, &[u8]>(self.txn, ISSUE_REFS)?;
+        clear_table::<(u64, u32, &str, u64), u64>(self.txn, ISSUE_REFS_BY_REPO_ISSUE)?;
+        clear_table::<(&str, u64, u64, u32), ()>(self.txn, ISSUE_REFS_BY_SOURCE)?;
         Ok(())
     }
 
@@ -1212,8 +1308,9 @@ impl CacheWriter<'_> {
         Ok(true)
     }
 
-    /// Insert a commit if `(repo_id, sha)` is new. Returns true when the
-    /// row was inserted.
+    /// Insert a commit if `(repo_id, sha)` is new. Returns
+    /// `(commit_id, true)` on first sight, `(existing_id, false)` on dup.
+    /// Callers use the id to wire downstream side-tables (e.g. issue refs).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_commit(
         &self,
@@ -1223,10 +1320,10 @@ impl CacheWriter<'_> {
         author_email: &str,
         timestamp: i64,
         subject: &str,
-    ) -> Result<bool> {
+    ) -> Result<(i64, bool)> {
         let mut by_sha = self.txn.open_table(COMMITS_BY_REPO_SHA)?;
-        if by_sha.get((id_to_u64(repo_id), sha))?.is_some() {
-            return Ok(false);
+        if let Some(g) = by_sha.get((id_to_u64(repo_id), sha))? {
+            return Ok((u64_to_id(g.value()), false));
         }
         let id = next_id(self.txn, META_NEXT_COMMIT)?;
         let commit = Commit {
@@ -1247,6 +1344,56 @@ impl CacheWriter<'_> {
         self.txn
             .open_table(COMMITS_BY_TS)?
             .insert((timestamp, id), ())?;
+        Ok((u64_to_id(id), true))
+    }
+
+    /// Record that a session or commit references a specific issue in a
+    /// known repo. Idempotent on `(repo_id, issue_number, source_kind,
+    /// source_id)`. Returns true on first sight. `source_kind` is one of
+    /// `IssueRefSource::SESSION` / `IssueRefSource::COMMIT`.
+    ///
+    /// Designed for the recall-dispatch substrate reads spec'd in #92:
+    /// `recall_ticket_history` walks this table to ground per-ticket
+    /// context in real prior work.
+    pub fn record_issue_ref(
+        &self,
+        repo_id: i64,
+        issue_number: u32,
+        source_kind: &str,
+        source_id: i64,
+    ) -> Result<bool> {
+        let mut by_repo_issue = self.txn.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
+        let key = (
+            id_to_u64(repo_id),
+            issue_number,
+            source_kind,
+            id_to_u64(source_id),
+        );
+        if by_repo_issue.get(key)?.is_some() {
+            return Ok(false);
+        }
+        let id = next_id(self.txn, META_NEXT_ISSUE_REF)?;
+        let rec = IssueRef {
+            id: u64_to_id(id),
+            repo_id,
+            issue_number,
+            source_kind: source_kind.into(),
+            source_id,
+        };
+        let bytes = serde_json::to_vec(&rec)?;
+        self.txn
+            .open_table(ISSUE_REFS)?
+            .insert(id, bytes.as_slice())?;
+        by_repo_issue.insert(key, id)?;
+        self.txn.open_table(ISSUE_REFS_BY_SOURCE)?.insert(
+            (
+                source_kind,
+                id_to_u64(source_id),
+                id_to_u64(repo_id),
+                issue_number,
+            ),
+            (),
+        )?;
         Ok(true)
     }
 

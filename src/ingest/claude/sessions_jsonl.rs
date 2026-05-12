@@ -366,6 +366,26 @@ pub fn gh_refs_in_file(path: &Path) -> Vec<(String, String)> {
     hits
 }
 
+/// Same as `gh_refs_in_file` but also keeps the issue/PR number. Used
+/// by the issue-ref ingest pass (#92, #111) so the recall-dispatch
+/// planner can ask "which sessions touched issue N in this repo."
+/// Returns deduped `GhRef`s.
+pub fn issue_refs_in_file(path: &Path) -> Vec<crate::process::join::GhRef> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut hits = crate::process::join::gh_refs_with_issue_in_text(&content);
+    hits.sort_by(|a, b| {
+        (a.owner.as_str(), a.repo.as_str(), a.issue).cmp(&(
+            b.owner.as_str(),
+            b.repo.as_str(),
+            b.issue,
+        ))
+    });
+    hits.dedup();
+    hits
+}
+
 /// Scan a single JSONL file for bare-word mentions of each repo name.
 /// `needles` is a list of `(repo_id, name)` pairs; the name is case-folded
 /// and matched with word boundaries (ASCII only — names with weird chars
