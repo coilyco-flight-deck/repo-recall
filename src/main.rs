@@ -6,7 +6,12 @@ use miette::{IntoDiagnostic, WrapErr};
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{db::CacheDb, display::routes, ingest::git, mcp, search, AppState};
+use repo_recall::{
+    db::CacheDb,
+    display::{mcp, routes},
+    ingest::git,
+    search, AppState,
+};
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {

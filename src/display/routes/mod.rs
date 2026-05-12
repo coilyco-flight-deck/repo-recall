@@ -4,7 +4,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::services::ServeDir;
 
-use crate::{mcp, AppState};
+use crate::display::mcp;
+use crate::AppState;
 
 pub mod actions;
 pub mod api;
