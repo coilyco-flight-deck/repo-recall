@@ -95,7 +95,7 @@ pub fn list_span_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Parse one span file. Returns `Ok(None)` when the file is malformed or
-/// missing required fields. Mirrors `sessions::parse_session_file` semantics:
+/// missing required fields. Mirrors `ingest::claude::sessions_jsonl::parse_session_file` semantics:
 /// individual bad files do not abort the whole ingest sweep.
 pub fn parse_span_file(path: &Path) -> Result<Option<SpanRecord>> {
     let bytes = std::fs::read(path)?;

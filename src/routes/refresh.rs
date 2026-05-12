@@ -6,8 +6,9 @@ use axum::response::IntoResponse;
 use chrono::Utc;
 
 use crate::db::{ActiveRemoteRepo, CacheDb};
+use crate::ingest::claude::sessions_jsonl as sessions;
 use crate::AppState;
-use crate::{ingest::git, join, scanner, sessions, spans};
+use crate::{ingest::git, join, scanner, spans};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -227,7 +228,7 @@ async fn ingest_content_mentions(state: AppState) -> usize {
         let inserted = cache_db.write_batch(|w| {
             let mut n = 0usize;
             for (session_id, path) in sessions.iter() {
-                let hits = crate::sessions::mentions_in_file(std::path::Path::new(path), &needles);
+                let hits = sessions::mentions_in_file(std::path::Path::new(path), &needles);
                 for repo_id in hits {
                     if w.link_session_repo(*session_id, repo_id, "content_mention")? {
                         n += 1;
@@ -267,7 +268,7 @@ async fn ingest_gh_refs(state: AppState) -> usize {
         let inserted = cache_db.write_batch(|w| {
             let mut n = 0usize;
             for (session_id, path) in sessions.iter() {
-                let hits = crate::sessions::gh_refs_in_file(std::path::Path::new(path));
+                let hits = sessions::gh_refs_in_file(std::path::Path::new(path));
                 for (owner, repo) in hits {
                     let slug = format!("{owner}/{repo}");
                     if let Some(repo_id) = by_slug.get(&slug) {

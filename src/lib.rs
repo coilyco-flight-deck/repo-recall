@@ -14,7 +14,6 @@ pub mod process;
 pub mod routes;
 pub mod scanner;
 pub mod search;
-pub mod sessions;
 pub mod signals;
 pub mod spans;
 

@@ -6,11 +6,12 @@ use axum::response::{IntoResponse, Response};
 use maud::html;
 use serde::{Deserialize, Serialize};
 
+use crate::ingest::claude::sessions_jsonl as sess;
 use crate::routes::negotiate::{json_with_etag, wants_json};
 use crate::routes::templates::{
     absolute_time, compact_count, page, relative_time, H2, LI, LINK, PANEL, PATH, ROW,
 };
-use crate::{db, sessions as sess, AppState};
+use crate::{db, AppState};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct DetailParams {

@@ -5,4 +5,5 @@
 //! pull right now. Future submodules: `github`, `claude`, `docs`, `fs`.
 //! See issue #92 for the design.
 
+pub mod claude;
 pub mod git;
