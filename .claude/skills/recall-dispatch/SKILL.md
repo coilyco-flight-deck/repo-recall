@@ -18,6 +18,14 @@ Everything the planner reads comes from one of three places:
 
 repo-recall is the view layer. Its cache is throwaway. Anything the planner wants to remember lives back in git or github. Closing comments. Issue labels (`autonomy:*`, `dispatched:*`, `structural-ask`, `autonomous-block`, `hitl`). Per-repo `docs/AUTONOMY.md`. AGENTS.md edits. No local-DB state, ever. Anything readable only via session id is private signal, not durable evidence.
 
+## Substrate hygiene
+
+Three rules that govern how the planner writes back into the substrate, locked in on #92:
+
+* **Label authority is shared.** The planner applies `autonomy:*`, `dispatched:*`, `structural-ask`, `ask-answered`, `autonomous-block`, `hitl`, `afk-eligible`, `speculative` labels. Kai may also hand-apply or hand-strip them. On the next read the planner trusts the current label state as input, regardless of who set it. No reconciliation pass that overrides Kai's hand-edits.
+* **Closing comments are free-form.** When a dispatched session closes an issue, the closing comment is written in natural prose, not a canonical machine-parseable shape. The dispatch ledger view derives evidence from the surrounding signal (which commit closed it, which PR landed, which `autonomous-block` issue spawned), not from regex on the closing-comment body. Human-warmer over parseable.
+* **Session content is sanitized before write-out.** Claude Code session JSONL on disk can contain private tokens, vault paths, personal context, internal discussion. When the planner cites a session-derived insight in any cross-team-shareable artifact (issue bodies, AUTONOMY.md AUTO blocks, drift PRs, dispatch prompts), it sanitizes, summarizes, and anonymizes - shift terms, change wording, drop specifics. Never echo raw session content into a written artifact. The only thing safe to cite verbatim is the underlying commit / PR / issue ref, which is already public substrate.
+
 ## Preflight
 
 1. cd into a real git repo before any `coily ops gh` call. Coily binds every audit row to a commit scope. Outside a repo, coily errors with `scope: cwd is not inside a git repo`. repo-recall itself is the natural cwd for a recall-dispatch run.
