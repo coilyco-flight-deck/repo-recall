@@ -49,31 +49,31 @@ watch: ## cargo-watch + caddy https proxy at https://$(https_host):$(https_port)
 		REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) \
 			cargo watch -w src -w Cargo.toml -w static -x run
 
-build: ## cargo build (dev)
+build: ## Compile the binary in debug mode. Forward extras (`--release`, `-p`) verbatim.
 	cargo build
 
 release: ## cargo build --release
 	cargo build --release
 
-test: ## Run cargo test (unit + integration)
+test: ## Run the integration smoke suite (tests/smoke.rs, tests/mcp_smoke.rs) plus unit tests. Forward extras (`--test`, `-- <filter>`) verbatim.
 	cargo test --color always
 
 smoke: ## MCP-protocol integration smoke (spawns the binary, talks JSON-RPC over stdio)
 	cargo test --color always --test mcp_smoke
 
-fmt: ## Format everything with rustfmt
+fmt: ## Apply rustfmt fixes in place.
 	cargo fmt --all
 
-fmt-check: ## Check formatting; non-zero exit if anything would change
+fmt-check: ## Verify rustfmt is clean. Mirrors the CI step.
 	cargo fmt --all --check
 
-lint: ## Run clippy with warnings-as-errors
+lint: ## Lint with clippy, treating warnings as errors. Mirrors the CI step.
 	cargo clippy --all-targets --all-features -- -D warnings
 
-check: ## Fast type-check
+check: ## Type-check without producing artifacts. Faster than build.
 	cargo check --all-targets
 
-ci: fmt-check lint check test ## Everything CI runs, in order. Fail fast.
+ci: fmt-check lint check test ## Full pre-merge gate (fmt-check + clippy + check + test). Matches GitHub Actions.
 
 clean: ## Remove target/ and the redb cache
 	cargo clean

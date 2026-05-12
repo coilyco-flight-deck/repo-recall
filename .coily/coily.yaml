@@ -3,28 +3,27 @@
 # so operators (human or agent) type `coily <verb>`, not `cargo build` /
 # `make ci`.
 #
-# Names follow coily's [a-z0-9-] rule. Argv validation rejects shell
-# metacharacters at invocation time, so flags forward verbatim through
-# coily's user-extras mechanism.
+# Names follow coily's [a-z0-9-] rule. Each verb delegates to a Makefile
+# target so the two surfaces cannot drift. `coily lint` enforces this.
 
 commands:
   build:
-    run: cargo build
+    run: make build
     description: Compile the binary in debug mode. Forward extras (`--release`, `-p`) verbatim.
   test:
-    run: cargo test
+    run: make test
     description: Run the integration smoke suite (tests/smoke.rs, tests/mcp_smoke.rs) plus unit tests. Forward extras (`--test`, `-- <filter>`) verbatim.
   fmt-check:
-    run: cargo fmt --all -- --check
+    run: make fmt-check
     description: Verify rustfmt is clean. Mirrors the CI step.
   fmt:
-    run: cargo fmt --all
+    run: make fmt
     description: Apply rustfmt fixes in place.
-  clippy:
-    run: cargo clippy --all-targets --all-features -- -D warnings
+  lint:
+    run: make lint
     description: Lint with clippy, treating warnings as errors. Mirrors the CI step.
   check:
-    run: cargo check --all-targets
+    run: make check
     description: Type-check without producing artifacts. Faster than build.
   ci:
     run: make ci
