@@ -41,6 +41,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/action-required", get(api::action_required))
         .route("/api/spans", get(api::spans))
         .route("/api/traces/{trace_id}", get(api::trace))
+        .route(
+            "/api/repos/{repo_id}/tickets/{issue_number}/history",
+            get(api::ticket_history),
+        )
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
         .route("/api/repos/{id}/push", post(actions::push))

@@ -186,6 +186,29 @@ async fn action_required_endpoint_returns_json() {
 }
 
 #[tokio::test]
+async fn ticket_history_endpoint_returns_empty_for_unknown_issue() {
+    // No repos / issues exist in the test boot. Endpoint should still
+    // return a well-shaped envelope rather than 404, since "unindexed
+    // issue" is the expected normal case.
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/api/repos/1/tickets/42/history"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["repo_id"], 1);
+    assert_eq!(body["issue_number"], 42);
+    assert!(
+        body["sessions"].as_array().unwrap().is_empty(),
+        "expected empty sessions, got {body}"
+    );
+    assert!(
+        body["commits"].as_array().unwrap().is_empty(),
+        "expected empty commits, got {body}"
+    );
+}
+
+#[tokio::test]
 async fn etag_returns_304_when_unchanged() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::new();

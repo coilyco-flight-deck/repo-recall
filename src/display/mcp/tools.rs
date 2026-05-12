@@ -287,6 +287,37 @@ pub async fn action_required(
 }
 
 // -----------------------------------------------------------------------------
+// recall_ticket_history
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TicketHistoryArgs {
+    /// Repo ID from `recall_dashboard`.
+    pub repo_id: i64,
+    /// GitHub issue (or PR) number.
+    pub issue_number: u32,
+}
+
+/// Returns the sessions and commits in the cache that reference the named
+/// issue in the named repo. Empty arrays when the issue is unindexed.
+/// Designed in #92 to ground per-ticket recall-dispatch context in real
+/// prior work.
+pub async fn ticket_history(
+    state: AppState,
+    args: TicketHistoryArgs,
+    _extra: RequestHandlerExtra,
+) -> pmcp::Result<Value> {
+    let cache = state.cache_db.clone();
+    let history =
+        tokio::task::spawn_blocking(move || cache.ticket_history(args.repo_id, args.issue_number))
+            .await
+            .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+            .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+
+    serde_json::to_value(history).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+}
+
+// -----------------------------------------------------------------------------
 // recall_refresh
 // -----------------------------------------------------------------------------
 

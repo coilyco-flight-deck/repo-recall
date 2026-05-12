@@ -1,12 +1,13 @@
 //! MCP App server. Tools expose repo-recall's data layer to MCP hosts.
 //!
-//! Six tools:
+//! Seven tools:
 //!
 //! - `recall_dashboard` — repo list + action-required + counts.
 //! - `recall_repo` — single repo detail.
 //! - `recall_session` — single session detail.
 //! - `recall_search` — unified search.
 //! - `recall_action_required` — thin orchestrator slice.
+//! - `recall_ticket_history` — sessions + commits touching one issue.
 //! - `recall_refresh` — trigger a rescan.
 
 use std::sync::atomic::Ordering;
@@ -83,6 +84,19 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
+    let ticket_history = {
+        let state = state.clone();
+        TypedTool::new("recall_ticket_history", move |args, extra| {
+            let s = state.clone();
+            Box::pin(tools::ticket_history(s, args, extra))
+        })
+        .with_description(
+            "Sessions and commits in repo-recall's cache that reference a given issue \
+             in a given repo. Used by recall-dispatch to ground per-ticket context in \
+             real prior work. Returns empty arrays when the issue is unindexed.",
+        )
+    };
+
     let refresh_tool = {
         let state = state.clone();
         TypedTool::new("recall_refresh", move |args, extra| {
@@ -104,6 +118,7 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_session", session)
         .tool("recall_search", search)
         .tool("recall_action_required", action_required)
+        .tool("recall_ticket_history", ticket_history)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;

@@ -197,6 +197,32 @@ pub async fn spans(
     json_with_etag(&headers, body.scan_version, &body)
 }
 
+/// `GET /api/repos/{id}/tickets/{n}/history` - sessions + commits touching
+/// issue `n` in repo `id`. Powers `recall_ticket_history` (#112) and the
+/// per-repo dispatch view (#117). JSON-only, ETag on `scan_version`.
+pub async fn ticket_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((repo_id, issue_number)): Path<(i64, u32)>,
+) -> Response {
+    let cache = state.cache_db.clone();
+    let history = match tokio::task::spawn_blocking(move || {
+        cache.ticket_history(repo_id, issue_number)
+    })
+    .await
+    {
+        Ok(Ok(h)) => h,
+        _ => crate::db::TicketHistory {
+            repo_id,
+            issue_number,
+            sessions: Vec::new(),
+            commits: Vec::new(),
+        },
+    };
+    let v = state.scan_version.load(Ordering::Acquire);
+    json_with_etag(&headers, v, &history)
+}
+
 /// `GET /api/traces/{trace_id}` - all spans for one trace, chronological.
 /// Reuses `SpansResponse`. Caller assembles the parent/child tree from
 /// `parent_span_id`. Exists so consumers (LUCA meta-loop) can see agent
