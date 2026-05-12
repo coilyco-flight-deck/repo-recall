@@ -39,6 +39,10 @@ pub struct DashboardJson {
     pub uncommitted_groups: Vec<db::UncommittedGroup>,
     pub ci_failures: Vec<db::CiFailure>,
     pub action_required: Vec<ActionRequiredItem>,
+    /// Autonomy / agent-readiness scorecard rollup (#92, #104).
+    pub autonomy: db::AutonomyMetrics,
+    /// Open `structural-ask` issues across the workspace (#92, #114).
+    pub structural_asks: Vec<db::LabeledIssueRow>,
     pub banner: BannerCounts,
     pub counts: DashboardCounts,
     pub gh_health: &'static str,
@@ -108,6 +112,15 @@ pub async fn index(
         let uncommitted_groups = cache.uncommitted_by_repo(6, 4)?;
         let ci_failures = cache.failing_ci_repos()?;
         let uncloned = cache.uncloned_active_repos(25)?;
+        // Autonomy substrate (#92, #104): per-repo scorecard inputs.
+        let autonomy = cache.autonomy_metrics().unwrap_or(db::AutonomyMetrics {
+            overall: db::DispatchBucket::default(),
+            overall_success_rate: 0.0,
+            per_repo: Vec::new(),
+        });
+        let asks = cache
+            .labeled_issues_by_state("structural-ask", "open")
+            .unwrap_or_default();
         Ok((
             repos_n,
             sessions_n,
@@ -120,6 +133,8 @@ pub async fn index(
             uncommitted_groups,
             ci_failures,
             uncloned,
+            autonomy,
+            asks,
         ))
     })
     .await
@@ -137,6 +152,8 @@ pub async fn index(
         uncommitted_groups,
         ci_failures,
         uncloned,
+        autonomy,
+        structural_asks,
     ) = match data {
         Ok(d) => d,
         Err(e) => {
@@ -236,6 +253,8 @@ pub async fn index(
             uncommitted_groups,
             ci_failures,
             action_required: action_items,
+            autonomy: autonomy.clone(),
+            structural_asks: structural_asks.clone(),
             banner: BannerCounts {
                 ci_failing: ci_failing_count,
                 dirty_repos: dirty_count,
@@ -434,6 +453,8 @@ pub async fn index(
                 (render_ci_failures(&ci_failures))
             }
         }
+        (render_autonomy_panel(&autonomy, &structural_asks))
+
         div class="grid grid-cols-1 lg:grid-cols-2 gap-4" {
             div class="flex flex-col gap-4 min-w-0" {
                 section class=(PANEL) {
@@ -842,6 +863,89 @@ fn action_sentence(signal: &str, r: &db::Repo, detail: &str) -> Markup {
             }
         },
         _ => html! { (repo_link) " - " (detail) },
+    }
+}
+
+/// Render the workspace Autonomy / agent-readiness scorecard panel
+/// (#92, #104). The panel shows the AFK success rate rolled up across
+/// all closed repo-dispatch tracking issues, open dispatch counts, and
+/// open structural-asks. Hidden entirely when the substrate is empty
+/// so a clean workspace doesn't sprout a placeholder card.
+fn render_autonomy_panel(
+    autonomy: &db::AutonomyMetrics,
+    structural_asks: &[db::LabeledIssueRow],
+) -> Markup {
+    let has_dispatches = autonomy.overall.total > 0;
+    let has_asks = !structural_asks.is_empty();
+    if !has_dispatches && !has_asks {
+        return html! {};
+    }
+    let closed = autonomy.overall.successes + autonomy.overall.abandons + autonomy.overall.blocks;
+    let rate_pct = (autonomy.overall_success_rate * 100.0).round() as i64;
+    html! {
+        section class={ (PANEL) " mb-4" } {
+            h2 class=(H2) { "autonomy scorecard" }
+            div class="flex gap-8 items-baseline mb-3 flex-wrap" {
+                @if has_dispatches {
+                    (stat("AFK success", &format!("{rate_pct}%")))
+                    (stat("dispatches", &format!("{}", autonomy.overall.total)))
+                    (stat("open", &format!("{}", autonomy.overall.open)))
+                    (stat("closed", &format!("{closed}")))
+                    @if autonomy.overall.successes > 0 {
+                        (stat("succeeded", &format!("{}", autonomy.overall.successes)))
+                    }
+                    @if autonomy.overall.blocks > 0 {
+                        (stat("blocked", &format!("{}", autonomy.overall.blocks)))
+                    }
+                }
+                @if has_asks {
+                    (stat("open asks", &format!("{}", structural_asks.len())))
+                }
+            }
+            @if !autonomy.per_repo.is_empty() {
+                ul class="list-none p-0 m-0" {
+                    @for r in &autonomy.per_repo {
+                        @let r_pct = (r.success_rate * 100.0).round() as i64;
+                        li class=(LI) {
+                            div class=(ROW) {
+                                a class={ (LINK) " font-semibold" } href={ "/repos/" (r.repo_id) } {
+                                    (r.repo_name)
+                                }
+                            }
+                            div class={ (ROW) " " (META) } {
+                                @if r.bucket.total - r.bucket.open > 0 {
+                                    span { (r_pct) "% (" (r.bucket.successes) "/" ((r.bucket.total - r.bucket.open)) ")" }
+                                } @else {
+                                    span class="italic" { "no closed dispatches yet" }
+                                }
+                                @if r.bucket.open > 0 { span { (r.bucket.open) " open" } }
+                                @if r.bucket.blocks > 0 { span { (r.bucket.blocks) " blocked" } }
+                            }
+                        }
+                    }
+                }
+            }
+            @if has_asks {
+                div class="mt-3" {
+                    div class="text-[11px] uppercase tracking-[0.08em] text-[#9e9fc2] font-bold mb-1" {
+                        "open structural-asks"
+                    }
+                    ul class="list-none p-0 m-0" {
+                        @for a in structural_asks.iter().take(8) {
+                            li class=(LI) {
+                                div class=(ROW) {
+                                    span class="font-semibold" { (a.title) }
+                                }
+                                div class={ (ROW) " " (META) } {
+                                    span { (relative_time(Some(a.created_at))) }
+                                    a class=(LINK) href={ "/repos/" (a.repo_id) } { "#" (a.number) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
