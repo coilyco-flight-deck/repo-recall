@@ -197,6 +197,31 @@ pub async fn spans(
     json_with_etag(&headers, body.scan_version, &body)
 }
 
+/// `GET /api/repos/{id}/dispatches` - parsed dispatch records from this
+/// repo's `docs/repo-dispatch/` directory, newest-first (#92, #113).
+/// JSON-only, ETag on `scan_version`.
+pub async fn repo_dispatches(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(repo_id): Path<i64>,
+) -> Response {
+    let cache = state.cache_db.clone();
+    let rows = match tokio::task::spawn_blocking(move || cache.dispatches_for_repo(repo_id)).await {
+        Ok(Ok(r)) => r,
+        _ => Vec::new(),
+    };
+    let v = state.scan_version.load(Ordering::Acquire);
+    json_with_etag(
+        &headers,
+        v,
+        &serde_json::json!({
+            "repo_id": repo_id,
+            "dispatches": rows,
+            "scan_version": v,
+        }),
+    )
+}
+
 /// `GET /api/repos/{id}/tickets/{n}/history` - sessions + commits touching
 /// issue `n` in repo `id`. Powers `recall_ticket_history` (#112) and the
 /// per-repo dispatch view (#117). JSON-only, ETag on `scan_version`.

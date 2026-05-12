@@ -136,6 +136,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         // Phase 3: commits + per-repo state.
         let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
 
+        // Phase 3.5: docs/repo-dispatch/ files (#92, #113). One write
+        // transaction across all repos so a slow filesystem doesn't
+        // fragment commits. Best-effort: parse errors per file are
+        // logged at `debug!` in the ingest layer.
+        ingest_repo_dispatch(&cache_db, &repo_id_by_path)?;
+
         // Phase 4: precompute aggregates the dashboard reads back.
         cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
 
@@ -532,6 +538,22 @@ fn ingest_spans(cache_db: &CacheDb) -> anyhow::Result<usize> {
         Ok(n)
     })?;
     Ok(inserted)
+}
+
+/// Walk each repo's `docs/repo-dispatch/` directory and insert every
+/// parsed record into the cache (#92, #113). Bulk-writes inside one
+/// transaction so the cache stays self-consistent.
+fn ingest_repo_dispatch(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Result<()> {
+    use crate::ingest::docs::repo_dispatch;
+    cache_db.write_batch(|w| {
+        for (repo_id, repo_path) in repos.iter() {
+            let (records, _errors) = repo_dispatch::dispatches_for_repo(repo_path);
+            for rec in &records {
+                w.insert_dispatch(*repo_id, rec)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Run `git log` in every discovered repo and bulk-insert the results.

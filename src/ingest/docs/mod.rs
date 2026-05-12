@@ -10,5 +10,6 @@ pub mod agents_md;
 pub mod autonomy_md;
 pub mod features_md;
 pub mod readme;
+pub mod repo_dispatch;
 
 mod file_health;

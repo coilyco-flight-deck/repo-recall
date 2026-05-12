@@ -79,6 +79,18 @@ const ACTIVE_REPOS_BY_PUSHED_AT: TableDefinition<(i64, u64), ()> =
 const SPANS_BY_TRACE_SPAN: TableDefinition<(&str, &str), u64> =
     TableDefinition::new("spans_by_trace_span");
 
+// Dispatch records: parsed `docs/repo-dispatch/*.md` files for each repo.
+// Designed in #92, #113 - dispatch artifacts are write-once on disk, with
+// status tracked on a thin GitHub issue. The cache mirror lets the per-repo
+// view and the MCP surface answer "show me this repo's dispatches" without
+// re-walking the filesystem on every request.
+const DISPATCHES: TableDefinition<u64, &[u8]> = TableDefinition::new("dispatches");
+// (repo_id, -dispatched_at, dispatch_id) -> () — newest-first per repo.
+// `dispatched_at` is negated so a forward scan returns newest first; rows
+// without a timestamp use i64::MAX so they sort to the bottom.
+const DISPATCHES_BY_REPO: TableDefinition<(u64, i64, u64), ()> =
+    TableDefinition::new("dispatches_by_repo");
+
 // Issue refs: which sessions/commits touch which issue in which repo.
 // Designed in #92 to let recall-dispatch ground per-ticket context in real
 // prior work, instead of guessing from in-session reasoning.
@@ -98,6 +110,7 @@ const META_NEXT_UNCOMMITTED: &str = "next_uncommitted_id";
 const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
 const META_NEXT_SPAN: &str = "next_span_id";
 const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
+const META_NEXT_DISPATCH: &str = "next_dispatch_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
@@ -267,6 +280,24 @@ pub mod issue_ref_source {
     pub const COMMIT: &str = "commit";
 }
 
+/// One stored dispatch row in the cache. Mirrors the parsed
+/// `docs/repo-dispatch/*.md` shape with the `repo_id` and assigned
+/// `dispatch_id` added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchRow {
+    pub id: i64,
+    pub repo_id: i64,
+    pub file_path: String,
+    pub slug: String,
+    pub issue_refs: Vec<(String, String, u32)>,
+    pub score: Option<i64>,
+    pub autonomy_confidence: Option<i64>,
+    pub autonomy_confidence_basis: Option<String>,
+    pub prompt_hash: Option<String>,
+    pub dispatched_at: Option<i64>,
+    pub tracking_issue: Option<(String, String, u32)>,
+}
+
 /// Bundle returned by `ticket_history`: the sessions and commits that
 /// reference a given issue in a given repo. Consumers (recall-dispatch,
 /// JSON API) decide how to render.
@@ -373,6 +404,8 @@ impl CacheDb {
             let _ = write.open_table(ISSUE_REFS)?;
             let _ = write.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
             let _ = write.open_table(ISSUE_REFS_BY_SOURCE)?;
+            let _ = write.open_table(DISPATCHES)?;
+            let _ = write.open_table(DISPATCHES_BY_REPO)?;
         }
         write.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -1001,6 +1034,26 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// Return all dispatch records for a repo, newest-first by
+    /// `dispatched_at`. Empty when the repo has no `docs/repo-dispatch/`
+    /// or all files failed to parse.
+    pub fn dispatches_for_repo(&self, repo_id: i64) -> Result<Vec<DispatchRow>> {
+        let read = self.db.begin_read()?;
+        let by_repo = read.open_table(DISPATCHES_BY_REPO)?;
+        let dispatches = read.open_table(DISPATCHES)?;
+        let start = (id_to_u64(repo_id), i64::MIN, 0u64);
+        let end = (id_to_u64(repo_id) + 1, i64::MIN, 0u64);
+        let mut out = Vec::new();
+        for row in by_repo.range(start..end)? {
+            let (k, _v) = row?;
+            let (_rid, _sort, did) = k.value();
+            if let Some(g) = dispatches.get(did)? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+        }
+        Ok(out)
+    }
+
     /// Return the sessions and commits in the cache that reference a
     /// given issue in a given repo. Walks the `ISSUE_REFS_BY_REPO_ISSUE`
     /// secondary index, then loads source records. Empty result is the
@@ -1135,6 +1188,8 @@ impl CacheWriter<'_> {
         clear_table::<u64, &[u8]>(self.txn, ISSUE_REFS)?;
         clear_table::<(u64, u32, &str, u64), u64>(self.txn, ISSUE_REFS_BY_REPO_ISSUE)?;
         clear_table::<(&str, u64, u64, u32), ()>(self.txn, ISSUE_REFS_BY_SOURCE)?;
+        clear_table::<u64, &[u8]>(self.txn, DISPATCHES)?;
+        clear_table::<(u64, i64, u64), ()>(self.txn, DISPATCHES_BY_REPO)?;
         Ok(())
     }
 
@@ -1345,6 +1400,44 @@ impl CacheWriter<'_> {
             .open_table(COMMITS_BY_TS)?
             .insert((timestamp, id), ())?;
         Ok((u64_to_id(id), true))
+    }
+
+    /// Insert one parsed dispatch row into the cache. Each `(repo_id,
+    /// file_path)` pair must be unique — the caller controls this by
+    /// scanning a single directory per repo. Returns the assigned id.
+    pub fn insert_dispatch(
+        &self,
+        repo_id: i64,
+        rec: &crate::ingest::docs::repo_dispatch::DispatchRecord,
+    ) -> Result<i64> {
+        let id = next_id(self.txn, META_NEXT_DISPATCH)?;
+        let row = DispatchRow {
+            id: u64_to_id(id),
+            repo_id,
+            file_path: rec.file_path.clone(),
+            slug: rec.slug.clone(),
+            issue_refs: rec.issue_refs.clone(),
+            score: rec.score,
+            autonomy_confidence: rec.autonomy_confidence,
+            autonomy_confidence_basis: rec.autonomy_confidence_basis.clone(),
+            prompt_hash: rec.prompt_hash.clone(),
+            dispatched_at: rec.dispatched_at,
+            tracking_issue: rec.tracking_issue.clone(),
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        self.txn
+            .open_table(DISPATCHES)?
+            .insert(id, bytes.as_slice())?;
+        // Negate dispatched_at so a forward scan returns newest-first;
+        // rows without a timestamp use i64::MAX so they sort last.
+        let sort_key = match rec.dispatched_at {
+            Some(t) => -t,
+            None => i64::MAX,
+        };
+        self.txn
+            .open_table(DISPATCHES_BY_REPO)?
+            .insert((id_to_u64(repo_id), sort_key, id), ())?;
+        Ok(u64_to_id(id))
     }
 
     /// Record that a session or commit references a specific issue in a
