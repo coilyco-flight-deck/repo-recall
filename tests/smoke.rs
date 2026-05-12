@@ -13,10 +13,12 @@ use tokio::sync::Mutex;
 use repo_recall::{db::CacheDb, routes, AppState};
 
 async fn boot() -> (String, tokio::task::JoinHandle<()>) {
-    boot_with(repo_recall::commits::GhHealth::Ok).await
+    boot_with(repo_recall::ingest::git::log::GhHealth::Ok).await
 }
 
-async fn boot_with(gh: repo_recall::commits::GhHealth) -> (String, tokio::task::JoinHandle<()>) {
+async fn boot_with(
+    gh: repo_recall::ingest::git::log::GhHealth,
+) -> (String, tokio::task::JoinHandle<()>) {
     // Unique cache dir per test run so parallel `cargo test` invocations
     // don't collide.
     let cache_dir = std::env::temp_dir().join(format!("repo-recall-test-{}", uuid_like()));
@@ -240,7 +242,7 @@ async fn refresh_returns_accepted() {
 
 #[tokio::test]
 async fn gh_missing_shows_warning_banner() {
-    let (base, _h) = boot_with(repo_recall::commits::GhHealth::Missing).await;
+    let (base, _h) = boot_with(repo_recall::ingest::git::log::GhHealth::Missing).await;
     let body = reqwest::get(format!("{base}/"))
         .await
         .unwrap()
@@ -253,7 +255,7 @@ async fn gh_missing_shows_warning_banner() {
 
 #[tokio::test]
 async fn gh_ok_hides_warning_banner() {
-    let (base, _h) = boot_with(repo_recall::commits::GhHealth::Ok).await;
+    let (base, _h) = boot_with(repo_recall::ingest::git::log::GhHealth::Ok).await;
     let body = reqwest::get(format!("{base}/"))
         .await
         .unwrap()
@@ -338,7 +340,9 @@ async fn api_spans_filters_by_repo_and_since() {
         remote_target_limit: 0,
         refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_scan: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-        gh_health: std::sync::Arc::new(tokio::sync::Mutex::new(repo_recall::commits::GhHealth::Ok)),
+        gh_health: std::sync::Arc::new(tokio::sync::Mutex::new(
+            repo_recall::ingest::git::log::GhHealth::Ok,
+        )),
         my_gh_login: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         my_git_email: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         scan_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -570,7 +574,7 @@ async fn git_log_parses_commits() {
         "second: still nothing, with a \t tab",
     ]);
 
-    let records = repo_recall::commits::scan(&dir, 10).unwrap();
+    let records = repo_recall::ingest::git::log::scan(&dir, 10).unwrap();
     assert_eq!(
         records.len(),
         2,
@@ -627,7 +631,7 @@ async fn worktree_snapshot_drops_stat_stale_modifications() {
     // counts still come through unaffected.
     std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
 
-    let snap = repo_recall::commits::worktree_snapshot(&dir, 16);
+    let snap = repo_recall::ingest::git::log::worktree_snapshot(&dir, 16);
     assert_eq!(
         snap.total_modified, 0,
         "stat-stale modification should be dropped, got {} modified",

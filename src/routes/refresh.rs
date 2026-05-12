@@ -7,7 +7,7 @@ use chrono::Utc;
 
 use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::AppState;
-use crate::{commits, join, scanner, sessions, spans};
+use crate::{ingest::git, join, scanner, sessions, spans};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -45,7 +45,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
             w.wipe()?;
             let mut out = Vec::with_capacity(discovered.len());
             for r in &discovered {
-                let remote = commits::remote_info(&r.path);
+                let remote = git::log::remote_info(&r.path);
                 let id = w.upsert_repo(
                     &r.path.to_string_lossy(),
                     &r.name,
@@ -256,7 +256,7 @@ async fn ingest_gh_refs(state: AppState) -> usize {
         let mut by_slug: std::collections::HashMap<String, i64> =
             std::collections::HashMap::with_capacity(remotes.len());
         for (id, url) in remotes {
-            if let Some(slug) = commits::github_owner_repo(&url) {
+            if let Some(slug) = git::log::github_owner_repo(&url) {
                 by_slug.entry(slug.to_ascii_lowercase()).or_insert(id);
             }
         }
@@ -294,15 +294,15 @@ async fn ingest_gh_refs(state: AppState) -> usize {
 async fn ingest_ci_status(state: AppState) -> usize {
     // Re-probe `gh` on every refresh — the user may have installed it or
     // logged in since startup, and the banner should update.
-    let health = tokio::task::spawn_blocking(commits::gh_health)
+    let health = tokio::task::spawn_blocking(git::log::gh_health)
         .await
-        .unwrap_or(commits::GhHealth::Missing);
+        .unwrap_or(git::log::GhHealth::Missing);
     *state.gh_health.lock().await = health;
-    if health != commits::GhHealth::Ok {
+    if health != git::log::GhHealth::Ok {
         return 0;
     }
     // Re-probe viewer login so it updates if the user switched accounts.
-    let my_login = tokio::task::spawn_blocking(commits::my_gh_login)
+    let my_login = tokio::task::spawn_blocking(git::log::my_gh_login)
         .await
         .ok()
         .flatten();
@@ -328,8 +328,8 @@ async fn ingest_ci_status(state: AppState) -> usize {
     let jobs: Vec<_> = targets
         .into_iter()
         .filter_map(|(id, url, branch, path)| {
-            commits::github_owner_repo(&url).map(|slug| {
-                let deploy_wf = commits::find_deploy_workflow(std::path::Path::new(&path));
+            git::log::github_owner_repo(&url).map(|slug| {
+                let deploy_wf = git::log::find_deploy_workflow(std::path::Path::new(&path));
                 (id, slug, branch, deploy_wf)
             })
         })
@@ -349,13 +349,13 @@ async fn ingest_ci_status(state: AppState) -> usize {
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
             tokio::task::spawn_blocking(move || {
-                let ci = commits::ci_status(&slug, &branch);
-                let (prs, issues) = match commits::fetch_pr_and_issue_counts(&slug, &login) {
+                let ci = git::log::ci_status(&slug, &branch);
+                let (prs, issues) = match git::log::fetch_pr_and_issue_counts(&slug, &login) {
                     Some((p, i)) => (Some(p), Some(i)),
                     None => (None, None),
                 };
                 let deploy = deploy_wf.as_ref().and_then(|wf| {
-                    commits::fetch_deploy_health(&slug, wf, &branch).map(|h| (wf.clone(), h))
+                    git::log::fetch_deploy_health(&slug, wf, &branch).map(|h| (wf.clone(), h))
                 });
                 RemoteSnapshot {
                     id,
@@ -423,10 +423,10 @@ async fn ingest_ci_status(state: AppState) -> usize {
 /// unauthenticated. Caps at 100 repos — enough to surface the user's active
 /// workspace, small enough not to balloon the gh API budget.
 async fn ingest_active_repos(state: AppState) -> usize {
-    if *state.gh_health.lock().await != commits::GhHealth::Ok {
+    if *state.gh_health.lock().await != git::log::GhHealth::Ok {
         return 0;
     }
-    let actives = tokio::task::spawn_blocking(|| commits::fetch_active_repos(100))
+    let actives = tokio::task::spawn_blocking(|| git::log::fetch_active_repos(100))
         .await
         .unwrap_or_default();
     if actives.is_empty() {
@@ -459,9 +459,9 @@ async fn ingest_active_repos(state: AppState) -> usize {
 struct RemoteSnapshot {
     id: i64,
     ci: Option<String>,
-    prs: Option<commits::PrCounts>,
-    issues: Option<commits::IssueCounts>,
-    deploy: Option<(String, commits::DeployHealth)>,
+    prs: Option<git::log::PrCounts>,
+    issues: Option<git::log::IssueCounts>,
+    deploy: Option<(String, git::log::DeployHealth)>,
 }
 
 struct RefreshStats {
@@ -529,7 +529,7 @@ fn ingest_commits(
     cache_db.write_batch(|w| {
         let mut total_commits = 0usize;
         for (repo_id, repo_path) in repos.iter() {
-            match commits::scan(repo_path, limit_per_repo) {
+            match git::log::scan(repo_path, limit_per_repo) {
                 Ok(records) => {
                     for rec in &records {
                         w.upsert_commit(
@@ -549,7 +549,7 @@ fn ingest_commits(
             }
             // Per-file change records for the last 30d — source of truth for
             // both the scalar churn total and the hotspot query.
-            let file_changes = commits::file_changes_since(repo_path, churn_cutoff);
+            let file_changes = git::log::file_changes_since(repo_path, churn_cutoff);
             let churn: i64 = file_changes
                 .iter()
                 .map(|fc| fc.additions + fc.deletions)
@@ -568,8 +568,8 @@ fn ingest_commits(
             // Cap per-repo at 50 paths: enough for the dashboard sample,
             // small enough that a pathological refactor cannot blow up the
             // DB.
-            let snap = commits::worktree_snapshot(repo_path, 50);
-            let local = commits::local_state(repo_path);
+            let snap = git::log::worktree_snapshot(repo_path, 50);
+            let local = git::log::local_state(repo_path);
             w.update_repo_local_state(
                 *repo_id,
                 churn,

@@ -939,7 +939,7 @@ impl CacheDb {
     /// the gh-ref session-link pass to map `<owner>/<repo>` references in
     /// session text back onto a discovered repo's GitHub remote. Repos
     /// without a remote (or with a non-GitHub remote) are filtered out by
-    /// the caller via `commits::github_owner_repo`.
+    /// the caller via `ingest::git::log::github_owner_repo`.
     pub fn iter_repo_ids_and_remotes(&self) -> Result<Vec<(i64, String)>> {
         let read = self.db.begin_read()?;
         let mut out = Vec::new();

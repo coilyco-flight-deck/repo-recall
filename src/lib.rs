@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub mod activity;
-pub mod commits;
 pub mod db;
 pub mod display;
 pub mod ingest;
@@ -38,7 +37,7 @@ pub struct AppState {
     /// State of the local `gh` CLI. Updated at startup and re-checked at the
     /// start of each refresh so the banner disappears as soon as the user
     /// installs / logs in.
-    pub gh_health: Arc<Mutex<commits::GhHealth>>,
+    pub gh_health: Arc<Mutex<ingest::git::log::GhHealth>>,
     /// GitHub login of the authenticated user, cached from `gh api user`.
     /// `None` when `gh_health != Ok`. Drives the "awaiting my review" split.
     pub my_gh_login: Arc<Mutex<Option<String>>>,

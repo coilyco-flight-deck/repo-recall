@@ -512,8 +512,8 @@ pub async fn index(
     page_with_banners("dashboard", body, Some(gh_health)).into_response()
 }
 
-fn gh_health_str(h: crate::commits::GhHealth) -> &'static str {
-    use crate::commits::GhHealth;
+fn gh_health_str(h: crate::ingest::git::log::GhHealth) -> &'static str {
+    use crate::ingest::git::log::GhHealth;
     match h {
         GhHealth::Ok => "ok",
         GhHealth::NotAuthenticated => "not_authenticated",

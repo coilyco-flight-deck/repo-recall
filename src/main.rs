@@ -6,7 +6,7 @@ use miette::{IntoDiagnostic, WrapErr};
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use repo_recall::{commits, db::CacheDb, mcp, routes, search, AppState};
+use repo_recall::{db::CacheDb, ingest::git, mcp, routes, search, AppState};
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -91,9 +91,9 @@ async fn main() -> miette::Result<()> {
     let scan_depth: usize = env_usize("REPO_RECALL_DEPTH", 4);
     let commits_per_repo: usize = env_usize("REPO_RECALL_COMMITS_PER_REPO", 500);
 
-    let gh_health = commits::gh_health();
-    let my_gh_login = if gh_health == commits::GhHealth::Ok {
-        commits::my_gh_login()
+    let gh_health = git::log::gh_health();
+    let my_gh_login = if gh_health == git::log::GhHealth::Ok {
+        git::log::my_gh_login()
     } else {
         None
     };

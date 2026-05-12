@@ -5,8 +5,8 @@ use axum::response::Html;
 use chrono::{DateTime, Utc};
 use maud::{html, Markup, DOCTYPE};
 
-use crate::commits::GhHealth;
 use crate::db;
+use crate::ingest::git::log::GhHealth;
 
 /// Set once at startup from `main.rs` so the layout header can show the scan
 /// root without threading it through every `page(..)` call site.
