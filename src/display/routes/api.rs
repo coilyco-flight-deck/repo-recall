@@ -229,6 +229,48 @@ pub async fn spans(
     json_with_etag(&headers, body.scan_version, &body)
 }
 
+/// `POST /api/repos/{id}/dispatches` - emit a new dispatch artifact
+/// (#92, #107). Body shape is `EmitDispatchRequest`. Writes the
+/// write-once file in-repo at `docs/repo-dispatch/<slug>.md` and
+/// mirrors to `~/.repo-recall/dispatch/<repo>/<slug>.md` for the
+/// pollable consumer surface. Returns 409 if the slug already exists,
+/// 422 on invalid input.
+pub async fn emit_dispatch(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    axum::Json(req): axum::Json<crate::display::dispatch_artifacts::EmitDispatchRequest>,
+) -> Response {
+    let cache = state.cache_db.clone();
+    let repo = match tokio::task::spawn_blocking(move || cache.get_repo(repo_id)).await {
+        Ok(Ok(Some(r))) => r,
+        Ok(Ok(None)) => return axum::http::StatusCode::NOT_FOUND.into_response(),
+        _ => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let repo_path = std::path::PathBuf::from(&repo.path);
+    let repo_name = repo.name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::display::dispatch_artifacts::emit_dispatch(&repo_path, &repo_name, &req)
+    })
+    .await;
+    use crate::display::dispatch_artifacts::EmitError;
+    match result {
+        Ok(Ok(resp)) => axum::Json(resp).into_response(),
+        Ok(Err(EmitError::AlreadyExists(p))) => {
+            (axum::http::StatusCode::CONFLICT, p).into_response()
+        }
+        Ok(Err(EmitError::NoIssueRefs)) | Ok(Err(EmitError::InvalidRef(_))) => (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid dispatch request",
+        )
+            .into_response(),
+        Ok(Err(EmitError::Io(e))) => {
+            tracing::warn!("emit_dispatch io: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// `GET /api/autonomy/metrics` - AFK success-rate rollup from closed
 /// repo-dispatch tracking issues (#92, #116). ETag on `scan_version`.
 pub async fn autonomy_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {

@@ -1,6 +1,6 @@
 //! MCP App server. Tools expose repo-recall's data layer to MCP hosts.
 //!
-//! Eight tools:
+//! Nine tools:
 //!
 //! - `recall_dashboard` — repo list + action-required + counts.
 //! - `recall_repo` — single repo detail.
@@ -9,6 +9,7 @@
 //! - `recall_action_required` — thin orchestrator slice.
 //! - `recall_ticket_history` — sessions + commits touching one issue.
 //! - `recall_autonomy_metrics` — AFK success rate from dispatch ledger.
+//! - `recall_record_dispatch` — emit a new write-once dispatch artifact.
 //! - `recall_refresh` — trigger a rescan.
 
 use std::sync::atomic::Ordering;
@@ -111,6 +112,20 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
+    let record_dispatch = {
+        let state = state.clone();
+        TypedTool::new("recall_record_dispatch", move |args, extra| {
+            let s = state.clone();
+            Box::pin(tools::record_dispatch(s, args, extra))
+        })
+        .with_description(
+            "Emit a new write-once dispatch artifact. Writes both the in-repo \
+             docs/repo-dispatch/<slug>.md (canonical, gets committed by the caller) \
+             and ~/.repo-recall/dispatch/<repo>/<slug>.md (pollable mirror for \
+             sub-agent runners). Refuses to overwrite an existing slug.",
+        )
+    };
+
     let refresh_tool = {
         let state = state.clone();
         TypedTool::new("recall_refresh", move |args, extra| {
@@ -134,6 +149,7 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_action_required", action_required)
         .tool("recall_ticket_history", ticket_history)
         .tool("recall_autonomy_metrics", autonomy_metrics)
+        .tool("recall_record_dispatch", record_dispatch)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;

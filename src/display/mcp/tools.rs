@@ -337,6 +337,74 @@ pub async fn ticket_history(
 }
 
 // -----------------------------------------------------------------------------
+// recall_record_dispatch
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecordDispatchArgs {
+    /// Repo ID from `recall_dashboard`.
+    pub repo_id: i64,
+    /// `["owner/repo#N", ...]` cited tickets.
+    pub issue_refs: Vec<String>,
+    pub score: Option<i64>,
+    pub autonomy_confidence: Option<i64>,
+    pub autonomy_confidence_basis: Option<String>,
+    /// `"owner/repo#M"` for the thin tracking issue, if one exists.
+    pub tracking_issue: Option<String>,
+    /// The verbatim prompt body.
+    pub prompt: String,
+    /// Optional override for the dispatch slug.
+    pub slug: Option<String>,
+}
+
+/// Emit a new dispatch artifact (#92, #107). Writes a write-once
+/// markdown file inside the repo at `docs/repo-dispatch/<slug>.md`
+/// and mirrors it to `~/.repo-recall/dispatch/<repo>/<slug>.md` for
+/// pollable consumption.
+pub async fn record_dispatch(
+    state: AppState,
+    args: RecordDispatchArgs,
+    _extra: RequestHandlerExtra,
+) -> pmcp::Result<Value> {
+    let cache = state.cache_db.clone();
+    let repo_id = args.repo_id;
+    let repo = tokio::task::spawn_blocking(move || cache.get_repo(repo_id))
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?
+        .ok_or_else(|| pmcp::Error::not_found(format!("repo {repo_id} not found")))?;
+    let req = crate::display::dispatch_artifacts::EmitDispatchRequest {
+        issue_refs: args.issue_refs,
+        score: args.score,
+        autonomy_confidence: args.autonomy_confidence,
+        autonomy_confidence_basis: args.autonomy_confidence_basis,
+        tracking_issue: args.tracking_issue,
+        prompt: args.prompt,
+        slug: args.slug,
+    };
+    let repo_path = std::path::PathBuf::from(&repo.path);
+    let repo_name = repo.name.clone();
+    let resp = tokio::task::spawn_blocking(move || {
+        crate::display::dispatch_artifacts::emit_dispatch(&repo_path, &repo_name, &req)
+    })
+    .await
+    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+    .map_err(|e| match e {
+        crate::display::dispatch_artifacts::EmitError::AlreadyExists(p) => {
+            pmcp::Error::validation(format!("dispatch already exists: {p}"))
+        }
+        crate::display::dispatch_artifacts::EmitError::NoIssueRefs
+        | crate::display::dispatch_artifacts::EmitError::InvalidRef(_) => {
+            pmcp::Error::validation(format!("invalid dispatch request: {e}"))
+        }
+        crate::display::dispatch_artifacts::EmitError::Io(_) => {
+            pmcp::Error::internal(format!("emit io: {e}"))
+        }
+    })?;
+    serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+}
+
+// -----------------------------------------------------------------------------
 // recall_autonomy_metrics
 // -----------------------------------------------------------------------------
 
