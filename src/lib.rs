@@ -8,7 +8,6 @@ pub mod activity;
 pub mod db;
 pub mod display;
 pub mod ingest;
-pub mod join;
 pub mod mcp;
 pub mod process;
 pub mod routes;

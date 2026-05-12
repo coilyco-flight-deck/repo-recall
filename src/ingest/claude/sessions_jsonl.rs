@@ -360,7 +360,7 @@ pub fn gh_refs_in_file(path: &Path) -> Vec<(String, String)> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let mut hits = crate::join::gh_refs_in_text(&content);
+    let mut hits = crate::process::join::gh_refs_in_text(&content);
     hits.sort();
     hits.dedup();
     hits

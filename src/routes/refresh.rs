@@ -7,8 +7,9 @@ use chrono::Utc;
 
 use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::ingest::claude::sessions_jsonl as sessions;
+use crate::process::join;
 use crate::AppState;
-use crate::{ingest::git, join, spans};
+use crate::{ingest::git, spans};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
