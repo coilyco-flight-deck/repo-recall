@@ -25,6 +25,11 @@ struct RepoDetailJson {
     sessions: Vec<db::Session>,
     commits: Vec<db::Commit>,
     hotspots: Vec<db::FileHotspot>,
+    /// Parsed write-once dispatch records under `docs/repo-dispatch/`
+    /// for this repo (#92, #113, #117). Newest-first.
+    dispatches: Vec<db::DispatchRow>,
+    /// Open structural-ask issues filed against this repo (#114, #117).
+    structural_asks: Vec<db::LabeledIssueRow>,
     scan_version: u64,
 }
 
@@ -54,12 +59,29 @@ pub async fn detail(
         } else {
             Vec::new()
         };
-        Ok((repo, sessions, commits, hotspots))
+        let dispatches = if repo.is_some() {
+            cache.dispatches_for_repo(id)?
+        } else {
+            Vec::new()
+        };
+        let structural_asks = if repo.is_some() {
+            cache.labeled_issues_for_repo(id, "structural-ask")?
+        } else {
+            Vec::new()
+        };
+        Ok((
+            repo,
+            sessions,
+            commits,
+            hotspots,
+            dispatches,
+            structural_asks,
+        ))
     })
     .await
     .unwrap();
 
-    let (repo, sessions, commits, hotspots) = match data {
+    let (repo, sessions, commits, hotspots, dispatches, structural_asks) = match data {
         Ok(d) => d,
         Err(e) => {
             return (
@@ -85,6 +107,8 @@ pub async fn detail(
             sessions,
             commits,
             hotspots,
+            dispatches,
+            structural_asks,
             scan_version: v,
         };
         return json_with_etag(&headers, v, &body);
@@ -114,6 +138,78 @@ pub async fn detail(
             }
             div id={ "repo-action-pull-" (repo.id) } {}
             div id={ "repo-action-push-" (repo.id) } {}
+        }
+        @if !dispatches.is_empty() {
+            section class={ (PANEL) " mt-4" } {
+                h2 class=(H2) { "repo-dispatch (" (dispatches.len()) ")" }
+                ul class="list-none p-0 m-0" {
+                    @for d in &dispatches {
+                        li class=(LI) {
+                            div class=(ROW) {
+                                span class="font-mono text-[11px] break-all font-semibold" { (d.file_path) }
+                            }
+                            div class={ (ROW) " " (META) } {
+                                @if let Some(ts) = d.dispatched_at { span { (relative_time(Some(ts))) } }
+                                @if let Some(s) = d.score { span { "score " (s) } }
+                                @if let Some(c) = d.autonomy_confidence {
+                                    span { "autonomy " (c) "/5" }
+                                }
+                                @if let Some((owner, repo_name, n)) = &d.tracking_issue {
+                                    span {
+                                        a class=(LINK)
+                                          href={ "https://github.com/" (owner) "/" (repo_name) "/issues/" (n) }
+                                          target="_blank" rel="noopener" {
+                                            "tracking #" (n)
+                                        }
+                                    }
+                                }
+                            }
+                            @if !d.issue_refs.is_empty() {
+                                div class={ (ROW) " " (META) } {
+                                    @for (o, r, n) in &d.issue_refs {
+                                        a class=(LINK)
+                                          href={ "https://github.com/" (o) "/" (r) "/issues/" (n) }
+                                          target="_blank" rel="noopener" {
+                                            (o) "/" (r) "#" (n)
+                                        }
+                                    }
+                                }
+                            }
+                            @if let Some(basis) = &d.autonomy_confidence_basis {
+                                div class="text-[11px] text-[#574f7d]/70 italic mt-0.5" { (basis) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        @if !structural_asks.is_empty() {
+            section class={ (PANEL) " mt-4" } {
+                h2 class=(H2) { "open structural-asks (" (structural_asks.len()) ")" }
+                ul class="list-none p-0 m-0" {
+                    @for a in &structural_asks {
+                        li class=(LI) {
+                            div class=(ROW) {
+                                @match repo.remote_url.as_deref() {
+                                    Some(url) if !url.is_empty() => {
+                                        a class={ (LINK) " font-semibold" }
+                                          href={ (url) "/issues/" (a.number) }
+                                          target="_blank" rel="noopener" {
+                                            "#" (a.number) " " (a.title)
+                                        }
+                                    }
+                                    _ => {
+                                        span class="font-semibold" { "#" (a.number) " " (a.title) }
+                                    }
+                                }
+                            }
+                            div class={ (ROW) " " (META) } {
+                                span { (relative_time(Some(a.created_at))) }
+                            }
+                        }
+                    }
+                }
+            }
         }
         @if !hotspots.is_empty() {
             section class={ (PANEL) " mt-4" } {
