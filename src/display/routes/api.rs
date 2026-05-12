@@ -57,12 +57,15 @@ pub struct ActionRequiredResponse {
 /// to `/`). Honors `If-None-Match` against the `scan_version` ETag so a
 /// polling client gets `304` between scans.
 pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let state2 = state.clone();
-    let repos =
-        match tokio::task::spawn_blocking(move || state2.cache_db.list_repos_with_counts()).await {
-            Ok(Ok(rs)) => rs,
-            _ => Vec::new(),
-        };
+    let cache = state.cache_db.clone();
+    let stale_after = stale_ask_threshold_secs();
+    let (repos, dispatch_sigs) = tokio::task::spawn_blocking(move || {
+        let repos = cache.list_repos_with_counts().unwrap_or_default();
+        let sigs = cache.dispatch_signals(stale_after).unwrap_or_default();
+        (repos, sigs)
+    })
+    .await
+    .unwrap_or_default();
 
     let mut items = Vec::new();
     for r in &repos {
@@ -84,6 +87,24 @@ pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) 
             });
         }
     }
+    // Append dispatch-substrate signals (#92, #115). Look up repo
+    // identity per signal so the JSON envelope stays self-contained.
+    let repo_lookup: std::collections::HashMap<i64, &crate::db::Repo> =
+        repos.iter().map(|r| (r.id, r)).collect();
+    for s in &dispatch_sigs {
+        if let Some(r) = repo_lookup.get(&s.repo_id) {
+            items.push(ActionRequiredItem {
+                id: format!("{}:{}", s.repo_id, s.signal),
+                repo_id: s.repo_id,
+                repo_name: r.name.clone(),
+                repo_path: r.path.clone(),
+                remote_url: r.remote_url.clone(),
+                signal: s.signal,
+                detail: s.detail.clone(),
+                review_requested_files: Vec::new(),
+            });
+        }
+    }
 
     let body = ActionRequiredResponse {
         repos: items,
@@ -91,6 +112,17 @@ pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) 
         scan_version: state.scan_version.load(Ordering::Acquire),
     };
     json_with_etag(&headers, body.scan_version, &body)
+}
+
+/// Threshold for the `stale_ask` signal, in seconds. Configurable via
+/// `REPO_RECALL_STALE_ASK_DAYS` (default 7). Designed in #92, #115:
+/// "the point of this system is to inspire work."
+pub(crate) fn stale_ask_threshold_secs() -> i64 {
+    std::env::var("REPO_RECALL_STALE_ASK_DAYS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(7)
+        * 86_400
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -331,6 +331,16 @@ pub struct DispatchRow {
     pub tracking_issue: Option<(String, String, u32)>,
 }
 
+/// One dispatch-substrate signal (#92, #115). Distinct from the
+/// per-Repo `derive_action_signals` because the input rows live in
+/// `LABELED_ISSUES`, not on the `Repo` row itself.
+#[derive(Debug, Clone, Serialize)]
+pub struct DispatchSignal {
+    pub repo_id: i64,
+    pub signal: &'static str,
+    pub detail: String,
+}
+
 /// Bundle returned by `ticket_history`: the sessions and commits that
 /// reference a given issue in a given repo. Consumers (recall-dispatch,
 /// JSON API) decide how to render.
@@ -1066,6 +1076,68 @@ impl CacheDb {
             if let Some(url) = r.remote_url {
                 out.push((r.id, url));
             }
+        }
+        Ok(out)
+    }
+
+    /// Per-repo signal entries derived from the labeled-issues table.
+    /// Emits at most one entry per `(repo, signal)` to match the
+    /// existing `recall_action_required` shape:
+    ///
+    /// - `autonomous_block` — N>=1 open `autonomous-block` issues.
+    /// - `stale_ask` — N>=1 open `structural-ask` issues older than
+    ///   `stale_after_secs`.
+    ///
+    /// Designed in #92, #115. Detail strings include the oldest issue
+    /// number so the dashboard can deep-link to the one most worth
+    /// resolving.
+    pub fn dispatch_signals(&self, stale_after_secs: i64) -> Result<Vec<DispatchSignal>> {
+        let blocks = self.labeled_issues_by_state("autonomous-block", "open")?;
+        let asks = self.labeled_issues_by_state("structural-ask", "open")?;
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - stale_after_secs;
+
+        let mut by_repo_blocks: BTreeMap<i64, Vec<LabeledIssueRow>> = BTreeMap::new();
+        for b in blocks {
+            by_repo_blocks.entry(b.repo_id).or_default().push(b);
+        }
+        let mut by_repo_stale: BTreeMap<i64, Vec<LabeledIssueRow>> = BTreeMap::new();
+        for a in asks {
+            if a.created_at > 0 && a.created_at < cutoff {
+                by_repo_stale.entry(a.repo_id).or_default().push(a);
+            }
+        }
+
+        let mut out = Vec::new();
+        for (repo_id, mut rows) in by_repo_blocks {
+            rows.sort_by_key(|r| r.created_at);
+            let oldest = &rows[0];
+            let n = rows.len();
+            out.push(DispatchSignal {
+                repo_id,
+                signal: "autonomous_block",
+                detail: format!(
+                    "{n} autonomous-block issue{} open (oldest: #{})",
+                    if n == 1 { "" } else { "s" },
+                    oldest.number,
+                ),
+            });
+        }
+        for (repo_id, mut rows) in by_repo_stale {
+            rows.sort_by_key(|r| r.created_at);
+            let oldest = &rows[0];
+            let n = rows.len();
+            let days = (now - oldest.created_at) / 86_400;
+            out.push(DispatchSignal {
+                repo_id,
+                signal: "stale_ask",
+                detail: format!(
+                    "{n} structural-ask{} open >{} days (oldest: #{}, {days}d)",
+                    if n == 1 { "" } else { "s" },
+                    stale_after_secs / 86_400,
+                    oldest.number,
+                ),
+            });
         }
         Ok(out)
     }

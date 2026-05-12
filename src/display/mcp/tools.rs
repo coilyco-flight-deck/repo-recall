@@ -260,10 +260,15 @@ pub async fn action_required(
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
     let cache = state.cache_db.clone();
-    let repos = tokio::task::spawn_blocking(move || cache.list_repos_with_counts())
-        .await
-        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+    let stale_after = crate::display::routes::api::stale_ask_threshold_secs();
+    let (repos, dispatch_sigs) = tokio::task::spawn_blocking(move || {
+        (
+            cache.list_repos_with_counts().unwrap_or_default(),
+            cache.dispatch_signals(stale_after).unwrap_or_default(),
+        )
+    })
+    .await
+    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?;
 
     let mut items = Vec::new();
     for r in &repos {
@@ -275,6 +280,20 @@ pub async fn action_required(
                 repo_path: r.path.clone(),
                 signal: sig.signal,
                 detail: sig.detail,
+            });
+        }
+    }
+    let repo_lookup: std::collections::HashMap<i64, &db::Repo> =
+        repos.iter().map(|r| (r.id, r)).collect();
+    for s in &dispatch_sigs {
+        if let Some(r) = repo_lookup.get(&s.repo_id) {
+            items.push(ActionRequiredEntry {
+                id: format!("{}:{}", s.repo_id, s.signal),
+                repo_id: s.repo_id,
+                repo_name: r.name.clone(),
+                repo_path: r.path.clone(),
+                signal: s.signal,
+                detail: s.detail.clone(),
             });
         }
     }
