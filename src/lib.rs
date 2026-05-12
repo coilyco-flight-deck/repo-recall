@@ -12,7 +12,6 @@ pub mod join;
 pub mod mcp;
 pub mod process;
 pub mod routes;
-pub mod scanner;
 pub mod search;
 pub mod signals;
 pub mod spans;

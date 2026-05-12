@@ -4,4 +4,5 @@
 //! `commits.rs` and still contains a few github-CLI helpers that will
 //! split out into `crate::ingest::github::*` in a follow-up. See #92.
 
+pub mod discovery;
 pub mod log;

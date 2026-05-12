@@ -8,7 +8,7 @@ use chrono::Utc;
 use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::ingest::claude::sessions_jsonl as sessions;
 use crate::AppState;
-use crate::{ingest::git, join, scanner, spans};
+use crate::{ingest::git, join, spans};
 
 pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     tokio::spawn(async move {
@@ -40,7 +40,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RefreshStats> {
         // Phase 1: discovery + repo upserts. One write transaction.
-        let discovered = scanner::scan(&cwd, scan_depth)?;
+        let discovered = git::discovery::scan(&cwd, scan_depth)?;
         let now = Utc::now().timestamp();
         let repo_id_by_path: Vec<(i64, PathBuf)> = cache_db.write_batch(|w| {
             w.wipe()?;
