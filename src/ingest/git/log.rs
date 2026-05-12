@@ -911,6 +911,112 @@ pub fn my_gh_login() -> Option<String> {
     }
 }
 
+/// One GitHub issue surfaced by `gh issue list --label LABEL`. Used by
+/// the recall-dispatch substrate (#92) to surface structural-ask,
+/// autonomous-block, and repo-dispatch tracking issues without forcing
+/// every consumer to re-query the API.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LabeledIssue {
+    pub number: i64,
+    pub title: String,
+    /// RFC3339 createdAt parsed to unix seconds (0 when missing).
+    pub created_at: i64,
+    /// Full label list from gh, included so a single fetch can serve
+    /// multi-label filtering downstream without re-fetching.
+    pub labels: Vec<String>,
+    /// Open or closed at fetch time.
+    pub state: String,
+    /// RFC3339 closedAt parsed to unix seconds, when state == "CLOSED".
+    pub closed_at: Option<i64>,
+}
+
+/// Fetch issues from one GitHub repo filtered by label and state. Returns
+/// `None` on any subprocess / parse failure so a single repo's gh
+/// hiccup cannot kill the whole pass.
+///
+/// `state` accepts gh's values: `"open"`, `"closed"`, `"all"`. `limit`
+/// is forwarded to `gh issue list --limit`.
+pub fn fetch_issues_with_label(
+    owner_repo: &str,
+    label: &str,
+    state: &str,
+    limit: usize,
+) -> Option<Vec<LabeledIssue>> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            owner_repo,
+            "--label",
+            label,
+            "--state",
+            state,
+            "--limit",
+            &limit.to_string(),
+            "--json",
+            "number,title,createdAt,closedAt,labels,state",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        tracing::debug!(
+            "gh issue list failed for {owner_repo} label={label} state={state}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let arr: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let items = arr.as_array()?;
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let number = it.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
+        if number == 0 {
+            continue;
+        }
+        let title = it
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let created_at = it
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.timestamp())
+            .unwrap_or(0);
+        let closed_at = it
+            .get("closedAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.timestamp());
+        let labels = it
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|l| l.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let state = it
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OPEN")
+            .to_string();
+        out.push(LabeledIssue {
+            number,
+            title,
+            created_at,
+            labels,
+            state,
+            closed_at,
+        });
+    }
+    Some(out)
+}
+
 /// One entry from `gh repo list --json …` — the viewer's GitHub repos
 /// regardless of whether they're cloned locally. Drives the dashboard's
 /// "active repos not cloned yet" panel.

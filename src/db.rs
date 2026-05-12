@@ -79,6 +79,18 @@ const ACTIVE_REPOS_BY_PUSHED_AT: TableDefinition<(i64, u64), ()> =
 const SPANS_BY_TRACE_SPAN: TableDefinition<(&str, &str), u64> =
     TableDefinition::new("spans_by_trace_span");
 
+// Labeled issues pulled from GitHub (#92, #114, #115, #116). One row per
+// (repo, label, number) so multiple ingest passes can write to the same
+// table without colliding. Wipe-on-refresh like everything else.
+const LABELED_ISSUES: TableDefinition<u64, &[u8]> = TableDefinition::new("labeled_issues");
+// (repo_id, label, number) -> row_id. Primary natural-key dedup.
+const LABELED_ISSUES_BY_REPO_LABEL_NUMBER: TableDefinition<(u64, &str, i64), u64> =
+    TableDefinition::new("labeled_issues_by_repo_label_number");
+// (label, state, repo_id, number) -> () for the cross-repo view ("every
+// open structural-ask across the workspace").
+const LABELED_ISSUES_BY_LABEL_STATE: TableDefinition<(&str, &str, u64, i64), ()> =
+    TableDefinition::new("labeled_issues_by_label_state");
+
 // Dispatch records: parsed `docs/repo-dispatch/*.md` files for each repo.
 // Designed in #92, #113 - dispatch artifacts are write-once on disk, with
 // status tracked on a thin GitHub issue. The cache mirror lets the per-repo
@@ -111,6 +123,7 @@ const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
 const META_NEXT_SPAN: &str = "next_span_id";
 const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 const META_NEXT_DISPATCH: &str = "next_dispatch_id";
+const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
@@ -280,6 +293,26 @@ pub mod issue_ref_source {
     pub const COMMIT: &str = "commit";
 }
 
+/// One labeled GitHub issue row in the cache. Records a single
+/// `(repo, label, issue)` association — the same underlying issue
+/// can land in multiple rows (one per matching label of interest),
+/// which keeps downstream queries on a single index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabeledIssueRow {
+    pub id: i64,
+    pub repo_id: i64,
+    /// Lowercase label name (kept distinct from the `labels` field which
+    /// preserves GitHub's casing for display).
+    pub label: String,
+    pub number: i64,
+    pub title: String,
+    pub created_at: i64,
+    pub closed_at: Option<i64>,
+    /// `"OPEN"` / `"CLOSED"`.
+    pub state: String,
+    pub labels: Vec<String>,
+}
+
 /// One stored dispatch row in the cache. Mirrors the parsed
 /// `docs/repo-dispatch/*.md` shape with the `repo_id` and assigned
 /// `dispatch_id` added.
@@ -406,6 +439,9 @@ impl CacheDb {
             let _ = write.open_table(ISSUE_REFS_BY_SOURCE)?;
             let _ = write.open_table(DISPATCHES)?;
             let _ = write.open_table(DISPATCHES_BY_REPO)?;
+            let _ = write.open_table(LABELED_ISSUES)?;
+            let _ = write.open_table(LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
+            let _ = write.open_table(LABELED_ISSUES_BY_LABEL_STATE)?;
         }
         write.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -1034,6 +1070,60 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// Cross-repo view: every labeled issue matching `label` (lowercased)
+    /// and `state` ("open" / "closed"). Used by the structural-asks and
+    /// autonomous-blocks panels (#92, #114, #115).
+    pub fn labeled_issues_by_state(
+        &self,
+        label: &str,
+        state: &str,
+    ) -> Result<Vec<LabeledIssueRow>> {
+        let read = self.db.begin_read()?;
+        let by_label_state = read.open_table(LABELED_ISSUES_BY_LABEL_STATE)?;
+        let issues_t = read.open_table(LABELED_ISSUES)?;
+        let key_t = read.open_table(LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
+        let label_lc = label.to_ascii_lowercase();
+        let state_lc = state.to_ascii_lowercase();
+        let start = (label_lc.as_str(), state_lc.as_str(), 0u64, i64::MIN);
+        let end = (label_lc.as_str(), state_lc.as_str(), u64::MAX, i64::MAX);
+        let mut out = Vec::new();
+        for row in by_label_state.range(start..end)? {
+            let (k, _v) = row?;
+            let (_label, _state, repo_id, number) = k.value();
+            let key = (repo_id, label_lc.as_str(), number);
+            if let Some(g) = key_t.get(key)? {
+                if let Some(row_g) = issues_t.get(g.value())? {
+                    out.push(serde_json::from_slice(row_g.value())?);
+                }
+            }
+        }
+        out.sort_by_key(|r: &LabeledIssueRow| std::cmp::Reverse(r.created_at));
+        Ok(out)
+    }
+
+    /// Per-repo view: every labeled issue matching `label` for one repo.
+    pub fn labeled_issues_for_repo(
+        &self,
+        repo_id: i64,
+        label: &str,
+    ) -> Result<Vec<LabeledIssueRow>> {
+        let read = self.db.begin_read()?;
+        let by_key = read.open_table(LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
+        let issues_t = read.open_table(LABELED_ISSUES)?;
+        let label_lc = label.to_ascii_lowercase();
+        let start = (id_to_u64(repo_id), label_lc.as_str(), i64::MIN);
+        let end = (id_to_u64(repo_id), label_lc.as_str(), i64::MAX);
+        let mut out = Vec::new();
+        for row in by_key.range(start..end)? {
+            let (_k, v) = row?;
+            if let Some(g) = issues_t.get(v.value())? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+        }
+        out.sort_by_key(|r: &LabeledIssueRow| std::cmp::Reverse(r.created_at));
+        Ok(out)
+    }
+
     /// Return all dispatch records for a repo, newest-first by
     /// `dispatched_at`. Empty when the repo has no `docs/repo-dispatch/`
     /// or all files failed to parse.
@@ -1190,6 +1280,9 @@ impl CacheWriter<'_> {
         clear_table::<(&str, u64, u64, u32), ()>(self.txn, ISSUE_REFS_BY_SOURCE)?;
         clear_table::<u64, &[u8]>(self.txn, DISPATCHES)?;
         clear_table::<(u64, i64, u64), ()>(self.txn, DISPATCHES_BY_REPO)?;
+        clear_table::<u64, &[u8]>(self.txn, LABELED_ISSUES)?;
+        clear_table::<(u64, &str, i64), u64>(self.txn, LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
+        clear_table::<(&str, &str, u64, i64), ()>(self.txn, LABELED_ISSUES_BY_LABEL_STATE)?;
         Ok(())
     }
 
@@ -1400,6 +1493,52 @@ impl CacheWriter<'_> {
             .open_table(COMMITS_BY_TS)?
             .insert((timestamp, id), ())?;
         Ok((u64_to_id(id), true))
+    }
+
+    /// Insert (or replace) one labeled-issue row in the cache.
+    /// `label` is forced lowercase for index stability; the original
+    /// case is preserved in the row's `labels` vector. Idempotent on
+    /// `(repo_id, label, number)`.
+    pub fn upsert_labeled_issue(
+        &self,
+        repo_id: i64,
+        label: &str,
+        issue: &crate::ingest::git::log::LabeledIssue,
+    ) -> Result<i64> {
+        let label_lc = label.to_ascii_lowercase();
+        let mut by_key = self.txn.open_table(LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
+        let key = (id_to_u64(repo_id), label_lc.as_str(), issue.number);
+        if let Some(g) = by_key.get(key)? {
+            return Ok(u64_to_id(g.value()));
+        }
+        let id = next_id(self.txn, META_NEXT_LABELED_ISSUE)?;
+        let row = LabeledIssueRow {
+            id: u64_to_id(id),
+            repo_id,
+            label: label_lc.clone(),
+            number: issue.number,
+            title: issue.title.clone(),
+            created_at: issue.created_at,
+            closed_at: issue.closed_at,
+            state: issue.state.clone(),
+            labels: issue.labels.clone(),
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        self.txn
+            .open_table(LABELED_ISSUES)?
+            .insert(id, bytes.as_slice())?;
+        by_key.insert(key, id)?;
+        let state_lc = issue.state.to_ascii_lowercase();
+        self.txn.open_table(LABELED_ISSUES_BY_LABEL_STATE)?.insert(
+            (
+                label_lc.as_str(),
+                state_lc.as_str(),
+                id_to_u64(repo_id),
+                issue.number,
+            ),
+            (),
+        )?;
+        Ok(u64_to_id(id))
     }
 
     /// Insert one parsed dispatch row into the cache. Each `(repo_id,

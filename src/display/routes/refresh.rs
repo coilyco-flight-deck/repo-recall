@@ -205,6 +205,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let gh_ref_matches = ingest_gh_refs(state.clone()).await;
     let _ = gh_ref_matches;
 
+    // Labeled-issue pass (#92, #114). Pulls open structural-ask issues
+    // from every GitHub-hosted repo so the recall-dispatch planner can
+    // tell which structural questions Kai has already opened. Same
+    // best-effort posture as `ingest_ci_status`: failures stay silent.
+    let _labeled_n = ingest_labeled_issues(state.clone()).await;
+
     *state.last_scan.lock().await = Some(Utc::now());
     state
         .scan_version
@@ -538,6 +544,82 @@ fn ingest_spans(cache_db: &CacheDb) -> anyhow::Result<usize> {
         Ok(n)
     })?;
     Ok(inserted)
+}
+
+/// Labels we care about ingesting for the recall-dispatch substrate.
+/// `(label, state)` tuples drive a fan-out of `gh issue list` calls per
+/// GitHub-hosted repo. Add new entries when new labels join the
+/// dispatch convention.
+const LABEL_INGEST_TARGETS: &[(&str, &str)] = &[("structural-ask", "open")];
+
+/// Fan out `gh issue list --label LABEL --state STATE` across every
+/// GitHub-hosted repo for each configured `(label, state)` target.
+/// Best-effort: a missing or rate-limited `gh` returns 0. Bounded
+/// concurrency matches `ingest_ci_status`.
+async fn ingest_labeled_issues(state: AppState) -> usize {
+    let health = *state.gh_health.lock().await;
+    if health != git::log::GhHealth::Ok {
+        return 0;
+    }
+    let cache_db = state.cache_db.clone();
+    let targets =
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(i64, String)>> {
+            // Pull (id, slug) for every repo with a GitHub remote.
+            let remotes = cache_db.iter_repo_ids_and_remotes()?;
+            Ok(remotes
+                .into_iter()
+                .filter_map(|(id, url)| git::log::github_owner_repo(&url).map(|s| (id, s)))
+                .collect())
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            _ => return 0,
+        };
+    if targets.is_empty() {
+        return 0;
+    }
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let mut set = tokio::task::JoinSet::new();
+    for (repo_id, slug) in targets {
+        for (label, state_filter) in LABEL_INGEST_TARGETS.iter().copied() {
+            let sem = semaphore.clone();
+            let slug = slug.clone();
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok()?;
+                let issues = tokio::task::spawn_blocking(move || {
+                    git::log::fetch_issues_with_label(&slug, label, state_filter, 200)
+                })
+                .await
+                .ok()
+                .flatten();
+                issues.map(|v| (repo_id, label.to_string(), v))
+            });
+        }
+    }
+    let mut results = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(triple)) = res {
+            results.push(triple);
+        }
+    }
+    let cache_db = state.cache_db.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        cache_db.write_batch(|w| {
+            let mut n = 0usize;
+            for (repo_id, label, issues) in results {
+                for issue in &issues {
+                    w.upsert_labeled_issue(repo_id, &label, issue)?;
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(0)
 }
 
 /// Walk each repo's `docs/repo-dispatch/` directory and insert every

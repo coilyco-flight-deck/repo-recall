@@ -197,6 +197,32 @@ pub async fn spans(
     json_with_etag(&headers, body.scan_version, &body)
 }
 
+/// `GET /api/structural-asks` - every open `structural-ask` issue across
+/// the workspace, newest-first. Used by the recall-dispatch preflight
+/// (#92, #114) and the dashboard Autonomy panel.
+pub async fn structural_asks(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let cache = state.cache_db.clone();
+    let rows = match tokio::task::spawn_blocking(move || {
+        cache.labeled_issues_by_state("structural-ask", "open")
+    })
+    .await
+    {
+        Ok(Ok(r)) => r,
+        _ => Vec::new(),
+    };
+    let v = state.scan_version.load(Ordering::Acquire);
+    json_with_etag(
+        &headers,
+        v,
+        &serde_json::json!({
+            "label": "structural-ask",
+            "state": "open",
+            "asks": rows,
+            "scan_version": v,
+        }),
+    )
+}
+
 /// `GET /api/repos/{id}/dispatches` - parsed dispatch records from this
 /// repo's `docs/repo-dispatch/` directory, newest-first (#92, #113).
 /// JSON-only, ETag on `scan_version`.
