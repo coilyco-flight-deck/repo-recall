@@ -156,6 +156,7 @@ Per the workspace "Default to proactive scheduling" rule: after pushing to `main
 - **Cadence**: 300-360s after push.
 - **Verify CI**: `coily gh run list --repo coilysiren/repo-recall --limit 1` should show `completed/success`. Re-schedule once at +180s if in progress; stop on failure.
 - **Upgrade**: `brew outdated coilysiren/tap/repo-recall` - if upgradeable, `brew upgrade coilysiren/tap/repo-recall`. No sudo.
+- **Trigger kai-server update**: `coily ssh kai-server -- sudo systemctl start repo-recall-update.service`. The unit runs `brew upgrade coilysiren/tap/repo-recall` and try-restarts the long-lived `repo-recall.service` daemon so the tailnet dashboard picks up the new binary. Verify with `coily ssh kai-server -- systemctl status repo-recall-update.service repo-recall.service`.
 - **Skip** for docs-only pushes.
 
 ## Commands
