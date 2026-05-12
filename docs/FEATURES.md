@@ -40,6 +40,7 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 
 - **File-drop ingest** - Reads JSON from `~/.local/share/repo-recall/spans/` (or `$REPO_RECALL_SPANS_DIR`). Stores trace/span/parent ids, name, timestamps, agent_role, session_uuid, repo, opaque attributes blob.
 - **Span query API** - `GET /api/spans` filters by `trace_id`, `session_uuid`, `agent_role`, `author=me` (uses git email or `REPO_RECALL_AUTHOR`).
+- **Trace assembly API** - `GET /api/traces/{trace_id}` returns all spans for one trace sorted ascending by `start_time_unix_nano`. Caller assembles the tree from `parent_span_id`. Same `SpansResponse` shape, same `scan_version` ETag as `/api/spans`.
 
 ## Action-required signals
 
@@ -100,7 +101,7 @@ Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL
 
 **HTML pages** - `GET /`, `GET /repos/{id}`, `GET /sessions/{id}`, `GET /search`.
 
-**JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/spans`, `POST /api/refresh`.
+**JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/spans`, `GET /api/traces/{trace_id}`, `POST /api/refresh`.
 
 **Actions (htmx fragments)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`.
 
