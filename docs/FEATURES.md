@@ -17,19 +17,26 @@ Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binar
 
 Persistent across every HTML page.
 
-- **Header** - `Dashboard ▸ header strip`. Logo links back to `/`, scan-cwd path shown center, search box on the right (submits to `/search`). Below the header, a `gh` health banner appears when `gh` is missing or unauthenticated.
-- **Auto-reload** - `Dashboard ▸ invisible`. `dashboard-reload.js` polls `/api/scan-version` every 5s and triggers `location.reload()` on bump. Scoped to the dashboard; detail pages do not auto-reload mid-read.
-- **Dev livereload** - `invisible`. Every page opens a WebSocket to `/livereload`; the client reconnects and reloads when the process restarts under `cargo watch`.
+- **Header** - `every page ▸ top strip`. Logo links back to `/`, scan-cwd path shown center, search box on the right (submits to `/search`). Below the header, a `gh` health banner appears when `gh` is missing or unauthenticated.
+- **Auto-reload** - `Dashboard ▸ invisible`. `static/dashboard-reload.js` polls `/api/scan-version` every 5s and triggers `location.reload()` on bump. Scoped to the dashboard; detail pages do not auto-reload mid-read.
+- **Dev livereload** - `every page ▸ invisible`. Every page opens a WebSocket to `/livereload`; the client (`static/livereload.js`) reconnects and reloads when the process restarts under `cargo watch`.
 
 ## Core dashboard and navigation
 
-- **Multi-repo list** - `Dashboard ▸ "repos" panel (left column)`. Walks cwd N levels deep. Each row shows session count, 30-day commits, 30-day churn, 30-day authors, and action-required pills. Action-required repos hard-sort to the top; dormant repos render at 40% opacity. Click a row to drill into the repo detail page.
-- **Action-required banner** - `Dashboard ▸ top banner`. The "CI failing — action required" strip surfaces above every other panel when any repo's default branch is red. Hidden when none are.
+The dashboard renders top-down: stats strip → action-required pills row → today's standup → CI-failing banner → autonomy scorecard → two-column grid.
+
+- **Stats strip** - `Dashboard ▸ top, above everything`. Big-number stats for repos / sessions / commits / links / earliest session / last scan, plus the next-refresh countdown, the author filter toggle, and a "↻ refresh" button that POSTs to `/refresh` over htmx.
+- **Next-refresh countdown** - `Dashboard ▸ stats strip`. Server-rendered initial value plus `static/refresh-countdown.js` to decrement the visible label every second. Renders "scanning…" before the first scan completes; hidden when `REPO_RECALL_REFRESH_INTERVAL_SECS=0`.
+- **Author filter** - `Dashboard ▸ stats strip`. `?author=me` / `?author=all` toggle. Restricts the visible commit set to your git email (or `REPO_RECALL_AUTHOR`).
+- **Action-required pills row** - `Dashboard ▸ expandable strip below stats`. Single dark-purple `<details>` element with one chip per signal kind (failing CI, dirty trees, mid-op, detached HEAD, awaiting your review, your draft PRs, your PRs with no reviewer, issues assigned, deploy failing/stale, autonomous-block, stale-ask). Each chip anchor-jumps to the grouped section below.
+- **Today's standup** - `Dashboard ▸ expandable below action-required row`. Collapsed by default. When opened, shows a 24-hour digest: commits per repo, sessions started today, dirty-repo count, failing-CI count.
+- **CI-failing alert panel** - `Dashboard ▸ above autonomy scorecard`. A separate panel-alert section listing every repo with `ci_status = "failure"`. Hidden when none are.
+- **Autonomy / agent-readiness scorecard** - `Dashboard ▸ above the two-column grid`. Workspace rollup of AFK success rate, dispatches total/open/closed/succeeded/blocked, open structural-ask count, per-repo success rates, and the eight newest open asks. Hidden when both metrics buckets are empty.
+- **Multi-repo list** - `Dashboard ▸ "repos" panel (left column)`. Walks cwd N levels deep. Each row shows session count, 30-day commits, 30-day churn, 30-day authors, plus inline pills for every action-required and informational signal (uncommitted, in-progress op, detached HEAD, stash count, ahead/behind, CI, review-requested, deploy state, open PRs, open issues). Action-required repos hard-sort to the top; dormant repos render at 40% opacity. Click a row to drill into the repo detail page.
+- **Active on GitHub, not cloned** - `Dashboard ▸ left column`. One row per remote repo pushed in the last 30 days that isn't on disk yet, with a one-click `git clone` button. Older repos are silently dropped to keep the panel actionable.
 - **Needs-push / needs-pull panels** - `Dashboard ▸ left column`. Only render when `commits_ahead > 0` or `commits_behind > 0` exists somewhere. Each row offers an inline `git push` / `git pull` button via htmx.
 - **Uncommitted work** - `Dashboard ▸ right column, top`. Grouped by repo with file counts; styled as a panel-alert variant when non-empty.
-- **Recent sessions / Recent commits** - `Dashboard ▸ right column`. Two side-by-side panels, newest-first.
-- **Autonomy / agent-readiness scorecard** - `Dashboard ▸ above the two-column grid`. Workspace rollup of AFK success rate, dispatches total/open/closed/succeeded/blocked, open structural-ask count, per-repo success rates, and the eight newest open asks. Hidden when both metrics buckets are empty.
-- **Active on GitHub, not cloned** - `Dashboard ▸ left column`. One row per remote repo pushed in the last 30 days that isn't on disk yet, with a one-click `git clone` button. Older repos are silently dropped to keep the panel actionable.
+- **Recent sessions / Recent commits** - `Dashboard ▸ right column`. Two stacked panels, newest-first.
 - **Repo detail page** - `Repo detail ▸ full page`. H1 with repo name + path, then inline `git pull` / `git push` buttons, then `repo-dispatch` records, then open structural-asks, then hotspots (top 10 churned files, last 30d), then sessions, then commits.
 - **Session detail page** - `Session detail ▸ full page`. H1 with the 200-char summary, then a metadata `dl` (uuid, started/ended, messages, duration, tokens, est. cost, cwd, source file), then the transcript (collapsible tool calls), then linked repos by cwd, then linked repos by content mention (only when non-empty; flagged as fuzzy).
 - **Full-text search** - `Search ▸ full page`. One input, results partitioned into "repos / sessions / commits" panels. Tantivy index, Unicode + lowercase + Porter stemming so "refactor" matches "refactoring".
@@ -75,8 +82,10 @@ Repo-recall is the planning substrate for recall-dispatch (the AFK / autonomous-
 
 ## Action-required signals
 
-- **Curated derivation** - `Dashboard ▸ "repos" row pills` + top "CI failing" banner + `Dashboard ▸ "uncommitted work" panel`. Failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, your draft PRs, your PRs with no reviewer, your open PRs, issues assigned to you, deploy failing / stale. Each carries a detail string.
-- **Dispatch-substrate signals** - `Dashboard ▸ autonomy scorecard + "repos" row pills` + `JSON API` (`/api/action-required`) + `MCP` (`recall_action_required`). `autonomous_block` (≥1 open `autonomous-block` issue) and `stale_ask` (≥1 open `structural-ask` issue older than the threshold, default 7 days, override via `REPO_RECALL_STALE_ASK_DAYS`). Detail strings include the oldest issue number to deep-link to the one most worth resolving.
+Three rendering surfaces on the dashboard: the expandable pills row at top (one chip per signal kind, click to jump), the dedicated panels (CI-failing alert, uncommitted-work alert), and per-repo `data-flag="…"` pills inline on each "repos" row.
+
+- **Curated derivation** - `Dashboard ▸ pills row + CI banner + "repos" row pills`. Failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, your draft PRs, your PRs with no reviewer, your open PRs, issues assigned to you, deploy failing / stale. Each carries a detail string.
+- **Dispatch-substrate signals** - `Dashboard ▸ pills row + autonomy scorecard` + `JSON API` (`/api/action-required`) + `MCP` (`recall_action_required`). `autonomous_block` (≥1 open `autonomous-block` issue) and `stale_ask` (≥1 open `structural-ask` issue older than the threshold, default 7 days, override via `REPO_RECALL_STALE_ASK_DAYS`). Detail strings include the oldest issue number to deep-link to the one most worth resolving.
 - **JSON API with stable ids** - `JSON API only` (`GET /api/action-required`). Returns `<repo_id>:<signal>` ids so orchestrators can distinguish "still broken" from "different problem now."
 
 ## HTTP and content negotiation
@@ -99,8 +108,8 @@ Repo-recall is the planning substrate for recall-dispatch (the AFK / autonomous-
 - **Background refresh** - `invisible`. `REPO_RECALL_REFRESH_INTERVAL_SECS` (default 150s, 0 disables). Single refresh lock; manual `POST /refresh` and `POST /api/refresh` share it.
 - **Scan version polling** - `JSON API` (`GET /api/scan-version`). The cheapest "did anything change" probe; powers the dashboard auto-reload script and ETag keys.
 - **Wipe-on-restart cache** - `invisible`. `cache.redb` deleted at startup. No migrations.
-- **Manual refresh** - `Admin route` (`POST /refresh`) + `JSON API` (`POST /api/refresh`) + `MCP` (`recall_refresh`). No on-page button; called by external tools.
-- **OpenAPI spec** - `Admin route` (`GET /openapi.json`). Machine-readable surface description.
+- **Manual refresh** - `Dashboard ▸ stats strip "↻ refresh" button` + `POST /refresh` (fire-and-forget, used by the button) + `POST /api/refresh` (sync, waits for completion) + `MCP` (`recall_refresh`).
+- **OpenAPI spec** - `Machine-readable, no UI` (`GET /openapi.json`).
 
 ## Distribution
 
