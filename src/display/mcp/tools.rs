@@ -532,3 +532,57 @@ pub async fn emit_structural_ask(
         })?;
     serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
 }
+
+// -----------------------------------------------------------------------------
+// recall_emit_agents_drift_proposal
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EmitAgentsDriftArgs {
+    pub repo_slug: String,
+    pub title: String,
+    pub proposed_rule: String,
+    /// `["owner/repo#N", ...]` — closed dispatches whose convergence
+    /// motivates the rule.
+    pub supporting_dispatches: Vec<String>,
+    pub slug: Option<String>,
+}
+
+/// Draft an AGENTS.md drift proposal (#92 phase 5+, #106). Writes a
+/// write-once markdown file under
+/// `~/.repo-recall/agents-drift/<repo>/<slug>.md` for Kai to review
+/// and post as a PR against `<repo>/AGENTS.md`. Free text is scrubbed
+/// via `process::sanitize` before write.
+pub async fn emit_agents_drift_proposal(
+    _state: AppState,
+    args: EmitAgentsDriftArgs,
+    _extra: RequestHandlerExtra,
+) -> pmcp::Result<Value> {
+    use crate::process::agents_drift::{
+        emit_drift_proposal as emit, EmitDriftProposalRequest, EmitError,
+    };
+    let req = EmitDriftProposalRequest {
+        repo_slug: args.repo_slug,
+        title: args.title,
+        proposed_rule: args.proposed_rule,
+        supporting_dispatches: args.supporting_dispatches,
+        slug: args.slug,
+    };
+    let resp = tokio::task::spawn_blocking(move || emit(&req))
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+        .map_err(|e| match e {
+            EmitError::AlreadyExists(p) => {
+                pmcp::Error::validation(format!("agents-drift proposal already drafted: {p}"))
+            }
+            EmitError::EmptyRepoSlug
+            | EmitError::EmptyTitle
+            | EmitError::EmptyRule
+            | EmitError::NoSupportingDispatches
+            | EmitError::InvalidRef(_) => {
+                pmcp::Error::validation(format!("invalid agents-drift proposal: {e}"))
+            }
+            EmitError::Io(_) => pmcp::Error::internal(format!("emit io: {e}")),
+        })?;
+    serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+}

@@ -153,6 +153,21 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
+    let emit_agents_drift = {
+        let state = state.clone();
+        TypedTool::new("recall_emit_agents_drift_proposal", move |args, extra| {
+            let s = state.clone();
+            Box::pin(tools::emit_agents_drift_proposal(s, args, extra))
+        })
+        .with_description(
+            "Draft an AGENTS.md drift proposal. Writes a write-once markdown file \
+             under ~/.repo-recall/agents-drift/<repo>/<slug>.md proposing a new \
+             rule for the repo's AGENTS.md, with the supporting dispatches inline. \
+             Free text is sanitized before write. Refuses to overwrite an existing \
+             slug.",
+        )
+    };
+
     let refresh_tool = {
         let state = state.clone();
         TypedTool::new("recall_refresh", move |args, extra| {
@@ -179,6 +194,7 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_record_dispatch", record_dispatch)
         .tool("recall_open_structural_asks", open_structural_asks)
         .tool("recall_emit_structural_ask", emit_structural_ask)
+        .tool("recall_emit_agents_drift_proposal", emit_agents_drift)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;

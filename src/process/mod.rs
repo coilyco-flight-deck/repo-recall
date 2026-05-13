@@ -5,6 +5,7 @@
 //! issue #92 for the design.
 
 pub mod activity;
+pub mod agents_drift;
 pub mod join;
 pub mod sanitize;
 pub mod structural_asks;
