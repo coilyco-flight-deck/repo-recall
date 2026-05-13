@@ -229,11 +229,6 @@ pub async fn index(
         let mut action_items: Vec<ActionRequiredItem> = Vec::new();
         for r in &repos {
             for sig in derive_action_signals(r) {
-                let review_requested_files = if sig.signal == "review_requested" {
-                    r.review_requested_pr_files.clone()
-                } else {
-                    Vec::new()
-                };
                 action_items.push(ActionRequiredItem {
                     id: format!("{}:{}", r.id, sig.signal),
                     repo_id: r.id,
@@ -242,7 +237,6 @@ pub async fn index(
                     remote_url: r.remote_url.clone(),
                     signal: sig.signal,
                     detail: sig.detail,
-                    review_requested_files,
                 });
             }
         }
@@ -801,31 +795,6 @@ fn action_sentence(signal: &str, r: &db::Repo, detail: &str) -> Markup {
             (detail) " in " (repo_link) ". "
             "Read each PR and approve, request changes, or comment so the author isn't blocked on you."
             (remote_link("/pulls/review-requested/@me", "review queue"))
-            @if !r.review_requested_pr_files.is_empty() {
-                ul class="mt-2 space-y-1 list-none p-0" {
-                    @for pr in &r.review_requested_pr_files {
-                        li class="text-[12px] text-white/85" {
-                            @match &r.remote_url {
-                                Some(url) => a class="font-mono text-white underline decoration-white/40 hover:decoration-white"
-                                              target="_blank" rel="noopener"
-                                              href={ (url) "/pull/" (pr.number) } { "#" (pr.number) },
-                                None => span class="font-mono text-white" { "#" (pr.number) },
-                            }
-                            @if pr.files.is_empty() {
-                                " (no files)"
-                            } @else {
-                                " "
-                                @for (i, f) in pr.files.iter().enumerate() {
-                                    @if i > 0 { ", " }
-                                    code class="font-mono text-[11px] text-white/80 bg-white/10 px-1 rounded" {
-                                        (f)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         },
         "issue_assigned" => html! {
             (detail) " in " (repo_link) ". "

@@ -698,13 +698,6 @@ pub struct PrCounts {
     /// Open draft PRs authored by the viewer. Subset of `draft`. Drives the
     /// "get this into a reviewable state" action-required signal.
     pub my_draft: i64,
-    /// One entry per PR that contributed to `awaiting_my_review`. Each
-    /// carries the PR number and the list of changed-file paths, so the
-    /// dashboard can render the file list on the action-required card
-    /// without a second `gh pr view --json files` call. Files are capped
-    /// at 100 per PR (GraphQL connection limit) — sufficient for triage,
-    /// truncated silently beyond that.
-    pub review_requested_files: Vec<crate::db::ReviewRequestedPr>,
 }
 
 /// Issue counts for one repo. `open` is the repo total; `assigned_to_me` is
@@ -715,129 +708,47 @@ pub struct IssueCounts {
     pub assigned_to_me: i64,
 }
 
-/// Fetch PR counts + open-issue total for a GitHub repo in one GraphQL
-/// call. Replaces the previous pair (`gh pr list` + `gh issue list`),
-/// halving the per-repo gh subprocess + API cost on the remote pass.
+/// Fetch PR counts + open-issue counts for a GitHub repo via two REST
+/// `gh` calls (`gh pr list --json …` + `gh issue list --json …`). Kept
+/// deliberately on REST: this tool's policy is to avoid `gh api graphql`
+/// (see AGENTS.md).
 ///
 /// `my_login` is the viewer's GitHub handle. Empty string is fine — the
 /// reviewer-split + assignee fields just stay zero. Returns `None` on any
 /// gh failure (network, auth, parse) so one repo can't break the refresh.
 ///
-/// PRs are capped at 100 (GraphQL's hard `first` limit on connection
-/// fields). Plenty of headroom for our usage; if some future repo opens
-/// over 100 simultaneous PRs, the counts saturate but the dashboard
-/// still functions. Issue totals use GraphQL `totalCount`, which is exact
-/// regardless of how many open issues a repo has — no client-side cap.
+/// PRs are capped at 100 (`gh pr list --limit 100`); issues at 1000. Repos
+/// that exceed either saturate at the cap but the dashboard still functions.
 pub fn fetch_pr_and_issue_counts(
     owner_repo: &str,
     my_login: &str,
 ) -> Option<(PrCounts, IssueCounts)> {
-    let (owner, name) = owner_repo.split_once('/')?;
-    // `assigned_to_me` rides the same GraphQL call as the rest of the remote
-    // pass — `filterBy: { assignee: $login }` returns a separate connection
-    // with its own `totalCount`, so no client-side iteration. Empty `my_login`
-    // means we couldn't resolve the viewer; we skip the second connection in
-    // that case so the GraphQL call doesn't 422 on a null assignee filter.
-    let query = if my_login.is_empty() {
-        r#"
-        query($owner: String!, $name: String!) {
-          repository(owner: $owner, name: $name) {
-            issues(states: OPEN) { totalCount }
-            pullRequests(first: 100, states: OPEN) {
-              nodes {
-                number
-                isDraft
-                author { login }
-                reviewRequests(first: 50) {
-                  nodes {
-                    requestedReviewer {
-                      ... on User { login }
-                    }
-                  }
-                }
-                files(first: 100) {
-                  nodes { path }
-                }
-              }
-            }
-          }
-        }
-    "#
-    } else {
-        r#"
-        query($owner: String!, $name: String!, $login: String!) {
-          repository(owner: $owner, name: $name) {
-            issues(states: OPEN) { totalCount }
-            assignedIssues: issues(states: OPEN, filterBy: { assignee: $login }) { totalCount }
-            pullRequests(first: 100, states: OPEN) {
-              nodes {
-                number
-                isDraft
-                author { login }
-                reviewRequests(first: 50) {
-                  nodes {
-                    requestedReviewer {
-                      ... on User { login }
-                    }
-                  }
-                }
-                files(first: 100) {
-                  nodes { path }
-                }
-              }
-            }
-          }
-        }
-    "#
-    };
-    let mut args: Vec<String> = vec![
-        "api".into(),
-        "graphql".into(),
-        "-f".into(),
-        format!("query={query}"),
-        "-F".into(),
-        format!("owner={owner}"),
-        "-F".into(),
-        format!("name={name}"),
-    ];
-    if !my_login.is_empty() {
-        args.push("-F".into());
-        args.push(format!("login={my_login}"));
-    }
-    let output = Command::new("gh").args(&args).output().ok()?;
-    if !output.status.success() {
+    let pr_out = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            owner_repo,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,isDraft,author,reviewRequests",
+        ])
+        .output()
+        .ok()?;
+    if !pr_out.status.success() {
         tracing::debug!(
-            "gh api graphql failed for {owner_repo}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
+            "gh pr list failed for {owner_repo}: {}",
+            String::from_utf8_lossy(&pr_out.stderr).trim(),
         );
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let body: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-    let repo = body.get("data")?.get("repository")?;
-
-    let issues = IssueCounts {
-        open: repo
-            .get("issues")
-            .and_then(|i| i.get("totalCount"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        assigned_to_me: repo
-            .get("assignedIssues")
-            .and_then(|i| i.get("totalCount"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-    };
-
-    let prs = repo
-        .get("pullRequests")
-        .and_then(|p| p.get("nodes"))
-        .and_then(|n| n.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let prs: serde_json::Value = serde_json::from_slice(&pr_out.stdout).ok()?;
 
     let mut counts = PrCounts::default();
-    for pr in &prs {
+    for pr in prs.as_array().into_iter().flatten() {
         counts.open += 1;
         let is_draft = pr.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false);
         if is_draft {
@@ -850,34 +761,15 @@ pub fn fetch_pr_and_issue_counts(
             .unwrap_or("");
         let reviewers: Vec<&str> = pr
             .get("reviewRequests")
-            .and_then(|v| v.get("nodes"))
-            .and_then(|n| n.as_array())
+            .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|r| {
-                        r.get("requestedReviewer")
-                            .and_then(|rr| rr.get("login"))
-                            .and_then(|l| l.as_str())
-                    })
+                    .filter_map(|r| r.get("login").and_then(|l| l.as_str()))
                     .collect()
             })
             .unwrap_or_default();
         if !my_login.is_empty() && reviewers.contains(&my_login) {
             counts.awaiting_my_review += 1;
-            let number = pr.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
-            let files: Vec<String> = pr
-                .get("files")
-                .and_then(|v| v.get("nodes"))
-                .and_then(|n| n.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|f| f.get("path").and_then(|p| p.as_str()).map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            counts
-                .review_requested_files
-                .push(crate::db::ReviewRequestedPr { number, files });
         }
         if !my_login.is_empty() && author_login == my_login && !is_draft {
             if reviewers.is_empty() {
@@ -890,6 +782,48 @@ pub fn fetch_pr_and_issue_counts(
             counts.my_draft += 1;
         }
     }
+
+    let issue_out = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            owner_repo,
+            "--state",
+            "open",
+            "--limit",
+            "1000",
+            "--json",
+            "number,assignees",
+        ])
+        .output()
+        .ok()?;
+    if !issue_out.status.success() {
+        tracing::debug!(
+            "gh issue list failed for {owner_repo}: {}",
+            String::from_utf8_lossy(&issue_out.stderr).trim(),
+        );
+        return None;
+    }
+    let issues_json: serde_json::Value = serde_json::from_slice(&issue_out.stdout).ok()?;
+    let mut issues = IssueCounts::default();
+    for issue in issues_json.as_array().into_iter().flatten() {
+        issues.open += 1;
+        if !my_login.is_empty() {
+            let assigned = issue
+                .get("assignees")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|a| a.get("login").and_then(|l| l.as_str()) == Some(my_login))
+                })
+                .unwrap_or(false);
+            if assigned {
+                issues.assigned_to_me += 1;
+            }
+        }
+    }
+
     Some((counts, issues))
 }
 

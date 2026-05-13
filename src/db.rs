@@ -175,20 +175,6 @@ pub struct Repo {
     pub deploy_last_success_ts: Option<i64>,
     pub remote_url: Option<String>,
     pub default_branch: Option<String>,
-    /// Changed-file paths per outstanding review-requested PR (the viewer is
-    /// in `requestedReviewers`). Populated alongside `prs_awaiting_my_review`
-    /// during the remote-state pass. Empty between refreshes or when `gh` is
-    /// unavailable. Serde default keeps the field optional in the cache
-    /// blobs, so older records decode cleanly. The cache wipes on restart
-    /// anyway — this matters only for partial decodes mid-run.
-    #[serde(default)]
-    pub review_requested_pr_files: Vec<ReviewRequestedPr>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ReviewRequestedPr {
-    pub number: i64,
-    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1537,7 +1523,6 @@ impl CacheWriter<'_> {
             deploy_last_success_ts: None,
             remote_url: remote_url.map(str::to_string),
             default_branch: default_branch.map(str::to_string),
-            review_requested_pr_files: Vec::new(),
         };
         let _ = discovered_at; // discovery time is not surfaced anywhere
         let bytes = serde_json::to_vec(&repo)?;
@@ -1931,7 +1916,6 @@ impl CacheWriter<'_> {
         deploy_workflow: Option<String>,
         deploy_status: Option<String>,
         deploy_last_success_ts: Option<i64>,
-        review_requested_pr_files: Vec<ReviewRequestedPr>,
     ) -> Result<()> {
         self.mutate_repo(repo_id, |r| {
             if ci_status.is_some() {
@@ -1943,7 +1927,6 @@ impl CacheWriter<'_> {
             r.prs_mine_awaiting_review = prs_mine_awaiting_review;
             r.prs_mine_no_reviewer = prs_mine_no_reviewer;
             r.my_draft_prs = my_draft_prs;
-            r.review_requested_pr_files = review_requested_pr_files;
             if let Some(v) = open_issues {
                 r.open_issues = v;
             }

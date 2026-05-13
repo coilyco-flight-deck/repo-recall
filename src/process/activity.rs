@@ -339,7 +339,6 @@ mod tests {
             deploy_last_success_ts: None,
             remote_url: None,
             default_branch: None,
-            review_requested_pr_files: Vec::new(),
         }
     }
 
