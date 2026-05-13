@@ -86,6 +86,24 @@ pub fn emit_dispatch(
     let now = chrono::Utc::now();
     let dispatched_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
+    // #110: scrub free-text fields before they reach any public-safe path.
+    // The hash and slug are derived from the scrubbed body so the dispatch
+    // ledger identifies what actually got written, not what was submitted.
+    use crate::process::sanitize::{scrub, SanitizeSource};
+    let scrubbed = EmitDispatchRequest {
+        issue_refs: req.issue_refs.clone(),
+        score: req.score,
+        autonomy_confidence: req.autonomy_confidence,
+        autonomy_confidence_basis: req
+            .autonomy_confidence_basis
+            .as_ref()
+            .map(|b| scrub(b, SanitizeSource::Frontmatter)),
+        tracking_issue: req.tracking_issue.clone(),
+        prompt: scrub(&req.prompt, SanitizeSource::DispatchArtifact),
+        slug: req.slug.clone(),
+    };
+    let req = &scrubbed;
+
     let prompt_hash = prompt_identity_hash(req.prompt.as_bytes());
 
     let primary_issue = first_issue_number(&req.issue_refs);
@@ -290,5 +308,38 @@ mod tests {
         emit_dispatch(&repo, "repo-recall", &req).expect("first ok");
         let err = emit_dispatch(&repo, "repo-recall", &req).expect_err("dup err");
         assert!(matches!(err, EmitError::AlreadyExists(_)));
+    }
+
+    /// #110: every public-write path goes through `process::sanitize::scrub`.
+    /// The dispatched body must not carry through known-bad terms even if a
+    /// caller submits them.
+    #[test]
+    fn emit_scrubs_body_and_basis_before_writing() {
+        let scratch = scratch_dir();
+        let repo = scratch.join("repo");
+        let pollable_root = scratch.join("pollable");
+        std::env::set_var("REPO_RECALL_DISPATCH_ROOT", &pollable_root);
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let req = EmitDispatchRequest {
+            issue_refs: vec!["coilysiren/repo-recall#110".into()],
+            score: None,
+            autonomy_confidence: None,
+            autonomy_confidence_basis: Some("read coilyco-vault for context".into()),
+            tracking_issue: None,
+            prompt: "ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII please".into(),
+            slug: Some("scrub-proof".into()),
+        };
+        let resp = emit_dispatch(&repo, "repo-recall", &req).expect("emit ok");
+        let in_repo_body = std::fs::read_to_string(&resp.in_repo_path).unwrap();
+        let pollable_body = std::fs::read_to_string(&resp.pollable_path).unwrap();
+        for body in [&in_repo_body, &pollable_body] {
+            assert!(!body.contains("kai-server"), "{body}");
+            assert!(!body.contains("ghp_AAAA"), "{body}");
+            assert!(!body.contains("coilyco-vault"), "{body}");
+            assert!(body.contains("[REDACTED:internal-host]"), "{body}");
+            assert!(body.contains("[REDACTED:github-token]"), "{body}");
+            assert!(body.contains("[REDACTED:vault-path]"), "{body}");
+        }
     }
 }

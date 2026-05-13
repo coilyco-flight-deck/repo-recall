@@ -6,3 +6,4 @@
 
 pub mod activity;
 pub mod join;
+pub mod sanitize;
