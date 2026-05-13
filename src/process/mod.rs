@@ -7,3 +7,4 @@
 pub mod activity;
 pub mod join;
 pub mod sanitize;
+pub mod structural_asks;

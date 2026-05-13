@@ -126,6 +126,33 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
+    let open_structural_asks = {
+        let state = state.clone();
+        TypedTool::new("recall_open_structural_asks", move |args, extra| {
+            let s = state.clone();
+            Box::pin(tools::open_structural_asks(s, args, extra))
+        })
+        .with_description(
+            "List currently open structural-ask-labeled GitHub issues across the \
+             indexed workspace. Read this before drafting a new ask so the planner \
+             can refuse to re-ask a question already on the list.",
+        )
+    };
+
+    let emit_structural_ask = {
+        let state = state.clone();
+        TypedTool::new("recall_emit_structural_ask", move |args, extra| {
+            let s = state.clone();
+            Box::pin(tools::emit_structural_ask(s, args, extra))
+        })
+        .with_description(
+            "Draft a structural-context ask. Writes a write-once markdown file \
+             under ~/.repo-recall/structural-asks/<slug>.md for review and \
+             posting as a structural-ask-labeled issue. Free text is sanitized \
+             before write. Refuses to overwrite an existing slug.",
+        )
+    };
+
     let refresh_tool = {
         let state = state.clone();
         TypedTool::new("recall_refresh", move |args, extra| {
@@ -150,6 +177,8 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_ticket_history", ticket_history)
         .tool("recall_autonomy_metrics", autonomy_metrics)
         .tool("recall_record_dispatch", record_dispatch)
+        .tool("recall_open_structural_asks", open_structural_asks)
+        .tool("recall_emit_structural_ask", emit_structural_ask)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;

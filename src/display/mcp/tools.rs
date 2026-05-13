@@ -455,3 +455,80 @@ pub async fn refresh(
         "last_scan": last_scan,
     }))
 }
+
+// -----------------------------------------------------------------------------
+// recall_open_structural_asks
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OpenStructuralAsksArgs {}
+
+/// List currently open `structural-ask`-labeled GitHub issues across the
+/// indexed workspace (#92 phase 5, #105). The planner reads this before
+/// drafting a new ask so it can refuse to re-ask a question already on
+/// the list.
+pub async fn open_structural_asks(
+    state: AppState,
+    _args: OpenStructuralAsksArgs,
+    _extra: RequestHandlerExtra,
+) -> pmcp::Result<Value> {
+    let cache = state.cache_db.clone();
+    let asks = tokio::task::spawn_blocking(move || {
+        cache.labeled_issues_by_state("structural-ask", "open")
+    })
+    .await
+    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+    .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
+    let n = asks.len();
+    serde_json::to_value(json!({ "count": n, "asks": asks }))
+        .map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+}
+
+// -----------------------------------------------------------------------------
+// recall_emit_structural_ask
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EmitStructuralAskArgs {
+    pub title: String,
+    pub ask_text: String,
+    /// `["owner/repo#N", ...]` — tickets that would be unblocked.
+    pub lifts: Vec<String>,
+    pub slug: Option<String>,
+}
+
+/// Draft a new structural-context ask (#92 phase 5, #105). Writes a
+/// write-once markdown file under `~/.repo-recall/structural-asks/`
+/// for Kai to review and post as a `structural-ask`-labeled issue.
+/// Free text is scrubbed via `process::sanitize` before write.
+pub async fn emit_structural_ask(
+    _state: AppState,
+    args: EmitStructuralAskArgs,
+    _extra: RequestHandlerExtra,
+) -> pmcp::Result<Value> {
+    use crate::process::structural_asks::{
+        emit_structural_ask as emit, EmitError, EmitStructuralAskRequest,
+    };
+    let req = EmitStructuralAskRequest {
+        title: args.title,
+        ask_text: args.ask_text,
+        lifts: args.lifts,
+        slug: args.slug,
+    };
+    let resp = tokio::task::spawn_blocking(move || emit(&req))
+        .await
+        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
+        .map_err(|e| match e {
+            EmitError::AlreadyExists(p) => {
+                pmcp::Error::validation(format!("structural ask already drafted: {p}"))
+            }
+            EmitError::EmptyTitle
+            | EmitError::EmptyAskText
+            | EmitError::NoLifts
+            | EmitError::InvalidRef(_) => {
+                pmcp::Error::validation(format!("invalid structural ask: {e}"))
+            }
+            EmitError::Io(_) => pmcp::Error::internal(format!("emit io: {e}")),
+        })?;
+    serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
+}
