@@ -28,3 +28,9 @@ commands:
   ci:
     run: make ci
     description: Full pre-merge gate (fmt-check + clippy + check + test). Matches GitHub Actions.
+  run:
+    run: make run
+    description: Run the server (cargo + caddy https proxy at https://$(https_host):$(https_port))
+  watch:
+    run: make watch
+    description: cargo-watch + caddy https proxy at https://$(https_host):$(https_port)

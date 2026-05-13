@@ -43,6 +43,7 @@ async fn boot_with(
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
+        dispatch_sessions: repo_recall::display::mcp::dispatch::new_store(),
     };
 
     let app = routes::router(state);
@@ -383,6 +384,7 @@ async fn api_spans_filters_by_repo_and_since() {
         my_git_email: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         scan_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
+        dispatch_sessions: repo_recall::display::mcp::dispatch::new_store(),
     };
     let app = repo_recall::display::routes::router(state);
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();

@@ -48,4 +48,7 @@ pub struct AppState {
     /// `search_idx` virtual table on every refresh. Reader still flows
     /// through SQLite until the redb migration's step 3 flips it.
     pub search_index: search::SearchIndex,
+    /// In-memory store of in-flight autonomous-dispatch sessions. See
+    /// `display::mcp::dispatch`. Dropped on restart by design.
+    pub dispatch_sessions: display::mcp::dispatch::DispatchSessions,
 }

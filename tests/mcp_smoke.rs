@@ -211,7 +211,7 @@ fn initialize_returns_real_server_info() {
 }
 
 #[test]
-fn tools_list_exposes_twelve_tools() {
+fn tools_list_exposes_twenty_tools() {
     let mut client = McpClient::spawn();
     let res = client.request("tools/list", json!({}));
     let tools = res
@@ -220,8 +220,8 @@ fn tools_list_exposes_twelve_tools() {
         .expect("tools array");
     assert_eq!(
         tools.len(),
-        12,
-        "expected 12 tools, got {}: {res}",
+        20,
+        "expected 20 tools, got {}: {res}",
         tools.len()
     );
 

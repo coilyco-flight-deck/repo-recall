@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 
 use crate::AppState;
 
+pub mod dispatch;
 mod tools;
 
 /// Build the MCP `Server` (tools) without binding any transport. Shared by
@@ -168,6 +169,78 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
+    let dispatch_begin = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_begin", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::begin(s, args, extra))
+        })
+        .with_description(dispatch::BEGIN_DESCRIPTION)
+    };
+
+    let dispatch_triage = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_triage", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::triage(s, args, extra))
+        })
+        .with_description(dispatch::TRIAGE_DESCRIPTION)
+    };
+
+    let dispatch_score_next = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_score_next", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::score_next(s, args, extra))
+        })
+        .with_description(dispatch::SCORE_NEXT_DESCRIPTION)
+    };
+
+    let dispatch_score_set = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_score_set", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::score_set(s, args, extra))
+        })
+        .with_description(dispatch::SCORE_SET_DESCRIPTION)
+    };
+
+    let dispatch_emit_plan = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_emit_plan", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::emit_plan(s, args, extra))
+        })
+        .with_description(dispatch::EMIT_PLAN_DESCRIPTION)
+    };
+
+    let dispatch_emit_commit = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_emit_commit", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::emit_commit(s, args, extra))
+        })
+        .with_description(dispatch::EMIT_COMMIT_DESCRIPTION)
+    };
+
+    let dispatch_spawn = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_spawn", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::spawn(s, args, extra))
+        })
+        .with_description(dispatch::SPAWN_DESCRIPTION)
+    };
+
+    let dispatch_done = {
+        let state = state.clone();
+        TypedTool::new("recall_dispatch_done", move |args, extra| {
+            let s = state.clone();
+            Box::pin(dispatch::done(s, args, extra))
+        })
+        .with_description(dispatch::DONE_DESCRIPTION)
+    };
+
     let refresh_tool = {
         let state = state.clone();
         TypedTool::new("recall_refresh", move |args, extra| {
@@ -195,6 +268,14 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_open_structural_asks", open_structural_asks)
         .tool("recall_emit_structural_ask", emit_structural_ask)
         .tool("recall_emit_agents_drift_proposal", emit_agents_drift)
+        .tool("recall_dispatch_begin", dispatch_begin)
+        .tool("recall_dispatch_triage", dispatch_triage)
+        .tool("recall_dispatch_score_next", dispatch_score_next)
+        .tool("recall_dispatch_score_set", dispatch_score_set)
+        .tool("recall_dispatch_emit_plan", dispatch_emit_plan)
+        .tool("recall_dispatch_emit_commit", dispatch_emit_commit)
+        .tool("recall_dispatch_spawn", dispatch_spawn)
+        .tool("recall_dispatch_done", dispatch_done)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;
