@@ -188,6 +188,15 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// `pollable_root()` reads a process-wide env var, so two parallel
+    /// unit tests can stomp each other's scratch dir between an emit
+    /// pair (caught a real flake on CI for f6c401f). Serialize tests
+    /// in this module behind one mutex to enforce one-at-a-time.
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        M.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn scratch_root() -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -206,6 +215,7 @@ mod tests {
 
     #[test]
     fn emit_writes_pollable_with_frontmatter_and_lifts() {
+        let _guard = test_lock();
         let _root = scratch_root();
         let req = EmitStructuralAskRequest {
             title: "Decide dispatch ledger persistence boundary".into(),
@@ -227,6 +237,7 @@ mod tests {
 
     #[test]
     fn emit_refuses_duplicate_slug() {
+        let _guard = test_lock();
         let _root = scratch_root();
         let req = EmitStructuralAskRequest {
             title: "T".into(),
@@ -241,6 +252,7 @@ mod tests {
 
     #[test]
     fn emit_scrubs_title_and_body_before_write() {
+        let _guard = test_lock();
         let _root = scratch_root();
         let req = EmitStructuralAskRequest {
             title: "Question about kai-server".into(),
@@ -259,6 +271,7 @@ mod tests {
 
     #[test]
     fn emit_rejects_invalid_inputs() {
+        let _guard = test_lock();
         let _root = scratch_root();
         let base = EmitStructuralAskRequest {
             title: "T".into(),
