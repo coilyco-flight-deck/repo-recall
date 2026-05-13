@@ -200,15 +200,15 @@ pub async fn begin(
 /// Humanized choice menu as a markdown bulleted list. Display-only - the
 /// wire enum stays in snake_case.
 const TRIAGE_MENU_HUMAN: &str = "\
-1. **keep AFK** *(dispatch this autonomously - a spawned Claude session works it end-to-end without you)* - `keep_afk`\n\
-2. **keep human** *(the ticket stays open but you'll work it yourself, no agent fires)* - `keep_hitl`\n\
-3. **split** *(the ticket is too big to dispatch as-is, propose breaking it into smaller pieces first)* - `split`\n\
-4. **rehome** *(move this ticket to a different repo where it actually belongs)* - `rehome`\n\
-5. **dedup** *(this duplicates another open issue, propose closing it as a dup)* - `dedup`\n\
-6. **stale close** *(nothing is going to happen here, propose closing it as stale)* - `stale_close`\n\
-7. **defer** *(skip it for this run, leave it open for a future dispatch session)* - `defer`\n\
+1. 🤖 **keep AFK** *(dispatch this autonomously - a spawned Claude session works it end-to-end without you)* - `keep_afk`\n\
+2. 👤 **keep human** *(the ticket stays open but you'll work it yourself, no agent fires)* - `keep_hitl`\n\
+3. ✂️ **split** *(the ticket is too big to dispatch as-is, propose breaking it into smaller pieces first)* - `split`\n\
+4. 📦 **rehome** *(move this ticket to a different repo where it actually belongs)* - `rehome`\n\
+5. 👯 **dedup** *(this duplicates another open issue, propose closing it as a dup)* - `dedup`\n\
+6. 🗑️ **stale close** *(nothing is going to happen here, propose closing it as stale)* - `stale_close`\n\
+7. ⏭️ **defer** *(skip it for this run, leave it open for a future dispatch session)* - `defer`\n\
 \n\
-Kai may answer by ordinal (\"option two\", \"three\") - map the number to the wire token before calling `recall_dispatch_triage`.";
+Kai may answer by ordinal (\"option two\", \"three\") or by emoji - map either to the wire token before calling `recall_dispatch_triage`.";
 
 fn build_triage_instructions(sess: &DispatchSession) -> String {
     if sess.pending_triage.is_empty() {
@@ -981,13 +981,13 @@ must match the session's pending head — if you call this out of order, you \
 get a `ref mismatch` error with the right ref to use, no state changes. \
 \
 Choices: \
-- `keep_afk` - dispatch this autonomously \
-- `keep_hitl` - Kai will handle it herself \
-- `split` - too big, needs splitting before dispatch \
-- `rehome` - belongs in a different repo \
-- `dedup` - duplicate of another open issue \
-- `stale_close` - propose closing as stale \
-- `defer` - skip for this run \
+- 🤖 `keep_afk` - dispatch this autonomously \
+- 👤 `keep_hitl` - Kai will handle it herself \
+- ✂️ `split` - too big, needs splitting before dispatch \
+- 📦 `rehome` - belongs in a different repo \
+- 👯 `dedup` - duplicate of another open issue \
+- 🗑️ `stale_close` - propose closing as stale \
+- ⏭️ `defer` - skip for this run \
 \
 When the queue empties, the session auto-advances to the `score` phase and \
 the response tells you to call `recall_dispatch_score`. Until then, the \
