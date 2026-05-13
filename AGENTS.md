@@ -2,10 +2,18 @@
 
 ## Project overview
 
-`repo-recall` is a local dev dashboard that indexes Claude Code session history and joins sessions to git repos discovered on disk. It answers two questions:
+`repo-recall` is the local hydration layer for agent work. It walks the repos discovered on disk and joins them against four data sources:
 
-- *What Claude Code sessions have I had about this repo?*
-- *What repos has this session touched?*
+- **git** - commits, churn, working tree, in-progress operations.
+- **gh** - CI runs, PRs, issues.
+- **Claude Code sessions** - JSONL transcripts under `~/.claude/projects/`.
+- **OTel spans** - ingested via file-drop or OTLP, keyed to repos by span attribute.
+
+It serves the joined view to a browser (axum) and to an MCP host (pmcp stdio) out of the same process. The headline questions it answers:
+
+- *What sessions and bursts touched this repo?*
+- *What repos did this session or burst touch?*
+- *What's action-required on this machine right now?*
 
 Everything runs locally and bound to `127.0.0.1` only. No telemetry, no auth. Outbound calls are `gh run list` for CI status (best-effort).
 

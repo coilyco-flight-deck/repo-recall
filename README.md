@@ -1,11 +1,13 @@
 # repo-recall
 
-> *"Wait — which Claude Code session was the one where I figured out the CI flake?"*
+> *"What's the current state of every repo and agent burst on this machine, right now?"*
 
-You've got dozens of repos on disk, hundreds of [Claude Code](https://claude.com/claude-code) sessions in `~/.claude/projects/`, and no way to connect the two. repo-recall is a tiny local web app that joins three data sources you already have - **git** (commits, churn, working tree), **gh** (CI, PRs, issues, deploys), and **Claude Code** (sessions) - keyed to the same set of discovered repos. Two questions, two clicks:
+repo-recall is the local hydration layer that joins everything an agent (or an operator) needs to reason about ongoing work on disk. It walks the repos you have, joins them against four data sources you already produce - **git** (commits, churn, working tree), **gh** (CI, PRs, issues, deploys), **[Claude Code](https://claude.com/claude-code) sessions** (`~/.claude/projects/`), and **OTel spans** (from [otel-a2a-relay](https://github.com/coilysiren/otel-a2a-relay) or any OTLP/file-drop producer) - and serves a single queryable surface to a browser and to an MCP host out of the same process.
 
-- **Which sessions touched this repo?** — open the repo, see every session that had it as `cwd`.
-- **Which repos did this session touch?** — open the session, see every repo it crossed.
+Two questions, two clicks (or one MCP call):
+
+- **Which sessions and bursts touched this repo?** — open the repo, see every session that had it as `cwd` and every span tagged with it.
+- **Which repos did this session or burst touch?** — open the session, see every repo it crossed.
 
 Everything is local. The server binds `127.0.0.1` only, and the cache lives in `$TMPDIR`. Outbound calls are limited to `gh run list` for CI status.
 
