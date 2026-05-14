@@ -1,40 +1,35 @@
-# Security: IO inventory
+# Security Policy
 
-This document lists every place repo-recall reads from, writes to, and binds. It is a catalog, not a permission system. Egress is not gated; this file exists so an operator can answer "where can this thing reach?" without spelunking the source.
+Hello and thank you for your interest! :tada: :lock:
 
-The headline rule: **repo-recall binds loopback only, reads locally, and writes only when an explicit MCP tool or HTTP POST asks it to.** Outbound network is limited to `gh` subprocess calls reusing the user's existing auth.
+## Supported versions
 
-## Reads (data ingress)
+This package is at v0. Only the latest commit on `main` is supported for security fixes - there are no pinned releases to backport to.
 
-- **git** - subprocess against every discovered repo. `git log --all --no-merges`, `git status --porcelain`, `git rev-parse`, `git config user.email`, `git describe --tags`. Local filesystem only.
-- **gh CLI** - subprocess against `api.github.com` via the user's existing `gh auth`. REST endpoints only (`/repos/.../pulls`, `/repos/.../issues`, `/repos/.../actions/runs`). Never GraphQL. Fails closed if `gh` is missing or unauthenticated.
-- **Claude Code sessions** - reads `~/.claude/projects/**/*.jsonl` (override with `REPO_RECALL_SESSIONS_DIR`). Parses session metadata; retains a 200-char truncated summary, not full transcripts.
-- **on-disk artifacts** - reads `docs/repo-dispatch/`, `docs/structural-asks/`, `docs/agents-drift/`, plus the per-repo `README.md`, `AGENTS.md`, `docs/FEATURES.md`, and `docs/AUTONOMY.md` for each discovered repo. Local filesystem only.
-- **cli-guard audit log** - reads `~/.coily/audit/*.jsonl` (override with `REPO_RECALL_AUDIT_DIR`). One JSONL shard per git toplevel; joined to repos by the `commit_scope` field. See [#148](https://github.com/coilysiren/repo-recall/issues/148).
+| Version             | Supported          |
+| ------------------- | ------------------ |
+| `main` (latest)     | :white_check_mark: |
+| any pinned commit   | :x: (upgrade)      |
 
-## Writes (data egress, only on explicit request)
+## Reporting a vulnerability
 
-repo-recall never writes to disk during a refresh. Every write below is gated behind a specific HTTP endpoint or MCP tool call.
+Please disclose any vulnerabilities by emailing [coilysiren@gmail.com](mailto:coilysiren@gmail.com). Expect a first response within 48 hours; follow-up cadence by email after that. This project is run on volunteer time, so please have patience :bow:
 
-- **dispatch artifacts** - `POST /api/repos/{id}/dispatches` and `mcp::recall_record_dispatch`. Writes a write-once markdown to `<repo>/docs/repo-dispatch/<slug>.md` plus a flat pollable mirror at `~/.repo-recall/dispatch/<repo>/<slug>.md` (override with `REPO_RECALL_DISPATCH_ROOT`). Tmp + atomic rename; 409 on slug collision.
-- **structural-asks** - similar emitter shape; writes to `<repo>/docs/structural-asks/<slug>.md` plus a pollable mirror under `REPO_RECALL_STRUCTURAL_ASKS_ROOT`.
-- **agents-drift** - similar emitter shape; writes to `<repo>/docs/agents-drift/<slug>.md` plus a pollable mirror under `REPO_RECALL_AGENTS_DRIFT_ROOT`.
-- **cache** - `cache.redb` at `$REPO_RECALL_CACHE_DIR` (default `$TMPDIR/repo-recall-<port>/`). Wipe-on-restart. Tantivy search index lives in the same directory.
+## What counts as a vulnerability
 
-repo-recall does not commit, push, or pull from any git repo. Writes are file emissions only; the caller commits.
+repo-recall is a local hydration layer over the operator's git repos, GitHub state, Claude Code session JSONL, and cli-guard audit log. The HTTP/MCP server binds loopback only and runs in user space, but its inputs are sensitive and its outputs can be quoted into other tools. Specifically interested in:
 
-## Network binds
+- the HTTP/MCP server accepting connections on a non-loopback interface without `REPO_RECALL_HOST` being explicitly set to one
+- the 200-char session-summary truncation leaking content past the cap (secrets, credentials, identifying detail)
+- ETag / `scan_version` collisions that let a stale response satisfy a `If-None-Match` from a newer client
+- `gh` subprocess argv constructed from user-controlled input (repo names, branch names) producing different argv than the same string typed at a shell
+- redb cache or tantivy index written outside `$REPO_RECALL_CACHE_DIR` / `$REPO_RECALL_INDEX_DIR`, or with permissions wider than the invoking user
+- search index or session ingest treating one user's data as another's (cross-user mixing on a shared host)
+- `gh api graphql` calls anywhere in the codebase (REST only; see AGENTS.md)
 
-- HTTP + MCP server binds `REPO_RECALL_HOST:REPO_RECALL_PORT` (default `127.0.0.1:7777`).
-- Override `REPO_RECALL_HOST` only when access is gated at a different layer (e.g. `tailscale serve` on a tailnet-only host). Never bind a non-loopback address on a shared or public-facing box.
+## Out of scope
 
-## Outbound network
-
-- Only `gh` subprocess calls, reusing the user's `gh auth` token. No raw HTTPS clients, no API keys in config, no telemetry.
-- `gh` missing or unauthenticated leaves remote-state columns blank; nothing else breaks.
-
-## What this document is not
-
-- Not a permission system. There is no allowlist or deny rule enforcement around any IO surface above.
-- Not a threat model. coily owns the threat model for privileged ops; repo-recall is read-mostly and runs in user space.
-- Not a privacy policy. Session summaries can still leak sensitive content; redaction beyond the 200-char truncate is future work.
+- bugs in [axum](https://github.com/tokio-rs/axum), [redb](https://github.com/cberner/redb), [tantivy](https://github.com/quickwit-oss/tantivy), [pmcp](https://crates.io/crates/pmcp), or [gh](https://github.com/cli/cli) - report those upstream
+- consumer misuse (binding `REPO_RECALL_HOST=0.0.0.0` on a shared box, pointing the dashboard at someone else's Claude projects dir) - those are operator choices, documented in the README
+- secrets pasted into a session JSONL by the upstream Claude Code client - that is a Claude Code concern; redaction beyond the 200-char truncate is future work
+- `gh` missing or unauthenticated - documented behavior, not a vulnerability
