@@ -709,38 +709,30 @@ pub struct IssueCounts {
 }
 
 /// Fetch PR counts + open-issue counts for a GitHub repo via two REST
-/// `gh` calls (`gh pr list --json …` + `gh issue list --json …`). Kept
-/// deliberately on REST: this tool's policy is to avoid `gh api graphql`
-/// (see AGENTS.md).
+/// `gh api` calls. Stays on REST deliberately: `gh pr list` / `gh issue list`
+/// route through GraphQL under the hood and burn the secondary rate limit
+/// at refresh cadence. See AGENTS.md "No GraphQL".
 ///
 /// `my_login` is the viewer's GitHub handle. Empty string is fine — the
 /// reviewer-split + assignee fields just stay zero. Returns `None` on any
 /// gh failure (network, auth, parse) so one repo can't break the refresh.
 ///
-/// PRs are capped at 100 (`gh pr list --limit 100`); issues at 1000. Repos
-/// that exceed either saturate at the cap but the dashboard still functions.
+/// PRs are capped at 100; issues at 100 (REST `per_page` max). Repos that
+/// exceed either saturate at the cap but the dashboard still functions.
 pub fn fetch_pr_and_issue_counts(
     owner_repo: &str,
     my_login: &str,
 ) -> Option<(PrCounts, IssueCounts)> {
     let pr_out = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--repo",
-            owner_repo,
-            "--state",
-            "open",
-            "--limit",
-            "100",
-            "--json",
-            "number,isDraft,author,reviewRequests",
+            "api",
+            &format!("/repos/{owner_repo}/pulls?state=open&per_page=100"),
         ])
         .output()
         .ok()?;
     if !pr_out.status.success() {
         tracing::debug!(
-            "gh pr list failed for {owner_repo}: {}",
+            "gh api /pulls failed for {owner_repo}: {}",
             String::from_utf8_lossy(&pr_out.stderr).trim(),
         );
         return None;
@@ -750,17 +742,17 @@ pub fn fetch_pr_and_issue_counts(
     let mut counts = PrCounts::default();
     for pr in prs.as_array().into_iter().flatten() {
         counts.open += 1;
-        let is_draft = pr.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_draft = pr.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
         if is_draft {
             counts.draft += 1;
         }
         let author_login = pr
-            .get("author")
+            .get("user")
             .and_then(|a| a.get("login"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let reviewers: Vec<&str> = pr
-            .get("reviewRequests")
+            .get("requested_reviewers")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
@@ -783,24 +775,18 @@ pub fn fetch_pr_and_issue_counts(
         }
     }
 
+    // REST /repos/X/issues includes pull requests. Filter them out via
+    // the presence of a `pull_request` field on the issue object.
     let issue_out = Command::new("gh")
         .args([
-            "issue",
-            "list",
-            "--repo",
-            owner_repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,assignees",
+            "api",
+            &format!("/repos/{owner_repo}/issues?state=open&per_page=100"),
         ])
         .output()
         .ok()?;
     if !issue_out.status.success() {
         tracing::debug!(
-            "gh issue list failed for {owner_repo}: {}",
+            "gh api /issues failed for {owner_repo}: {}",
             String::from_utf8_lossy(&issue_out.stderr).trim(),
         );
         return None;
@@ -808,6 +794,9 @@ pub fn fetch_pr_and_issue_counts(
     let issues_json: serde_json::Value = serde_json::from_slice(&issue_out.stdout).ok()?;
     let mut issues = IssueCounts::default();
     for issue in issues_json.as_array().into_iter().flatten() {
+        if issue.get("pull_request").is_some() {
+            continue;
+        }
         issues.open += 1;
         if !my_login.is_empty() {
             let assigned = issue
@@ -868,34 +857,29 @@ pub struct LabeledIssue {
 /// `None` on any subprocess / parse failure so a single repo's gh
 /// hiccup cannot kill the whole pass.
 ///
-/// `state` accepts gh's values: `"open"`, `"closed"`, `"all"`. `limit`
-/// is forwarded to `gh issue list --limit`.
+/// `state` accepts REST values: `"open"`, `"closed"`, `"all"`. `limit`
+/// becomes `per_page` (capped at 100 by GitHub).
+///
+/// Uses `gh api` REST against `/repos/X/issues`, not `gh issue list` which
+/// is GraphQL under the hood. The REST endpoint mixes PRs into the result
+/// set; we filter them out via the `pull_request` field.
 pub fn fetch_issues_with_label(
     owner_repo: &str,
     label: &str,
     state: &str,
     limit: usize,
 ) -> Option<Vec<LabeledIssue>> {
+    let per_page = limit.min(100);
     let output = Command::new("gh")
         .args([
-            "issue",
-            "list",
-            "--repo",
-            owner_repo,
-            "--label",
-            label,
-            "--state",
-            state,
-            "--limit",
-            &limit.to_string(),
-            "--json",
-            "number,title,createdAt,closedAt,labels,state",
+            "api",
+            &format!("/repos/{owner_repo}/issues?labels={label}&state={state}&per_page={per_page}"),
         ])
         .output()
         .ok()?;
     if !output.status.success() {
         tracing::debug!(
-            "gh issue list failed for {owner_repo} label={label} state={state}: {}",
+            "gh api /issues failed for {owner_repo} label={label} state={state}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
         return None;
@@ -905,6 +889,9 @@ pub fn fetch_issues_with_label(
     let items = arr.as_array()?;
     let mut out = Vec::with_capacity(items.len());
     for it in items {
+        if it.get("pull_request").is_some() {
+            continue;
+        }
         let number = it.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
         if number == 0 {
             continue;
@@ -915,13 +902,13 @@ pub fn fetch_issues_with_label(
             .unwrap_or("")
             .to_string();
         let created_at = it
-            .get("createdAt")
+            .get("created_at")
             .and_then(|v| v.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.timestamp())
             .unwrap_or(0);
         let closed_at = it
-            .get("closedAt")
+            .get("closed_at")
             .and_then(|v| v.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.timestamp());
@@ -934,11 +921,13 @@ pub fn fetch_issues_with_label(
                     .collect()
             })
             .unwrap_or_default();
+        // REST returns lowercase state. Upcase for parity with existing
+        // consumers that compare against "OPEN" / "CLOSED".
         let state = it
             .get("state")
             .and_then(|v| v.as_str())
-            .unwrap_or("OPEN")
-            .to_string();
+            .unwrap_or("open")
+            .to_uppercase();
         out.push(LabeledIssue {
             number,
             title,
