@@ -79,40 +79,51 @@ dashboard:
 card:
   short:
     rows:
+      # Repo name + path + click-through to detail page.
       - id: heading
         enabled: true
+      # Action-required alerts: failing CI, dirty tree, in-progress git op, detached HEAD.
       - id: banner
         enabled: true
         cap_rows: 5
+      # Informational status pills: ahead/behind, stash count, deploy state, open PRs/issues.
       - id: health
         enabled: true
+      # Recent commits with author + timestamp, capped at the window below.
       - id: activity
         enabled: true
         cap_rows: 5
         cap_window_days: 30
+      # Open PRs and issues assigned to you / awaiting your review.
       - id: work
         enabled: true
         cap_rows: 5
+      # Open `structural-ask` / `autonomous-block` issues. Oldest first so the stalest float up.
       - id: asks
         enabled: true
         cap_rows: 3
         sort: oldest_first
+      # Recent Claude Code sessions that touched this repo (from JSONL transcripts).
       - id: sessions
         enabled: true
         cap_rows: 5
         cap_window_days: 90
+      # AFK dispatch queue: open `repo-dispatch` tracking issues fanned out to autonomous agents.
       - id: dispatch
         enabled: true
         cap_rows: 3
+      # Hottest files in the recent window (top N by edits).
       - id: churn
         enabled: true
         cap_rows: 5
         cap_window_days: 30
+      # "View all" link to the verbose card if any row was capped.
       - id: overflow_link
         enabled: true
   verbose:
     show_absent_with_reason: true  # "no sessions in last 90d" instead of suppressing
     rows:
+      # Same row semantics as `short.rows` above; only caps and windows differ.
       - id: activity
         cap_rows: 100
         cap_window_days: 90
