@@ -15,6 +15,10 @@ This package is at v0. Only the latest commit on `main` is supported for securit
 
 Please disclose any vulnerabilities by emailing [coilysiren@gmail.com](mailto:coilysiren@gmail.com). Expect a first response within 48 hours; follow-up cadence by email after that. This project is run on volunteer time, so please have patience :bow:
 
+## Intended deployment
+
+repo-recall is built to run on a single operator's machine, bound to `127.0.0.1`. When an operator wants the dashboard from another device, the intended posture is to keep the loopback bind and front it with a VPN like [Tailscale](https://tailscale.com) (`tailscale serve` works well), or an SSH tunnel, or a similar tailnet-only fronting layer. Setting `REPO_RECALL_HOST` to a non-loopback address on a host that isn't already gated at that other layer is operator misuse, not a supported configuration.
+
 ## What counts as a vulnerability
 
 repo-recall is a local hydration layer over the operator's git repos, GitHub state, Claude Code session JSONL, and cli-guard audit log. The HTTP/MCP server binds loopback only and runs in user space, but its inputs are sensitive and its outputs can be quoted into other tools. Specifically interested in:
