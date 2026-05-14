@@ -2,12 +2,11 @@
 
 ## Project overview
 
-`repo-recall` is the local hydration layer for agent work. It walks the repos discovered on disk and joins them against four data sources:
+`repo-recall` is the local hydration layer for agent work. It walks the repos discovered on disk and joins them against three data sources:
 
 - **git** - commits, churn, working tree, in-progress operations.
 - **gh** - CI runs, PRs, issues.
 - **Claude Code sessions** - JSONL transcripts under `~/.claude/projects/`.
-- **OTel spans** - ingested via file-drop or OTLP, keyed to repos by span attribute.
 
 It serves the joined view to a browser (axum) and to an MCP host (pmcp stdio) out of the same process. The headline questions it answers:
 

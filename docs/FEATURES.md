@@ -74,12 +74,6 @@ Repo-recall is the planning substrate for recall-dispatch (the AFK / autonomous-
 - **AFK metrics rollup** - `Dashboard ▸ autonomy scorecard panel` + `JSON API` (`/api/autonomy/metrics`) + `MCP` (`recall_autonomy_metrics`). Aggregates closed `repo-dispatch` tracking issues into `successes` / `abandons` / `blocks` / `open` buckets per repo and workspace-wide. "Success" requires a commit-backed close (joined via `issue_refs`); other closes count as abandons.
 - **`IngestSource` + `Health` trait** - `Substrate plumbing, no UI yet`. Single trait every ingest source implements (`id`, `label`, `report`). Designed so the dashboard can iterate implementors and render one Green / Yellow / Red dot per source per repo. Sources can decline to apply (e.g. github sources on a repo with no origin).
 
-## OTel span ingestion
-
-- **File-drop ingest** - `Background, no UI`. Reads JSON from `~/.local/share/repo-recall/spans/` (or `$REPO_RECALL_SPANS_DIR`). Stores trace/span/parent ids, name, timestamps, agent_role, session_uuid, repo, opaque attributes blob.
-- **Span query API** - `JSON API only` (`GET /api/spans`). Filters by `trace_id`, `session_uuid`, `agent_role`, `author=me` (uses git email or `REPO_RECALL_AUTHOR`).
-- **Trace assembly API** - `JSON API only` (`GET /api/traces/{trace_id}`). Returns all spans for one trace sorted ascending by `start_time_unix_nano`. Caller assembles the tree from `parent_span_id`. Same `SpansResponse` shape, same `scan_version` ETag as `/api/spans`.
-
 ## Action-required signals
 
 Three rendering surfaces on the dashboard: the expandable pills row at top (one chip per signal kind, click to jump), the dedicated panels (CI-failing alert, uncommitted-work alert), and per-repo `data-flag="…"` pills inline on each "repos" row.
@@ -123,20 +117,19 @@ Source tree is partitioned by responsibility:
 - **`src/ingest/`** - Every data source that reads substrate. `ingest/claude/sessions_jsonl.rs` (session files), `ingest/git/{discovery, log}.rs` (repo walk + `git log`), `ingest/docs/{readme, agents_md, features_md, autonomy_md, repo_dispatch}.rs` (per-doc + per-dispatch sources), `ingest/health.rs` (the shared `IngestSource` + `Health` trait).
 - **`src/process/`** - Pure transforms over ingested data. `process/activity.rs` (composite score, action-required), `process/join.rs` (cwd → repo matching, GitHub issue-ref parsing).
 - **`src/display/`** - User-facing surfaces. `display/routes/` (axum), `display/mcp/` (pmcp tools), `display/dispatch_artifacts.rs` (write-once emitter).
-- **`src/{db, search, signals, spans}.rs`** - Cache DB schema, tantivy index, action-required signal catalog, OTel span store.
+- **`src/{db, search, signals}.rs`** - Cache DB schema, tantivy index, action-required signal catalog.
 
 ## Data model
 
 One redb database plus a tantivy index.
 
-- **Cache DB** (`cache.redb`, wipe-on-restart) - repos, sessions, commits, file_changes, uncommitted_files, active_remote_repos, spans, issue_refs (with `(repo, issue)` and `(source_kind, source_id)` indexes), labeled_issues (with `(repo, label, number)` and `(label, state)` indexes), dispatches (parsed from `docs/repo-dispatch/`). Hand-designed secondary indexes per query path.
+- **Cache DB** (`cache.redb`, wipe-on-restart) - repos, sessions, commits, file_changes, uncommitted_files, active_remote_repos, issue_refs (with `(repo, issue)` and `(source_kind, source_id)` indexes), labeled_issues (with `(repo, label, number)` and `(label, state)` indexes), dispatches (parsed from `docs/repo-dispatch/`). Hand-designed secondary indexes per query path.
 - **Search index** (tantivy, wipe-on-restart) - repos, sessions, commits. Unicode + lowercase + Porter stemming.
 
 ## Integrations
 
 - **GitHub** - via `gh` CLI: `run list`, `api repos/.../pulls`, `api repos/.../issues`, `api user`, `issue list --label <L> --state <S>`.
 - **Claude Code** - reads `~/.claude/projects/**/*.jsonl`.
-- **OTel** - file-drop JSON in `$REPO_RECALL_SPANS_DIR`.
 - **git** - subprocess (`log`, `push`, `pull --ff-only`, `status`, `describe`).
 
 ## CLI surface
@@ -146,13 +139,13 @@ Single binary, no subcommands.
 - `repo-recall` - boots HTTP dashboard + MCP stdio server.
 - `repo-recall --version` / `-V`.
 
-Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL_PORT`, `REPO_RECALL_HOST`, `REPO_RECALL_COMMITS_PER_REPO`, `REPO_RECALL_CACHE_DIR`, `REPO_RECALL_INDEX_DIR`, `REPO_RECALL_SESSIONS_DIR`, `REPO_RECALL_REFRESH_INTERVAL_SECS`, `REPO_RECALL_REMOTE_TARGET_LIMIT`, `REPO_RECALL_SPANS_DIR`, `REPO_RECALL_DISPATCH_ROOT`, `REPO_RECALL_STALE_ASK_DAYS`, `REPO_RECALL_AUTHOR`, `REPO_RECALL_MCP_ORIGINS`, `REPO_RECALL_STATIC`, `RUST_LOG`.
+Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL_PORT`, `REPO_RECALL_HOST`, `REPO_RECALL_COMMITS_PER_REPO`, `REPO_RECALL_CACHE_DIR`, `REPO_RECALL_INDEX_DIR`, `REPO_RECALL_SESSIONS_DIR`, `REPO_RECALL_REFRESH_INTERVAL_SECS`, `REPO_RECALL_REMOTE_TARGET_LIMIT`, `REPO_RECALL_DISPATCH_ROOT`, `REPO_RECALL_STALE_ASK_DAYS`, `REPO_RECALL_AUTHOR`, `REPO_RECALL_MCP_ORIGINS`, `REPO_RECALL_STATIC`, `RUST_LOG`.
 
 ## HTTP surface
 
 **HTML pages** - `GET /` (Dashboard), `GET /repos/{id}` (Repo detail), `GET /sessions/{id}` (Session detail), `GET /search`.
 
-**JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/spans`, `GET /api/traces/{trace_id}`, `GET /api/autonomy/metrics`, `GET /api/structural-asks`, `GET /api/repos/{id}/dispatches`, `GET /api/repos/{id}/tickets/{n}/history`, `POST /api/refresh`.
+**JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/autonomy/metrics`, `GET /api/structural-asks`, `GET /api/repos/{id}/dispatches`, `GET /api/repos/{id}/tickets/{n}/history`, `POST /api/refresh`.
 
 **Actions (htmx fragments)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`, `POST /api/repos/{id}/dispatches` (write-once dispatch artifact).
 

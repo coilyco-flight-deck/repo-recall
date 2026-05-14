@@ -10,7 +10,6 @@ pub mod ingest;
 pub mod process;
 pub mod search;
 pub mod signals;
-pub mod spans;
 
 #[derive(Clone)]
 pub struct AppState {

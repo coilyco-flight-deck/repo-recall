@@ -37,7 +37,6 @@ const FILE_CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("file_cha
 const UNCOMMITTED_FILES: TableDefinition<u64, &[u8]> = TableDefinition::new("uncommitted_files");
 const ACTIVE_REMOTE_REPOS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("active_remote_repos");
-const SPANS: TableDefinition<u64, &[u8]> = TableDefinition::new("spans");
 
 // id-allocator counters keyed by entity name ("repo", "session", ...).
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
@@ -75,9 +74,6 @@ const ACTIVE_REPOS_BY_HTTPS_URL: TableDefinition<&str, u64> =
     TableDefinition::new("active_repos_by_https_url");
 const ACTIVE_REPOS_BY_PUSHED_AT: TableDefinition<(i64, u64), ()> =
     TableDefinition::new("active_repos_by_pushed_at");
-// (trace_id, span_id) -> span_id_internal. Natural-key dedup for span upsert.
-const SPANS_BY_TRACE_SPAN: TableDefinition<(&str, &str), u64> =
-    TableDefinition::new("spans_by_trace_span");
 
 // Labeled issues pulled from GitHub (#92, #114, #115, #116). One row per
 // (repo, label, number) so multiple ingest passes can write to the same
@@ -120,7 +116,6 @@ const META_NEXT_COMMIT: &str = "next_commit_id";
 const META_NEXT_FILE_CHANGE: &str = "next_file_change_id";
 const META_NEXT_UNCOMMITTED: &str = "next_uncommitted_id";
 const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
-const META_NEXT_SPAN: &str = "next_span_id";
 const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 const META_NEXT_DISPATCH: &str = "next_dispatch_id";
 const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
@@ -209,24 +204,6 @@ pub struct Commit {
     pub author_email: String,
     pub timestamp: i64,
     pub subject: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Span {
-    pub id: i64,
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub name: String,
-    pub start_time_unix_nano: i64,
-    pub end_time_unix_nano: i64,
-    pub agent_role: Option<String>,
-    pub session_uuid: Option<String>,
-    pub repo: Option<String>,
-    /// Full attributes object as serialized JSON. Kept verbatim so consumers
-    /// can pull arbitrary OTel attrs without us having to schema every one.
-    pub attributes_json: String,
-    pub source_file: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -467,8 +444,6 @@ impl CacheDb {
             let _ = write.open_table(ACTIVE_REPOS_BY_FULL_NAME)?;
             let _ = write.open_table(ACTIVE_REPOS_BY_HTTPS_URL)?;
             let _ = write.open_table(ACTIVE_REPOS_BY_PUSHED_AT)?;
-            let _ = write.open_table(SPANS)?;
-            let _ = write.open_table(SPANS_BY_TRACE_SPAN)?;
             let _ = write.open_table(ISSUE_REFS)?;
             let _ = write.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
             let _ = write.open_table(ISSUE_REFS_BY_SOURCE)?;
@@ -505,81 +480,6 @@ impl CacheDb {
     // -----------------------------------------------------------------
     // reads
     // -----------------------------------------------------------------
-
-    /// Iterate every ingested span. Tracer-quality read for the smoke test
-    /// and the LUCA meta-loop's first cut. The scoped read API in #64 will
-    /// add filtering by repo + window via a secondary index.
-    pub fn list_all_spans(&self) -> Result<Vec<Span>> {
-        let read = self.db.begin_read()?;
-        let t = read.open_table(SPANS)?;
-        let mut out = Vec::new();
-        for row in t.iter()? {
-            let (_k, v) = row?;
-            let s: Span = serde_json::from_slice(v.value())?;
-            out.push(s);
-        }
-        Ok(out)
-    }
-
-    /// Filtered span read for the LUCA meta-loop (#64). Returns spans
-    /// matching the optional `repo` (typed column, exact match against
-    /// the `repo` attribute) with `start_time_unix_nano >= since_nanos`,
-    /// sorted newest-first, capped at `limit`.
-    ///
-    /// At tracer scale the SPANS table holds at most one refresh worth
-    /// of records (cache wipes on restart, refresh re-reads disk), so a
-    /// linear scan is correct. A secondary index on
-    /// `(start_time_unix_nano, span_id)` becomes load-bearing when span
-    /// volume crosses tens of thousands per refresh; revisit then.
-    pub fn query_spans(
-        &self,
-        repo: Option<&str>,
-        since_nanos: Option<i64>,
-        limit: usize,
-    ) -> Result<Vec<Span>> {
-        let read = self.db.begin_read()?;
-        let t = read.open_table(SPANS)?;
-        let mut out = Vec::new();
-        for row in t.iter()? {
-            let (_k, v) = row?;
-            let s: Span = serde_json::from_slice(v.value())?;
-            if let Some(r) = repo {
-                if s.repo.as_deref() != Some(r) {
-                    continue;
-                }
-            }
-            if let Some(since) = since_nanos {
-                if s.start_time_unix_nano < since {
-                    continue;
-                }
-            }
-            out.push(s);
-        }
-        out.sort_by_key(|s| std::cmp::Reverse(s.start_time_unix_nano));
-        out.truncate(limit);
-        Ok(out)
-    }
-
-    /// All spans for a single `trace_id`, sorted by `start_time_unix_nano`
-    /// ascending so the caller can walk the trace chronologically and
-    /// assemble the tree from `parent_span_id`. No limit: a trace is the
-    /// natural unit of trace-assembly, not paginated. Same full-table-scan
-    /// shape as `query_spans` because span volume is currently far below
-    /// the "needs an index" threshold; revisit when it isn't.
-    pub fn query_spans_by_trace(&self, trace_id: &str) -> Result<Vec<Span>> {
-        let read = self.db.begin_read()?;
-        let t = read.open_table(SPANS)?;
-        let mut out = Vec::new();
-        for row in t.iter()? {
-            let (_k, v) = row?;
-            let s: Span = serde_json::from_slice(v.value())?;
-            if s.trace_id == trace_id {
-                out.push(s);
-            }
-        }
-        out.sort_by_key(|s| s.start_time_unix_nano);
-        Ok(out)
-    }
 
     pub fn list_repos_with_counts(&self) -> Result<Vec<Repo>> {
         let read = self.db.begin_read()?;
@@ -1466,8 +1366,6 @@ impl CacheWriter<'_> {
         clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_FULL_NAME)?;
         clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_HTTPS_URL)?;
         clear_table::<(i64, u64), ()>(self.txn, ACTIVE_REPOS_BY_PUSHED_AT)?;
-        clear_table::<u64, &[u8]>(self.txn, SPANS)?;
-        clear_table::<(&str, &str), u64>(self.txn, SPANS_BY_TRACE_SPAN)?;
         clear_table::<u64, &[u8]>(self.txn, ISSUE_REFS)?;
         clear_table::<(u64, u32, &str, u64), u64>(self.txn, ISSUE_REFS_BY_REPO_ISSUE)?;
         clear_table::<(&str, u64, u64, u32), ()>(self.txn, ISSUE_REFS_BY_SOURCE)?;
@@ -1580,52 +1478,6 @@ impl CacheWriter<'_> {
         self.txn
             .open_table(SESSIONS_BY_STARTED_AT)?
             .insert((ts_key, id), ())?;
-        Ok((u64_to_id(id), true))
-    }
-
-    /// Insert a span keyed by its (trace_id, span_id) natural key. Returns
-    /// `(id, true)` on first sight, `(existing_id, false)` if a previous
-    /// file already produced this pair. Cache wipe-on-restart means the
-    /// "previous file" is always within the same refresh sweep, so this
-    /// dedup is mostly a defense against duplicate filenames pointing at
-    /// the same logical span.
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_span(
-        &self,
-        trace_id: &str,
-        span_id: &str,
-        parent_span_id: Option<&str>,
-        name: &str,
-        start_time_unix_nano: i64,
-        end_time_unix_nano: i64,
-        agent_role: Option<&str>,
-        session_uuid: Option<&str>,
-        repo: Option<&str>,
-        attributes_json: &str,
-        source_file: &str,
-    ) -> Result<(i64, bool)> {
-        let mut by_natural = self.txn.open_table(SPANS_BY_TRACE_SPAN)?;
-        if let Some(g) = by_natural.get((trace_id, span_id))? {
-            return Ok((u64_to_id(g.value()), false));
-        }
-        let id = next_id(self.txn, META_NEXT_SPAN)?;
-        let span = Span {
-            id: u64_to_id(id),
-            trace_id: trace_id.into(),
-            span_id: span_id.into(),
-            parent_span_id: parent_span_id.map(str::to_string),
-            name: name.into(),
-            start_time_unix_nano,
-            end_time_unix_nano,
-            agent_role: agent_role.map(str::to_string),
-            session_uuid: session_uuid.map(str::to_string),
-            repo: repo.map(str::to_string),
-            attributes_json: attributes_json.into(),
-            source_file: source_file.into(),
-        };
-        let bytes = serde_json::to_vec(&span)?;
-        self.txn.open_table(SPANS)?.insert(id, bytes.as_slice())?;
-        by_natural.insert((trace_id, span_id), id)?;
         Ok((u64_to_id(id), true))
     }
 

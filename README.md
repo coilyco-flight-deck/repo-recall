@@ -2,11 +2,11 @@
 
 > *"What's the current state of every repo and agent burst on this machine, right now?"*
 
-repo-recall is the local hydration layer that joins everything an agent (or an operator) needs to reason about ongoing work on disk. It walks the repos you have, joins them against four data sources you already produce - **git** (commits, churn, working tree), **gh** (CI, PRs, issues, deploys), **[Claude Code](https://claude.com/claude-code) sessions** (`~/.claude/projects/`), and **OTel spans** (from [otel-a2a-relay](https://github.com/coilysiren/otel-a2a-relay) or any OTLP/file-drop producer) - and serves a single queryable surface to a browser and to an MCP host out of the same process.
+repo-recall is the local hydration layer that joins everything an agent (or an operator) needs to reason about ongoing work on disk. It walks the repos you have, joins them against three data sources you already produce - **git** (commits, churn, working tree), **gh** (CI, PRs, issues, deploys), and **[Claude Code](https://claude.com/claude-code) sessions** (`~/.claude/projects/`) - and serves a single queryable surface to a browser and to an MCP host out of the same process.
 
 Two questions, two clicks (or one MCP call):
 
-- **Which sessions and bursts touched this repo?** — open the repo, see every session that had it as `cwd` and every span tagged with it.
+- **Which sessions and bursts touched this repo?** — open the repo, see every session that had it as `cwd`.
 - **Which repos did this session or burst touch?** — open the session, see every repo it crossed.
 
 Everything is local. The server binds `127.0.0.1` only, and the cache lives in `$TMPDIR`. Outbound calls are limited to `gh run list` for CI status.
