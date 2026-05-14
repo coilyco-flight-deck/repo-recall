@@ -17,7 +17,10 @@ timeout_secs="${REPO_RECALL_BUILD_TIMEOUT_SECS:-1800}"
 log_file="${REPO_RECALL_BUILD_LOG:-/tmp/repo-recall-brew-build.$(date +%s).log}"
 start_epoch=$(date +%s)
 
-export CARGO_TERM_PROGRESS_WHEN=always
+# Don't set CARGO_TERM_PROGRESS_WHEN=always here: cargo 1.95+ rejects it when
+# stdout isn't a TTY (we tee into a log file) unless CARGO_TERM_PROGRESS_WIDTH
+# is also set. --verbose already gives per-crate output, which is what's
+# actually useful in the log. See coilysiren/repo-recall#136.
 export CARGO_TERM_VERBOSE=true
 
 cargo install --verbose "$@" 2>&1 | tee "$log_file" &
