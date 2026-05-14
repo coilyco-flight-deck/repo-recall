@@ -12,7 +12,10 @@ class RepoRecall < Formula
     # Cargo.toml is pinned at 0.0.0-dev; build.rs reads REPO_RECALL_VERSION
     # so the installed binary reports the tag the formula was built from.
     ENV["REPO_RECALL_VERSION"] = version.to_s
-    system "cargo", "install", *std_cargo_args
+    # scripts/brew-build.sh wraps cargo install with a 30min timeout,
+    # 60s heartbeat, --verbose, and on-timeout postmortem so a hung
+    # build is loud rather than a silent stall under brew's progress bar.
+    system "bash", buildpath/"scripts/brew-build.sh", *std_cargo_args
     pkgshare.install "static"
   end
 
