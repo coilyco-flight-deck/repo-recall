@@ -134,6 +134,8 @@ REPO_RECALL_CWD=/path/to/your/code cargo watch -w src -w Cargo.toml -w static -x
 
 A `.env` in the repo root is loaded automatically — drop your `REPO_RECALL_*` overrides there.
 
+A complete annotated template lives at [`config.example.yaml`](config.example.yaml) covering every planned config key (server, paths, ingest caps, refresh cadences, repo-card row schema, etc.). The runtime loader is still in flight at [#145](https://github.com/coilysiren/repo-recall/issues/145); until then, only the env vars in the table below are honored.
+
 ### Silencing vendored / external repos
 
 Drop an empty `.repo-recall-ignore` file at the root of any repo you've cloned for reading rather than working on (third-party sources, release-tag checkouts, vendored references). All action-required signals (detached HEAD, dirty tree, failing CI, etc.) are suppressed for that repo and it stops flowing into the action queue. Explicit, opt-in, no auto-detection.
