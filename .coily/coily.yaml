@@ -34,3 +34,18 @@ commands:
   watch:
     run: make watch
     description: cargo-watch + caddy https proxy at https://$(https_host):$(https_port)
+
+# Catalog metadata for the cross-repo knowledge graph.
+# Schema: coilysiren/coilyco-ai#420 (tracker).
+catalog:
+  kind: Component
+  type: service
+  system: observability
+  owner: kai
+  lifecycle: production
+  description: "Hydration layer for agent work. Joins OTel spans, git/gh state, Claude Code sessions, and local docs context into one queryable surface (web + MCP)."
+  dependsOn:
+    - coilysiren/otel-a2a-relay
+  providesApis:
+    - recall-web
+    - recall-mcp
