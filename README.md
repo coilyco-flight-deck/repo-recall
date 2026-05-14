@@ -134,7 +134,7 @@ REPO_RECALL_CWD=/path/to/your/code cargo watch -w src -w Cargo.toml -w static -x
 
 A `.env` in the repo root is loaded automatically — drop your `REPO_RECALL_*` overrides there.
 
-A complete annotated template lives at [`config.example.yaml`](config.example.yaml) covering every planned config key (server, paths, ingest caps, refresh cadences, repo-card row schema, etc.). The runtime loader is still in flight at [#145](https://github.com/coilysiren/repo-recall/issues/145); until then, only the env vars in the table below are honored.
+A complete annotated template lives at [`config.example.yaml`](config.example.yaml). Copy it to `~/.config/repo-recall/config.yaml` (or `./repo-recall.yaml` for per-workspace overrides) and edit. Precedence highest-wins: `REPO_RECALL_*` env vars > per-workspace YAML > per-user YAML > built-in defaults.
 
 ### Silencing vendored / external repos
 

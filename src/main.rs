@@ -1,5 +1,4 @@
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use miette::{IntoDiagnostic, WrapErr};
@@ -7,6 +6,7 @@ use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use repo_recall::{
+    config,
     db::CacheDb,
     display::{mcp, routes},
     ingest::git,
@@ -40,36 +40,42 @@ async fn main() -> miette::Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    let cwd = match std::env::var_os("REPO_RECALL_CWD") {
-        Some(p) => PathBuf::from(p),
+    // Load layered config (built-in defaults <- ~/.config/repo-recall/config.yaml
+    // <- ./repo-recall.yaml <- REPO_RECALL_* env vars). See #145.
+    let cfg = config::load();
+    config::validate(&cfg);
+
+    let cwd = match cfg.paths.cwd.clone() {
+        Some(p) => p,
         None => std::env::current_dir()
             .into_diagnostic()
             .wrap_err("failed to read current working directory")?,
     };
     let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
 
-    let port: u16 = std::env::var("REPO_RECALL_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7777);
-
+    let port: u16 = cfg.server.port;
     // Default is loopback. Override only when fronted by something that gates
     // access at a different layer (e.g. `tailscale serve` on a tailnet-only
     // host). Setting this to a non-loopback address on a shared or public-facing
     // box would expose session metadata.
-    let host: IpAddr = std::env::var("REPO_RECALL_HOST")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
+    let host: IpAddr = cfg.server.host.parse().unwrap_or_else(|e| {
+        tracing::warn!(
+            "config server.host={:?} invalid: {e}; falling back to 127.0.0.1",
+            cfg.server.host
+        );
+        IpAddr::from([127, 0, 0, 1])
+    });
 
     // Default cache directory is per-port so two instances (e.g.
     // launchd-managed on 7777 and a dev binary on 7778) don't share state
     // and wipe each other's tables during their periodic refreshes. Override
     // with REPO_RECALL_CACHE_DIR. The cache file inside is `cache.redb` and
     // is recreated on every startup (wipe-on-restart).
-    let cache_dir = std::env::var("REPO_RECALL_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join(format!("repo-recall-{port}")));
+    let cache_dir = cfg
+        .paths
+        .cache_dir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("repo-recall-{port}")));
 
     tracing::info!("cwd:   {}", cwd.display());
     tracing::info!("cache: {}", cache_dir.display());
@@ -93,8 +99,8 @@ async fn main() -> miette::Result<()> {
         .map_err(|e| miette::miette!("{e:?}"))
         .wrap_err_with(|| format!("failed to open search index at {}", index_dir.display()))?;
 
-    let scan_depth: usize = env_usize("REPO_RECALL_DEPTH", 4);
-    let commits_per_repo: usize = env_usize("REPO_RECALL_COMMITS_PER_REPO", 500);
+    let scan_depth: usize = cfg.discovery.scan_depth;
+    let commits_per_repo: usize = cfg.discovery.commits_per_repo;
 
     let gh_health = git::log::gh_health();
     let my_gh_login = if gh_health == git::log::GhHealth::Ok {
@@ -104,8 +110,8 @@ async fn main() -> miette::Result<()> {
     };
     let my_git_email = detect_my_git_email();
 
-    let refresh_interval_secs: u64 = env_u64("REPO_RECALL_REFRESH_INTERVAL_SECS", 150);
-    let remote_target_limit: usize = env_usize("REPO_RECALL_REMOTE_TARGET_LIMIT", 25);
+    let refresh_interval_secs: u64 = cfg.refresh.interval_secs;
+    let remote_target_limit: usize = cfg.ingest.github.remote_target_limit;
 
     let state = AppState {
         cache_db,
@@ -185,20 +191,6 @@ async fn main() -> miette::Result<()> {
         }
     }
     Ok(())
-}
-
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
 }
 
 fn print_help() {
