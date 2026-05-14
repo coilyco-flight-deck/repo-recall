@@ -327,7 +327,7 @@ mod tests {
             autonomy_confidence: None,
             autonomy_confidence_basis: Some("read coilyco-vault for context".into()),
             tracking_issue: None,
-            prompt: "ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII please".into(),
+            prompt: "ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII please".into(), // trufflehog:ignore
             slug: Some("scrub-proof".into()),
         };
         let resp = emit_dispatch(&repo, "repo-recall", &req).expect("emit ok");

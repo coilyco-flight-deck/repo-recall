@@ -170,9 +170,11 @@ mod tests {
 
     #[test]
     fn scrub_strips_known_bad_terms_from_session_excerpt() {
-        let excerpt = "Walking ~/projects/coilysiren/coilyco-vault/Obsidian Vault/Notes \
-                       on kai-server with token ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII \
-                       and sk-ant-api03-xyz123.";
+        let excerpt = concat!(
+            "Walking ~/projects/coilysiren/coilyco-vault/Obsidian Vault/Notes ",
+            "on kai-server with token ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII ", // trufflehog:ignore
+            "and sk-ant-api03-xyz123.",
+        );
         let scrubbed = scrub(excerpt, SanitizeSource::DispatchArtifact);
         assert!(!scrubbed.contains("coilyco-vault"), "{scrubbed}");
         assert!(!scrubbed.contains("Obsidian Vault"), "{scrubbed}");

@@ -256,7 +256,7 @@ mod tests {
         let _root = scratch_root();
         let req = EmitStructuralAskRequest {
             title: "Question about kai-server".into(),
-            ask_text: "Should we ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII?"
+            ask_text: "Should we ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII?" // trufflehog:ignore
                 .into(),
             lifts: vec!["foo/bar#2".into()],
             slug: Some("scrub-ask".into()),

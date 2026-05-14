@@ -274,7 +274,7 @@ mod tests {
         let req = EmitDriftProposalRequest {
             repo_slug: "r".into(),
             title: "Rule about kai-server access".into(),
-            proposed_rule: "Always ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII."
+            proposed_rule: "Always ssh kai-server with ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII." // trufflehog:ignore
                 .into(),
             supporting_dispatches: vec!["foo/bar#2".into()],
             slug: Some("scrub-drift".into()),

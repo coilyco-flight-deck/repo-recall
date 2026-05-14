@@ -3,7 +3,9 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^static/tailwind\.css$
       - id: end-of-file-fixer
+        exclude: ^static/tailwind\.css$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict
@@ -32,7 +34,7 @@ repos:
     hooks:
       - id: trufflehog
         name: trufflehog (secrets scan)
-        entry: trufflehog filesystem --no-verification --fail .
+        entry: trufflehog filesystem --no-verification --fail --exclude-paths=.trufflehog-exclude .
         language: system
         stages: [pre-commit, pre-push]
 
