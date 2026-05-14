@@ -79,25 +79,55 @@ dashboard:
 card:
   short:
     rows:
-      - { id: heading,       enabled: true }
-      - { id: banner,        enabled: true, cap_rows: 5 }
-      - { id: health,        enabled: true }
-      - { id: activity,      enabled: true, cap_rows: 5,  cap_window_days: 30 }
-      - { id: work,          enabled: true, cap_rows: 5 }
-      - { id: asks,          enabled: true, cap_rows: 3,  sort: oldest_first }
-      - { id: sessions,      enabled: true, cap_rows: 5,  cap_window_days: 90 }
-      - { id: dispatch,      enabled: true, cap_rows: 3 }
-      - { id: churn,         enabled: true, cap_rows: 5,  cap_window_days: 30 }
-      - { id: overflow_link, enabled: true }
+      - id: heading
+        enabled: true
+      - id: banner
+        enabled: true
+        cap_rows: 5
+      - id: health
+        enabled: true
+      - id: activity
+        enabled: true
+        cap_rows: 5
+        cap_window_days: 30
+      - id: work
+        enabled: true
+        cap_rows: 5
+      - id: asks
+        enabled: true
+        cap_rows: 3
+        sort: oldest_first
+      - id: sessions
+        enabled: true
+        cap_rows: 5
+        cap_window_days: 90
+      - id: dispatch
+        enabled: true
+        cap_rows: 3
+      - id: churn
+        enabled: true
+        cap_rows: 5
+        cap_window_days: 30
+      - id: overflow_link
+        enabled: true
   verbose:
     show_absent_with_reason: true  # "no sessions in last 90d" instead of suppressing
     rows:
-      - { id: activity, cap_rows: 100, cap_window_days: 90 }
-      - { id: work,     cap_rows: 50 }
-      - { id: asks,     cap_rows: 50 }
-      - { id: sessions, cap_rows: 100, cap_window_days: 90 }
-      - { id: dispatch, cap_rows: 50 }
-      - { id: churn,    cap_rows: 50,  cap_window_days: 90 }
+      - id: activity
+        cap_rows: 100
+        cap_window_days: 90
+      - id: work
+        cap_rows: 50
+      - id: asks
+        cap_rows: 50
+      - id: sessions
+        cap_rows: 100
+        cap_window_days: 90
+      - id: dispatch
+        cap_rows: 50
+      - id: churn
+        cap_rows: 50
+        cap_window_days: 90
 
 mcp:
   default_commit_limit: 50       # recall_repo_detail default.
