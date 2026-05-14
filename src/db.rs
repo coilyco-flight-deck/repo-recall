@@ -99,6 +99,16 @@ const DISPATCHES: TableDefinition<u64, &[u8]> = TableDefinition::new("dispatches
 const DISPATCHES_BY_REPO: TableDefinition<(u64, i64, u64), ()> =
     TableDefinition::new("dispatches_by_repo");
 
+// cli-guard audit events. One row per coily verb invocation. See #148.
+const AUDIT_EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("audit_events");
+// (repo_id, -ts, audit_event_id) -> () — newest-first per repo. Repo `0`
+// holds rows whose `commit_scope` didn't match any discovered repo.
+const AUDIT_EVENTS_BY_REPO_TS: TableDefinition<(u64, i64, u64), ()> =
+    TableDefinition::new("audit_events_by_repo_ts");
+// event_id (uuid7 from cli-guard) -> audit_event_id_internal. Dedup key.
+const AUDIT_EVENTS_BY_NATURAL_KEY: TableDefinition<&str, u64> =
+    TableDefinition::new("audit_events_by_natural_key");
+
 // Issue refs: which sessions/commits touch which issue in which repo.
 // Designed in #92 to let recall-dispatch ground per-ticket context in real
 // prior work, instead of guessing from in-session reasoning.
@@ -116,6 +126,7 @@ const META_NEXT_COMMIT: &str = "next_commit_id";
 const META_NEXT_FILE_CHANGE: &str = "next_file_change_id";
 const META_NEXT_UNCOMMITTED: &str = "next_uncommitted_id";
 const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
+const META_NEXT_AUDIT_EVENT: &str = "next_audit_event_id";
 const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 const META_NEXT_DISPATCH: &str = "next_dispatch_id";
 const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
@@ -204,6 +215,25 @@ pub struct Commit {
     pub author_email: String,
     pub timestamp: i64,
     pub subject: String,
+}
+
+/// One row from coily's audit log, joined to the repo via `commit_scope`.
+/// `repo_id == 0` means the row's scope didn't match any discovered repo
+/// (the cli-guard `_unrooted` shard or a workspace outside `cwd`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub id: i64,
+    pub repo_id: i64,
+    pub event_id: String,
+    pub ts: i64,
+    pub decision: String,
+    pub verb: String,
+    pub argv: Vec<String>,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub commit_scope: Option<String>,
+    pub audit_override: bool,
+    pub source_file: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -444,6 +474,9 @@ impl CacheDb {
             let _ = write.open_table(ACTIVE_REPOS_BY_FULL_NAME)?;
             let _ = write.open_table(ACTIVE_REPOS_BY_HTTPS_URL)?;
             let _ = write.open_table(ACTIVE_REPOS_BY_PUSHED_AT)?;
+            let _ = write.open_table(AUDIT_EVENTS)?;
+            let _ = write.open_table(AUDIT_EVENTS_BY_REPO_TS)?;
+            let _ = write.open_table(AUDIT_EVENTS_BY_NATURAL_KEY)?;
             let _ = write.open_table(ISSUE_REFS)?;
             let _ = write.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
             let _ = write.open_table(ISSUE_REFS_BY_SOURCE)?;
@@ -480,6 +513,57 @@ impl CacheDb {
     // -----------------------------------------------------------------
     // reads
     // -----------------------------------------------------------------
+
+    /// Newest-first scan of audit events for one repo. `repo_id == 0`
+    /// returns rows from cli-guard's `_unrooted` shard. `since_ts` is the
+    /// inclusive lower bound (unix seconds); `None` means no lower bound.
+    /// `limit` caps the result count.
+    pub fn audit_events_for_repo(
+        &self,
+        repo_id: i64,
+        since_ts: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>> {
+        let read = self.db.begin_read()?;
+        let idx = read.open_table(AUDIT_EVENTS_BY_REPO_TS)?;
+        let evts = read.open_table(AUDIT_EVENTS)?;
+        let key = id_to_u64(repo_id);
+        let lo = (key, i64::MIN, 0u64);
+        let hi = (key, i64::MAX, u64::MAX);
+        let mut out = Vec::with_capacity(limit.min(64));
+        for row in idx.range(lo..=hi)? {
+            let (k, _v) = row?;
+            let (_repo, neg_ts, id) = k.value();
+            let ts = -neg_ts;
+            if let Some(since) = since_ts {
+                if ts < since {
+                    break;
+                }
+            }
+            if let Some(blob) = evts.get(id)? {
+                let e: AuditEvent = serde_json::from_slice(blob.value())?;
+                out.push(e);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Iterate every ingested audit event. Test helper - prefer the
+    /// scoped read above in production code paths.
+    pub fn list_all_audit_events(&self) -> Result<Vec<AuditEvent>> {
+        let read = self.db.begin_read()?;
+        let t = read.open_table(AUDIT_EVENTS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_k, v) = row?;
+            let e: AuditEvent = serde_json::from_slice(v.value())?;
+            out.push(e);
+        }
+        Ok(out)
+    }
 
     pub fn list_repos_with_counts(&self) -> Result<Vec<Repo>> {
         let read = self.db.begin_read()?;
@@ -1366,6 +1450,9 @@ impl CacheWriter<'_> {
         clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_FULL_NAME)?;
         clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_HTTPS_URL)?;
         clear_table::<(i64, u64), ()>(self.txn, ACTIVE_REPOS_BY_PUSHED_AT)?;
+        clear_table::<u64, &[u8]>(self.txn, AUDIT_EVENTS)?;
+        clear_table::<(u64, i64, u64), ()>(self.txn, AUDIT_EVENTS_BY_REPO_TS)?;
+        clear_table::<&str, u64>(self.txn, AUDIT_EVENTS_BY_NATURAL_KEY)?;
         clear_table::<u64, &[u8]>(self.txn, ISSUE_REFS)?;
         clear_table::<(u64, u32, &str, u64), u64>(self.txn, ISSUE_REFS_BY_REPO_ISSUE)?;
         clear_table::<(&str, u64, u64, u32), ()>(self.txn, ISSUE_REFS_BY_SOURCE)?;
@@ -1478,6 +1565,55 @@ impl CacheWriter<'_> {
         self.txn
             .open_table(SESSIONS_BY_STARTED_AT)?
             .insert((ts_key, id), ())?;
+        Ok((u64_to_id(id), true))
+    }
+
+    /// Insert one audit event keyed by its `event_id` (uuid7 from cli-guard).
+    /// Returns `(id, true)` on first sight, `(existing_id, false)` on dup.
+    /// `repo_id == 0` is allowed and reserved for rows whose `commit_scope`
+    /// didn't match any discovered repo. See #148.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_audit_event(
+        &self,
+        repo_id: i64,
+        event_id: &str,
+        ts: i64,
+        decision: &str,
+        verb: &str,
+        argv: &[String],
+        exit_code: Option<i64>,
+        duration_ms: Option<i64>,
+        commit_scope: Option<&str>,
+        audit_override: bool,
+        source_file: &str,
+    ) -> Result<(i64, bool)> {
+        let mut by_natural = self.txn.open_table(AUDIT_EVENTS_BY_NATURAL_KEY)?;
+        if let Some(g) = by_natural.get(event_id)? {
+            return Ok((u64_to_id(g.value()), false));
+        }
+        let id = next_id(self.txn, META_NEXT_AUDIT_EVENT)?;
+        let evt = AuditEvent {
+            id: u64_to_id(id),
+            repo_id,
+            event_id: event_id.to_string(),
+            ts,
+            decision: decision.to_string(),
+            verb: verb.to_string(),
+            argv: argv.to_vec(),
+            exit_code,
+            duration_ms,
+            commit_scope: commit_scope.map(str::to_string),
+            audit_override,
+            source_file: source_file.to_string(),
+        };
+        let bytes = serde_json::to_vec(&evt)?;
+        self.txn
+            .open_table(AUDIT_EVENTS)?
+            .insert(id, bytes.as_slice())?;
+        by_natural.insert(event_id, id)?;
+        self.txn
+            .open_table(AUDIT_EVENTS_BY_REPO_TS)?
+            .insert((id_to_u64(repo_id), -ts, id), ())?;
         Ok((u64_to_id(id), true))
     }
 

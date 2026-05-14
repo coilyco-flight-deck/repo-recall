@@ -465,3 +465,138 @@ async fn json_surface_is_discoverable() {
         "openapi missing /api/action-required"
     );
 }
+
+#[tokio::test]
+async fn cli_guard_audit_ingest_round_trips_through_cache() {
+    // End-to-end exercise of the cli-guard audit JSONL ingest path (#148).
+    // Drop a JSONL shard in a temp dir, run the producer pipeline
+    // (list + parse + upsert), then verify list_all_audit_events returns
+    // both rows. Skips the env-var-resolution glue (default_audit_dir) on
+    // purpose - that's a thin shim and process-global env writes race
+    // other parallel tests.
+    use repo_recall::ingest::cli_guard::audit_jsonl as audit;
+
+    let cache_dir = std::env::temp_dir().join(format!("repo-recall-audit-{}", uuid_like()));
+    let cache_db = CacheDb::open_in_dir(&cache_dir).expect("cache db");
+
+    let audit_dir = std::env::temp_dir().join(format!("repo-recall-audit-shard-{}", uuid_like()));
+    std::fs::create_dir_all(&audit_dir).unwrap();
+    std::fs::write(
+        audit_dir.join("coilysiren-repo-recall.jsonl"),
+        concat!(
+            r#"{"id":"019e288b-280c-7fde-85fd-f323b3086b13","ts":1778796668,"decision":"accept","verb":"ops.gh","argv":["coily","ops","gh","whoami"],"exit_code":0,"duration_ms":1000,"commit_scope":"/repo/r1"}"#,
+            "\n",
+            r#"{"id":"019e2890-aaaa-bbbb-cccc-dddddddddddd","ts":1778796700,"decision":"deny","verb":"pkg.cargo","argv":["coily","pkg","cargo","build"],"exit_code":1,"commit_scope":"/repo/r2","audit_override":true}"#,
+            "\n",
+            r#"{"id":"019e2891-eeee-ffff-aaaa-bbbbbbbbbbbb","ts":1778796720,"verb":"whoami","argv":["coily","whoami"]}"#,
+            "\n",
+            "\nnot json\n",
+        ),
+    )
+    .unwrap();
+
+    // Seed two repos so the join lights up; the third row stays unrouted.
+    let repos = cache_db
+        .write_batch(|w| {
+            let id1 = w.upsert_repo("/repo/r1", "r1", 0, None, None)?;
+            let id2 = w.upsert_repo("/repo/r2", "r2", 0, None, None)?;
+            Ok(vec![
+                (id1, std::path::PathBuf::from("/repo/r1")),
+                (id2, std::path::PathBuf::from("/repo/r2")),
+            ])
+        })
+        .expect("seed repos");
+
+    let files = audit::list_audit_files(&audit_dir).expect("list");
+    assert_eq!(files.len(), 1);
+
+    let by_path: std::collections::HashMap<String, i64> = repos
+        .iter()
+        .map(|(id, p)| (p.to_string_lossy().into_owned(), *id))
+        .collect();
+
+    cache_db
+        .write_batch(|w| {
+            for path in &files {
+                for rec in audit::parse_audit_file(path).expect("parse") {
+                    let repo_id = rec
+                        .commit_scope
+                        .as_deref()
+                        .and_then(|s| by_path.get(s).copied())
+                        .unwrap_or(0);
+                    w.upsert_audit_event(
+                        repo_id,
+                        &rec.event_id,
+                        rec.ts,
+                        &rec.decision,
+                        &rec.verb,
+                        &rec.argv,
+                        rec.exit_code,
+                        rec.duration_ms,
+                        rec.commit_scope.as_deref(),
+                        rec.audit_override,
+                        &rec.source_file,
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .expect("write");
+
+    let all = cache_db.list_all_audit_events().expect("read all");
+    assert_eq!(all.len(), 3, "two routed + one unrouted, malformed dropped");
+
+    // Per-repo scan: r1 has 1, r2 has 1, repo_id=0 (unrouted) has 1.
+    let r1 = cache_db
+        .audit_events_for_repo(repos[0].0, None, 50)
+        .expect("r1");
+    assert_eq!(r1.len(), 1);
+    assert_eq!(r1[0].verb, "ops.gh");
+
+    let r2 = cache_db
+        .audit_events_for_repo(repos[1].0, None, 50)
+        .expect("r2");
+    assert_eq!(r2.len(), 1);
+    assert_eq!(r2[0].decision, "deny");
+    assert!(r2[0].audit_override);
+
+    let unrouted = cache_db
+        .audit_events_for_repo(0, None, 50)
+        .expect("unrouted");
+    assert_eq!(unrouted.len(), 1);
+    assert_eq!(unrouted[0].verb, "whoami");
+
+    // Idempotent: re-running the upsert does not duplicate.
+    cache_db
+        .write_batch(|w| {
+            for path in &files {
+                for rec in audit::parse_audit_file(path).expect("parse2") {
+                    let repo_id = rec
+                        .commit_scope
+                        .as_deref()
+                        .and_then(|s| by_path.get(s).copied())
+                        .unwrap_or(0);
+                    let (_id, was_new) = w.upsert_audit_event(
+                        repo_id,
+                        &rec.event_id,
+                        rec.ts,
+                        &rec.decision,
+                        &rec.verb,
+                        &rec.argv,
+                        rec.exit_code,
+                        rec.duration_ms,
+                        rec.commit_scope.as_deref(),
+                        rec.audit_override,
+                        &rec.source_file,
+                    )?;
+                    assert!(!was_new, "second upsert of same event_id should not insert");
+                }
+            }
+            Ok(())
+        })
+        .expect("write 2");
+    assert_eq!(cache_db.list_all_audit_events().expect("count").len(), 3);
+
+    std::fs::remove_dir_all(&audit_dir).ok();
+    std::fs::remove_dir_all(&cache_dir).ok();
+}

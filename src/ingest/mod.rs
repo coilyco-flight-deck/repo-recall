@@ -6,6 +6,7 @@
 //! See issue #92 for the design.
 
 pub mod claude;
+pub mod cli_guard;
 pub mod docs;
 pub mod git;
 pub mod health;

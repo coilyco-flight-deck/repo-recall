@@ -7,6 +7,7 @@ use chrono::Utc;
 
 use crate::db::{ActiveRemoteRepo, CacheDb};
 use crate::ingest::claude::sessions_jsonl as sessions;
+use crate::ingest::cli_guard::audit_jsonl as audit;
 use crate::ingest::git;
 use crate::process::join;
 use crate::AppState;
@@ -134,6 +135,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         // fragment commits. Best-effort: parse errors per file are
         // logged at `debug!` in the ingest layer.
         ingest_repo_dispatch(&cache_db, &repo_id_by_path)?;
+
+        // Phase 3.6: cli-guard audit log (#148). Walks every JSONL shard
+        // under `~/.coily/audit/` and groups rows by `commit_scope`. Rows
+        // whose scope didn't match any discovered repo land under
+        // `repo_id = 0` so the unrouted bucket stays queryable.
+        ingest_cli_guard(&cache_db, &repo_id_by_path)?;
 
         // Phase 4: precompute aggregates the dashboard reads back.
         cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
@@ -571,6 +578,65 @@ async fn ingest_labeled_issues(state: AppState) -> usize {
     .ok()
     .and_then(|r| r.ok())
     .unwrap_or(0)
+}
+
+/// Walk every JSONL shard under `~/.coily/audit/` (or the path resolved
+/// by `audit::default_audit_dir`), parse each row, and insert it keyed
+/// to the repo whose toplevel matches the row's `commit_scope`. Rows
+/// from cli-guard's `_unrooted` shard or with no matching repo land
+/// under `repo_id = 0` so the unrouted bucket stays queryable.
+///
+/// No-ops cleanly when the directory is unset or empty. One write
+/// transaction for the whole sweep so the audit tables commit atomically.
+fn ingest_cli_guard(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Result<usize> {
+    let Some(audit_dir) = audit::default_audit_dir() else {
+        return Ok(0);
+    };
+    let files = audit::list_audit_files(&audit_dir)?;
+    if files.is_empty() {
+        return Ok(0);
+    }
+    // Pre-index repos by canonical toplevel path for the per-row lookup.
+    let mut by_path: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::with_capacity(repos.len());
+    for (id, path) in repos {
+        by_path.insert(path.to_string_lossy().into_owned(), *id);
+    }
+    let inserted = cache_db.write_batch(|w| {
+        let mut n = 0usize;
+        for path in files.iter() {
+            match audit::parse_audit_file(path) {
+                Ok(records) => {
+                    for rec in records {
+                        let repo_id = rec
+                            .commit_scope
+                            .as_deref()
+                            .and_then(|s| by_path.get(s).copied())
+                            .unwrap_or(0);
+                        let (_id, was_new) = w.upsert_audit_event(
+                            repo_id,
+                            &rec.event_id,
+                            rec.ts,
+                            &rec.decision,
+                            &rec.verb,
+                            &rec.argv,
+                            rec.exit_code,
+                            rec.duration_ms,
+                            rec.commit_scope.as_deref(),
+                            rec.audit_override,
+                            &rec.source_file,
+                        )?;
+                        if was_new {
+                            n += 1;
+                        }
+                    }
+                }
+                Err(e) => tracing::debug!("cli-guard audit parse error {}: {e}", path.display()),
+            }
+        }
+        Ok(n)
+    })?;
+    Ok(inserted)
 }
 
 /// Walk each repo's `docs/repo-dispatch/` directory and insert every
