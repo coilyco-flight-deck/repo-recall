@@ -144,12 +144,6 @@ Every push to `main` triggers `.github/workflows/release.yml`, which fully autom
 
 **Skipping a release:** there's no built-in skip mechanism (intentional — we *want* every commit released). If you need to land a commit without releasing, you'd have to either temporarily disable the workflow or push directly to a tag without going through `main`. Don't do this without a reason.
 
-## Commit verification
-
-Local policy on every repo Kai pulls from: only pull commits down if those commits are GPG-signed and from the expected author. Reject unsigned history. Reject signed-but-wrong-author commits on a solo repo. See `coilyco-vault/Notes/git-pull-verification.md` for rationale and config.
-
-For repo-recall as a tool, a future `LocalState` (or `RemoteState`) attribute can flag repos whose recent commits include unsigned or wrong-author entries and bubble those into `is_action_required`. Not implemented yet. Recorded here so the design intent is captured before someone adds a generic "git status pill" that misses the security signal.
-
 ## Key references
 
 - [Claude Code session file format](https://docs.claude.com/en/docs/claude-code/settings) — sessions live in `~/.claude/projects/<encoded-project-dir>/*.jsonl`. Each line is an independent JSON record. Record shapes vary: `queue-operation` lines, `user`/`assistant` message lines, etc. `sessions.rs` ignores unknown shapes rather than failing.

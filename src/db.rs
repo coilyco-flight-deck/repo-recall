@@ -231,6 +231,21 @@ pub struct Commit {
     pub author_email: String,
     pub timestamp: i64,
     pub subject: String,
+    #[serde(default)]
+    pub committer_name: String,
+    #[serde(default)]
+    pub committer_email: String,
+    #[serde(default)]
+    pub committer_date_iso: String,
+    /// Parent SHAs space-separated, raw from `%P`. Empty for root commits.
+    #[serde(default)]
+    pub parents: String,
+    /// Decorated refs from `%D` (tag/branch tips at this commit).
+    #[serde(default)]
+    pub refs: String,
+    /// Full commit body from `%B` (subject + trailing paragraphs).
+    #[serde(default)]
+    pub body: String,
 }
 
 /// One row from coily's audit log, joined to the repo via `commit_scope`.
@@ -1665,35 +1680,38 @@ impl CacheWriter<'_> {
     pub fn upsert_commit(
         &self,
         repo_id: i64,
-        sha: &str,
-        author_name: &str,
-        author_email: &str,
-        timestamp: i64,
-        subject: &str,
+        rec: &crate::ingest::git::log::CommitRecord,
     ) -> Result<(i64, bool)> {
         let mut by_sha = self.txn.open_table(COMMITS_BY_REPO_SHA)?;
-        if let Some(g) = by_sha.get((id_to_u64(repo_id), sha))? {
+        if let Some(g) = by_sha.get((id_to_u64(repo_id), rec.sha.as_str()))? {
             return Ok((u64_to_id(g.value()), false));
         }
         let id = next_id(self.txn, META_NEXT_COMMIT)?;
         let commit = Commit {
             id: u64_to_id(id),
             repo_id,
-            sha: sha.into(),
-            author_name: author_name.into(),
-            author_email: author_email.into(),
-            timestamp,
-            subject: subject.into(),
+            sha: rec.sha.clone(),
+            author_name: rec.author_name.clone(),
+            author_email: rec.author_email.clone(),
+            timestamp: rec.timestamp,
+            subject: rec.subject.clone(),
+            committer_name: rec.committer_name.clone(),
+            committer_email: rec.committer_email.clone(),
+            committer_date_iso: rec.committer_date_iso.clone(),
+            parents: rec.parents.clone(),
+            refs: rec.refs.clone(),
+            body: rec.body.clone(),
         };
         let bytes = serde_json::to_vec(&commit)?;
         self.txn.open_table(COMMITS)?.insert(id, bytes.as_slice())?;
-        by_sha.insert((id_to_u64(repo_id), sha), id)?;
-        self.txn
-            .open_table(COMMITS_BY_REPO_TS)?
-            .insert((id_to_u64(repo_id), timestamp, id), author_email)?;
+        by_sha.insert((id_to_u64(repo_id), rec.sha.as_str()), id)?;
+        self.txn.open_table(COMMITS_BY_REPO_TS)?.insert(
+            (id_to_u64(repo_id), rec.timestamp, id),
+            rec.author_email.as_str(),
+        )?;
         self.txn
             .open_table(COMMITS_BY_TS)?
-            .insert((timestamp, id), ())?;
+            .insert((rec.timestamp, id), ())?;
         Ok((u64_to_id(id), true))
     }
 

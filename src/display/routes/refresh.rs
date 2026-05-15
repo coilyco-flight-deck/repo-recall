@@ -645,14 +645,7 @@ fn ingest_commits(
             match git::log::scan(repo_path, limit_per_repo) {
                 Ok(records) => {
                     for rec in &records {
-                        let (commit_id, _new) = w.upsert_commit(
-                            *repo_id,
-                            &rec.sha,
-                            &rec.author_name,
-                            &rec.author_email,
-                            rec.timestamp,
-                            &rec.subject,
-                        )?;
+                        let (commit_id, _new) = w.upsert_commit(*repo_id, rec)?;
                         // Auto-close trailers (`closes #N`, `fixes #N`, ...)
                         // are repo-implicit: the issue lives in the same
                         // repo as the commit. Cross-repo references are

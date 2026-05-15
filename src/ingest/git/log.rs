@@ -8,9 +8,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-/// One commit — enough to power a recent-activity list. We pull full SHA,
-/// author timestamp (unix), name, email, and subject. Body/stats are
-/// intentionally out of scope for MVP.
+/// One commit — enough to power a recent-activity list plus a join key
+/// surface (parents, refs, committer identity, full body).
 #[derive(Debug, Clone)]
 pub struct CommitRecord {
     pub sha: String,
@@ -18,6 +17,24 @@ pub struct CommitRecord {
     pub author_email: String,
     pub timestamp: i64,
     pub subject: String,
+    /// Committer name (%cn). Often equal to the author for solo work, but
+    /// diverges on rebased, cherry-picked, or partner-pushed history.
+    pub committer_name: String,
+    /// Committer email (%ce).
+    pub committer_email: String,
+    /// Committer date as strict ISO-8601 (%cI). Strings, not unix seconds,
+    /// because committer date is what GitHub displays and ISO survives
+    /// round-trips through JSON without UTC ambiguity.
+    pub committer_date_iso: String,
+    /// Parent SHAs, space-separated as git emits them (%P). Empty for
+    /// root commits, two-or-more for merges.
+    pub parents: String,
+    /// Decorated ref names (%D). Tag and branch tips that point at this
+    /// commit, comma+space separated. Empty when undecorated.
+    pub refs: String,
+    /// Full commit body (%B). Includes the subject line and any trailing
+    /// paragraphs. Stored verbatim so closes/refs trailers stay parseable.
+    pub body: String,
 }
 
 /// Run `git log` in `repo_path` and parse the last `limit` commits across all
@@ -29,9 +46,10 @@ pub struct CommitRecord {
 pub fn scan(repo_path: &Path, limit: usize) -> Result<Vec<CommitRecord>> {
     let path_str = repo_path.to_str().context("repo path is not valid utf-8")?;
 
-    // `--format` uses NUL (\0, `%x00`) as field separator so commit subjects
-    // containing tabs/pipes/newlines don't confuse us. Newlines between
-    // records are preserved because git log emits LF between entries.
+    // Field separator is NUL (\x00); record separator is RS (\x1e). RS
+    // matters because %B (full body) is multi-line — splitting records on
+    // newlines would shred bodies. Body is the last field so any trailing
+    // RS-less LF between records is harmless.
     let output = Command::new("git")
         .args([
             "-C",
@@ -42,7 +60,7 @@ pub fn scan(repo_path: &Path, limit: usize) -> Result<Vec<CommitRecord>> {
             "-n",
             &limit.to_string(),
             "--use-mailmap",
-            "--format=%H%x00%at%x00%aN%x00%aE%x00%s",
+            "--format=%H%x00%at%x00%aN%x00%aE%x00%cn%x00%ce%x00%cI%x00%P%x00%D%x00%s%x00%B%x1e",
         ])
         .output()
         .with_context(|| format!("failed to invoke git in {}", repo_path.display()))?;
@@ -59,14 +77,15 @@ pub fn scan(repo_path: &Path, limit: usize) -> Result<Vec<CommitRecord>> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut out = Vec::new();
-    for line in stdout.lines() {
-        if line.is_empty() {
+    for raw_record in stdout.split('\x1e') {
+        let record = raw_record.trim_start_matches('\n');
+        if record.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.splitn(5, '\0').collect();
-        if parts.len() != 5 {
+        let parts: Vec<&str> = record.splitn(11, '\0').collect();
+        if parts.len() != 11 {
             tracing::debug!(
-                "skip malformed git log line in {}: {line:?}",
+                "skip malformed git log record in {}: {record:?}",
                 repo_path.display()
             );
             continue;
@@ -79,7 +98,13 @@ pub fn scan(repo_path: &Path, limit: usize) -> Result<Vec<CommitRecord>> {
             timestamp: ts,
             author_name: parts[2].to_string(),
             author_email: parts[3].to_string(),
-            subject: parts[4].to_string(),
+            committer_name: parts[4].to_string(),
+            committer_email: parts[5].to_string(),
+            committer_date_iso: parts[6].to_string(),
+            parents: parts[7].to_string(),
+            refs: parts[8].to_string(),
+            subject: parts[9].to_string(),
+            body: parts[10].to_string(),
         });
     }
     Ok(out)
