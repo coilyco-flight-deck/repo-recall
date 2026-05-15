@@ -1,10 +1,25 @@
 //! `docs/FEATURES.md` ingest source. The "what ships today" inventory.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::ingest::health::{IngestSource, Report};
 
-pub struct FeaturesMdSource;
+pub struct FeaturesMdSource {
+    stale_after: Duration,
+}
+
+impl FeaturesMdSource {
+    pub fn new(stale_after: Duration) -> Self {
+        Self { stale_after }
+    }
+
+    pub fn from_config(cfg: &crate::config::IngestDocs) -> Self {
+        Self::new(super::file_health::stale_after_from_days(
+            cfg.file_stale_after_days,
+        ))
+    }
+}
 
 impl IngestSource for FeaturesMdSource {
     fn id(&self) -> &'static str {
@@ -20,6 +35,7 @@ impl IngestSource for FeaturesMdSource {
             self.id(),
             repo_path,
             "docs/FEATURES.md",
+            self.stale_after,
         ))
     }
 }

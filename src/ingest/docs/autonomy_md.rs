@@ -4,10 +4,25 @@
 //! be Red on this source until they adopt the pattern.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::ingest::health::{IngestSource, Report};
 
-pub struct AutonomyMdSource;
+pub struct AutonomyMdSource {
+    stale_after: Duration,
+}
+
+impl AutonomyMdSource {
+    pub fn new(stale_after: Duration) -> Self {
+        Self { stale_after }
+    }
+
+    pub fn from_config(cfg: &crate::config::IngestDocs) -> Self {
+        Self::new(super::file_health::stale_after_from_days(
+            cfg.file_stale_after_days,
+        ))
+    }
+}
 
 impl IngestSource for AutonomyMdSource {
     fn id(&self) -> &'static str {
@@ -23,6 +38,7 @@ impl IngestSource for AutonomyMdSource {
             self.id(),
             repo_path,
             "docs/AUTONOMY.md",
+            self.stale_after,
         ))
     }
 }

@@ -12,15 +12,26 @@ use crate::ingest::health::{Health, Report};
 /// Files smaller than this are treated as placeholders.
 pub const MIN_SUBSTANCE_BYTES: u64 = 200;
 
-/// Files untouched for longer than this are treated as stale.
-pub const STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 24 * 180);
+/// Build a `Duration` from `ingest.docs.file_stale_after_days`. Single
+/// conversion site so callers don't reinvent the days->seconds math.
+pub fn stale_after_from_days(days: u32) -> Duration {
+    Duration::from_secs(u64::from(days) * 86_400)
+}
 
 /// Compute a `Report` for one named file inside a repo.
 ///
 /// * `source_id` and `repo_path` identify what we are inspecting.
 /// * `relative_path` is the file's path under the repo root
 ///   (e.g. `"README.md"`, `"docs/FEATURES.md"`).
-pub fn file_report(source_id: &'static str, repo_path: &Path, relative_path: &str) -> Report {
+/// * `stale_after` is the cutoff past which an untouched file is
+///   reported Yellow. Sourced from `ingest.docs.file_stale_after_days`
+///   at the source's construction site.
+pub fn file_report(
+    source_id: &'static str,
+    repo_path: &Path,
+    relative_path: &str,
+    stale_after: Duration,
+) -> Report {
     let path = repo_path.join(relative_path);
     let Ok(meta) = std::fs::metadata(&path) else {
         return Report {
@@ -41,13 +52,14 @@ pub fn file_report(source_id: &'static str, repo_path: &Path, relative_path: &st
         .modified()
         .ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .map(|age| age > STALE_AFTER)
+        .map(|age| age > stale_after)
         .unwrap_or(false);
     if stale {
+        let days = stale_after.as_secs() / 86_400;
         return Report {
             source_id,
             health: Health::Yellow,
-            reason: format!("{relative_path} not touched in >180 days"),
+            reason: format!("{relative_path} not touched in >{days} days"),
         };
     }
     Report {
@@ -83,10 +95,12 @@ mod tests {
         dir
     }
 
+    const TEST_STALE: Duration = Duration::from_secs(60 * 60 * 24 * 180);
+
     #[test]
     fn missing_file_is_red() {
         let dir = scratch_dir();
-        let r = file_report("docs.readme", &dir, "README.md");
+        let r = file_report("docs.readme", &dir, "README.md", TEST_STALE);
         assert_eq!(r.health, Health::Red);
         assert!(r.reason.contains("no README.md"));
     }
@@ -96,7 +110,7 @@ mod tests {
         let dir = scratch_dir();
         let mut f = fs::File::create(dir.join("README.md")).unwrap();
         f.write_all(b"# hi").unwrap();
-        let r = file_report("docs.readme", &dir, "README.md");
+        let r = file_report("docs.readme", &dir, "README.md", TEST_STALE);
         assert_eq!(r.health, Health::Yellow);
         assert!(r.reason.contains("only"));
     }
@@ -107,7 +121,13 @@ mod tests {
         let mut f = fs::File::create(dir.join("README.md")).unwrap();
         f.write_all(&vec![b'x'; (MIN_SUBSTANCE_BYTES + 1) as usize])
             .unwrap();
-        let r = file_report("docs.readme", &dir, "README.md");
+        let r = file_report("docs.readme", &dir, "README.md", TEST_STALE);
         assert_eq!(r.health, Health::Green);
+    }
+
+    #[test]
+    fn stale_after_from_days_matches_seconds() {
+        assert_eq!(stale_after_from_days(180), TEST_STALE);
+        assert_eq!(stale_after_from_days(0), Duration::ZERO);
     }
 }
