@@ -136,6 +136,7 @@ async fn main() -> miette::Result<()> {
         stale_ask_threshold_secs,
         remote_backoff_until: Arc::new(Mutex::new(None)),
         remote_backoff_secs: Arc::new(Mutex::new(0)),
+        last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     // Initial scan in the background so the dashboard / first MCP tool call

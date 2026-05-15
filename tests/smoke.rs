@@ -49,6 +49,7 @@ async fn boot_with(
         stale_ask_threshold_secs: 7 * 86_400,
         remote_backoff_until: Arc::new(Mutex::new(None)),
         remote_backoff_secs: Arc::new(Mutex::new(0)),
+        last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = routes::router(state);

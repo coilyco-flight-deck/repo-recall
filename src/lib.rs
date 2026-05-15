@@ -78,6 +78,29 @@ pub struct AppState {
     /// successful pass. Independent of the parsed Retry-After: the
     /// effective sleep is `max(retry_after, backoff_secs)`.
     pub remote_backoff_secs: Arc<Mutex<u64>>,
+    /// In-memory shadow of the last-good remote-state per repo. Each
+    /// `CachedRemoteState` survives the per-refresh `wipe()` call on
+    /// the cache: when a per-repo gh fetch is rate-limited or returns
+    /// nothing, the writer falls back to this shadow so a single bad
+    /// pass does not blank the entire dashboard. Cleared on process
+    /// restart by design (the cache itself rebuilds from disk).
+    pub last_good_remote: Arc<Mutex<std::collections::HashMap<i64, CachedRemoteState>>>,
+}
+
+/// One repo's last-good remote-state, captured on the most recent
+/// successful gh fetch. The Vec fields shadow `RemoteSnapshot`'s typed
+/// payloads; the wall-clock timestamp powers a future "stale by Xm"
+/// freshness pill (issue #169 follow-up).
+#[derive(Clone)]
+pub struct CachedRemoteState {
+    pub ci: Option<String>,
+    pub prs: Option<ingest::git::log::PrCounts>,
+    pub issues: Option<ingest::git::log::IssueCounts>,
+    pub deploy: Option<(String, ingest::git::log::DeployHealth)>,
+    pub pr_records: Vec<ingest::github::PrRecordInput>,
+    pub issue_records: Vec<ingest::github::IssueRecordInput>,
+    pub ci_runs: Vec<ingest::github::CiRunRecordInput>,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Lower bound for the exponential remote-state backoff. First

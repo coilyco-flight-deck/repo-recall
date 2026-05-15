@@ -475,6 +475,14 @@ async fn ingest_ci_status(state: AppState) -> usize {
     // categorized RemoteFetchState the per-repo tasks recorded above.
     update_remote_backoff(&state, &results).await;
 
+    // #169: substitute the in-memory shadow for any per-repo snapshot
+    // that came back rate-limited (or otherwise empty due to a non-Ok
+    // RemoteFetchState). Keeps the dashboard showing last-good values
+    // through a transient outage instead of blanking on the next wipe.
+    // Successful snapshots also refresh the shadow with their fresh
+    // data + a wall-clock captured_at for a future freshness pill.
+    apply_last_good_shadow(&state, &mut results).await;
+
     let cache_db = state.cache_db.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
         cache_db.write_batch(|w| {
@@ -558,6 +566,72 @@ async fn ingest_active_repos(state: AppState) -> usize {
     .ok()
     .and_then(|r| r.ok())
     .unwrap_or(0)
+}
+
+/// Walk the just-collected snapshots and reconcile against
+/// `AppState.last_good_remote`:
+///
+/// - For a snapshot whose pass succeeded (no rate-limit, with at
+///   least one populated field), refresh the shadow entry with the
+///   new data and a wall-clock `captured_at`.
+/// - For a snapshot that came back rate-limited (or fully blank from
+///   another error), fall back to the shadow entry's prior data so
+///   the cache write that follows still surfaces a useful value
+///   instead of NULL columns.
+///
+/// Net effect: a single bad refresh pass no longer blanks the
+/// dashboard for the affected repos. Shadow lives in-memory and
+/// resets on process restart by design.
+async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]) {
+    let mut shadow = state.last_good_remote.lock().await;
+    let now = chrono::Utc::now();
+    let mut substituted = 0usize;
+    let mut refreshed = 0usize;
+
+    for snap in results.iter_mut() {
+        let snapshot_is_blank = snap.ci.is_none()
+            && snap.prs.is_none()
+            && snap.issues.is_none()
+            && snap.deploy.is_none()
+            && snap.pr_records.is_empty()
+            && snap.issue_records.is_empty()
+            && snap.ci_runs.is_empty();
+
+        if snap.rate_limited || snapshot_is_blank {
+            if let Some(prior) = shadow.get(&snap.id) {
+                snap.ci.clone_from(&prior.ci);
+                snap.prs.clone_from(&prior.prs);
+                snap.issues.clone_from(&prior.issues);
+                snap.deploy.clone_from(&prior.deploy);
+                snap.pr_records.clone_from(&prior.pr_records);
+                snap.issue_records.clone_from(&prior.issue_records);
+                snap.ci_runs.clone_from(&prior.ci_runs);
+                substituted += 1;
+            }
+            continue;
+        }
+
+        shadow.insert(
+            snap.id,
+            crate::CachedRemoteState {
+                ci: snap.ci.clone(),
+                prs: snap.prs.clone(),
+                issues: snap.issues,
+                deploy: snap.deploy.clone(),
+                pr_records: snap.pr_records.clone(),
+                issue_records: snap.issue_records.clone(),
+                ci_runs: snap.ci_runs.clone(),
+                captured_at: now,
+            },
+        );
+        refreshed += 1;
+    }
+
+    if substituted > 0 || refreshed > 0 {
+        tracing::debug!(
+            "last-good shadow: {refreshed} refreshed, {substituted} substituted from prior pass"
+        );
+    }
 }
 
 /// Inspect a finished pass's snapshots and advance or reset the
