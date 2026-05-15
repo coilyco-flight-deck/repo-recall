@@ -1,5 +1,5 @@
 query {
-  q0: search(type: ISSUE, first: 100, query: "label:\"structural-ask\" is:open repo:coilysiren/repo-recall repo:coilysiren/coilyco-ai") {
+  q0: search(type: ISSUE, first: 100, query: "label:\"structural-ask\" is:open repo:coilysiren/repo-recall repo:coilysiren/agentic-os-kai") {
     nodes {
       __typename
       ... on Issue {
@@ -13,7 +13,7 @@ query {
       }
     }
   }
-  q1: search(type: ISSUE, first: 100, query: "label:\"autonomous-block\" is:open repo:coilysiren/repo-recall repo:coilysiren/coilyco-ai") {
+  q1: search(type: ISSUE, first: 100, query: "label:\"autonomous-block\" is:open repo:coilysiren/repo-recall repo:coilysiren/agentic-os-kai") {
     nodes {
       __typename
       ... on Issue {
