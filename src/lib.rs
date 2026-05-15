@@ -51,4 +51,14 @@ pub struct AppState {
     /// In-memory store of in-flight autonomous-dispatch sessions. See
     /// `display::mcp::dispatch`. Dropped on restart by design.
     pub dispatch_sessions: display::mcp::dispatch::DispatchSessions,
+    /// Minimum seconds between labeled-issue GraphQL ingest passes. Sourced
+    /// from `refresh.per_source.github_remote_labeled` (default 3600s). The
+    /// labeled-issue ingest is the only sanctioned GraphQL call site, and
+    /// the secondary rate limit is shared - gate it explicitly here so
+    /// `interval_secs` can stay aggressive without burning the budget.
+    pub labeled_ingest_interval_secs: u64,
+    /// Last time `ingest_labeled_issues` actually ran (vs being gated).
+    /// In-memory; resets on process start, which is fine - the first refresh
+    /// after boot should always pull fresh labeled state.
+    pub last_labeled_ingest: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }

@@ -196,7 +196,33 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     // from every GitHub-hosted repo so the recall-dispatch planner can
     // tell which structural questions Kai has already opened. Same
     // best-effort posture as `ingest_ci_status`: failures stay silent.
-    let _labeled_n = ingest_labeled_issues(state.clone()).await;
+    //
+    // Gated against `state.labeled_ingest_interval_secs` (default 3600s)
+    // so the GraphQL secondary-rate-limit budget stays inside what
+    // AGENTS.md promises. The outer refresh loop ticks every
+    // `interval_secs` (default 150s); without this gate the GraphQL call
+    // would fire 24x more often than the documented hourly cadence.
+    let should_run_labeled = {
+        let mut last = state.last_labeled_ingest.lock().await;
+        let now = Utc::now();
+        let due = match *last {
+            None => true,
+            Some(prev) => (now - prev).num_seconds() as u64 >= state.labeled_ingest_interval_secs,
+        };
+        if due {
+            *last = Some(now);
+        }
+        due
+    };
+    let _labeled_n = if should_run_labeled {
+        ingest_labeled_issues(state.clone()).await
+    } else {
+        tracing::debug!(
+            "labeled-issue ingest gated (next run in <={}s)",
+            state.labeled_ingest_interval_secs
+        );
+        0
+    };
 
     *state.last_scan.lock().await = Some(Utc::now());
     state
@@ -528,9 +554,11 @@ const LABEL_INGEST_TARGETS: &[crate::ingest::github::LabelTarget] = &[
 /// unauthenticated, or rate-limited `gh` returns 0 without breaking the
 /// refresh.
 ///
-/// Cadence is hourly in steady-state (#146 substrate, governed by
-/// `refresh.per_source.github_remote_labeled`). The refresh loop here
-/// still calls every pass; the substrate will gate it.
+/// Cadence is hourly in steady-state, gated at the call site in
+/// `run_refresh` against `AppState.labeled_ingest_interval_secs`
+/// (sourced from `refresh.per_source.github_remote_labeled`, default
+/// 3600s). The full per-source substrate (#146) is still TODO; this is
+/// the surgical mitigation for the labeled-issue site only.
 async fn ingest_labeled_issues(state: AppState) -> usize {
     let health = *state.gh_health.lock().await;
     if health != git::log::GhHealth::Ok {
