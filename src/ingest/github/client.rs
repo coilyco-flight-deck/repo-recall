@@ -26,6 +26,7 @@ use octocrab::Octocrab;
 
 use super::fetch_state::RemoteFetchState;
 use super::issues::{parse_issues_json, IssueRecordInput};
+use super::pulls::{parse_prs_json, PrRecordInput};
 
 /// Authenticated user as exposed to repo-recall. Trimmed shape: only
 /// the fields the dashboard / refresh path actually reads. Octocrab's
@@ -49,6 +50,11 @@ pub trait GithubClient: Send + Sync {
     /// open issues for one repo. PR-tagged rows are filtered by the
     /// shared parser. Replaces `crate::ingest::github::issues::fetch_open_issues`.
     async fn fetch_open_issues(&self, owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordInput>>;
+
+    /// `GET /repos/{owner}/{repo}/pulls?state=open&per_page=100` -
+    /// open pull requests for one repo. Replaces
+    /// `crate::ingest::github::pulls::fetch_open_prs`.
+    async fn fetch_open_prs(&self, owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>>;
 }
 
 /// Build the right client for the current process based on env state:
@@ -143,6 +149,18 @@ impl GithubClient for OctocrabClient {
         };
         RemoteFetchState::Ok(parse_issues_json(&value))
     }
+
+    async fn fetch_open_prs(&self, owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> {
+        if self.unconfigured {
+            return RemoteFetchState::Unconfigured;
+        }
+        let path = format!("/repos/{owner_repo}/pulls?state=open&per_page=100");
+        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
+            Ok(v) => v,
+            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
+        };
+        RemoteFetchState::Ok(parse_prs_json(&value))
+    }
 }
 
 /// Replays `.http` fixture files from a directory. Each trait method
@@ -211,6 +229,23 @@ impl GithubClient for FixturesClient {
             Err(e) => return RemoteFetchState::Error(format!("issues_open.http body: {e}")),
         };
         RemoteFetchState::Ok(parse_issues_json(&value))
+    }
+
+    async fn fetch_open_prs(&self, _owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> {
+        let parsed = match self.read_fixture("pulls_all.http") {
+            Ok(p) => p,
+            Err(e) => return RemoteFetchState::Error(e),
+        };
+        if let Some(state) =
+            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
+        {
+            return state;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
+            Ok(v) => v,
+            Err(e) => return RemoteFetchState::Error(format!("pulls_all.http body: {e}")),
+        };
+        RemoteFetchState::Ok(parse_prs_json(&value))
     }
 }
 

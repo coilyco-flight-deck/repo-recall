@@ -1,11 +1,10 @@
-//! Open-PR ingest from `gh api /repos/X/pulls?state=open`. Source 2 of #155.
-
-use std::process::Command;
+//! Open-PR ingest. Source 2 of #155. The wire layer lives in
+//! [`super::client::GithubClient::fetch_open_prs`]; this module owns
+//! the typed input shape and the pure JSON-to-record parser that
+//! both the octocrab and fixtures impls call into.
 
 use chrono::DateTime;
 
-use super::fetch_state::{classify_gh_failure, RemoteFetchState};
-use super::issues::log_categorized_failure;
 use crate::process::sanitize::{scrub, SanitizeSource};
 
 /// Body cap for stored PR/issue bodies. Per #155, we cap at first ~500
@@ -36,46 +35,13 @@ pub struct PrRecordInput {
     pub requested_teams: Vec<String>,
 }
 
-/// Fetch every open PR for `owner_repo` via `gh api /repos/X/pulls`. Capped
-/// at GitHub's REST per_page=100 max. Returns `None` on subprocess/parse
-/// failure so one repo's hiccup can't kill the whole pass.
-pub fn fetch_open_prs(owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> {
-    let Ok(output) = Command::new("gh")
-        .args([
-            "api",
-            &format!("/repos/{owner_repo}/pulls?state=open&per_page=100"),
-        ])
-        .output()
-    else {
-        return RemoteFetchState::Error("failed to spawn gh".into());
-    };
-    if !output.status.success() {
-        let state = classify_gh_failure(&output);
-        log_categorized_failure(
-            "gh api /pulls",
-            owner_repo,
-            &state,
-            &String::from_utf8_lossy(&output.stderr),
-        );
-        return match state {
-            RemoteFetchState::Missing => RemoteFetchState::Missing,
-            RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,
-            RemoteFetchState::RateLimited { retry_after_secs } => {
-                RemoteFetchState::RateLimited { retry_after_secs }
-            }
-            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
-            RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
-            RemoteFetchState::Ok(()) => {
-                RemoteFetchState::Error("classifier returned Ok on failure".into())
-            }
-        };
-    }
-    let Ok(value): serde_json::Result<serde_json::Value> = serde_json::from_slice(&output.stdout)
-    else {
-        return RemoteFetchState::Error("pulls: invalid JSON".into());
-    };
+/// Pure parser. Takes the GitHub REST `GET /repos/X/pulls` response
+/// body (a JSON array) and returns the typed records. Both the
+/// octocrab path and the fixtures path call this so the parsing
+/// rules live in one place.
+pub fn parse_prs_json(value: &serde_json::Value) -> Vec<PrRecordInput> {
     let Some(arr) = value.as_array() else {
-        return RemoteFetchState::Error("pulls: expected JSON array".into());
+        return Vec::new();
     };
     let mut out = Vec::with_capacity(arr.len());
     for pr in arr {
@@ -130,7 +96,7 @@ pub fn fetch_open_prs(owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> 
                 .unwrap_or_default(),
         });
     }
-    RemoteFetchState::Ok(out)
+    out
 }
 
 fn pull_str(v: &serde_json::Value, key: &str) -> String {
