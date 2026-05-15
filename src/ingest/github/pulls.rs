@@ -51,7 +51,12 @@ pub fn fetch_open_prs(owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> 
     };
     if !output.status.success() {
         let state = classify_gh_failure(&output);
-        log_categorized_failure("gh api /pulls", owner_repo, &state, &output.stderr);
+        log_categorized_failure(
+            "gh api /pulls",
+            owner_repo,
+            &state,
+            &String::from_utf8_lossy(&output.stderr),
+        );
         return match state {
             RemoteFetchState::Missing => RemoteFetchState::Missing,
             RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,

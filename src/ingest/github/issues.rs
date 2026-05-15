@@ -1,11 +1,15 @@
-//! Open-issue ingest from `gh api /repos/X/issues?state=open`. Source 3
-//! of #155. PR rows are filtered out (the REST endpoint mixes them in).
-
-use std::process::Command;
+//! Open-issue ingest. Source 3 of #155. The wire layer lives in
+//! [`super::client::GithubClient::fetch_open_issues`]; this module
+//! owns the typed input shape and the pure JSON-to-record parser
+//! that both the octocrab and fixtures impls call into.
+//!
+//! `pull_request`-tagged rows from the REST `/issues` endpoint are
+//! filtered out (the endpoint mixes PRs in with issues - PRs go
+//! through `pulls.rs`).
 
 use chrono::DateTime;
 
-use super::fetch_state::{classify_gh_failure, RemoteFetchState};
+use super::fetch_state::RemoteFetchState;
 use super::pulls::cap_body;
 
 #[derive(Debug, Clone, Default)]
@@ -28,38 +32,13 @@ pub struct IssueRecordInput {
     pub reactions_json: String,
 }
 
-pub fn fetch_open_issues(owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordInput>> {
-    let Ok(output) = Command::new("gh")
-        .args([
-            "api",
-            &format!("/repos/{owner_repo}/issues?state=open&per_page=100"),
-        ])
-        .output()
-    else {
-        return RemoteFetchState::Error("failed to spawn gh".into());
-    };
-    if !output.status.success() {
-        let state = classify_gh_failure(&output);
-        log_categorized_failure("gh api /issues", owner_repo, &state, &output.stderr);
-        return match state {
-            RemoteFetchState::Missing => RemoteFetchState::Missing,
-            RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,
-            RemoteFetchState::RateLimited { retry_after_secs } => {
-                RemoteFetchState::RateLimited { retry_after_secs }
-            }
-            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
-            RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
-            RemoteFetchState::Ok(()) => {
-                RemoteFetchState::Error("classifier returned Ok on failure".into())
-            }
-        };
-    }
-    let Ok(value): serde_json::Result<serde_json::Value> = serde_json::from_slice(&output.stdout)
-    else {
-        return RemoteFetchState::Error("issues: invalid JSON".into());
-    };
+/// Pure parser. Takes the GitHub REST `GET /repos/X/issues` response
+/// body (a JSON array) and returns the typed records. Rows tagged
+/// `pull_request` are skipped. Both the octocrab path and the fixtures
+/// path call this so the parsing rules live in one place.
+pub fn parse_issues_json(value: &serde_json::Value) -> Vec<IssueRecordInput> {
     let Some(arr) = value.as_array() else {
-        return RemoteFetchState::Error("issues: expected JSON array".into());
+        return Vec::new();
     };
     let mut out = Vec::with_capacity(arr.len());
     for issue in arr {
@@ -137,7 +116,7 @@ pub fn fetch_open_issues(owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordIn
             reactions_json,
         });
     }
-    RemoteFetchState::Ok(out)
+    out
 }
 
 /// Shared helper: log a categorized failure at the appropriate level.
@@ -149,9 +128,8 @@ pub(crate) fn log_categorized_failure(
     call: &str,
     owner_repo: &str,
     state: &RemoteFetchState<()>,
-    stderr_bytes: &[u8],
+    detail: &str,
 ) {
-    let stderr = String::from_utf8_lossy(stderr_bytes);
     match state {
         RemoteFetchState::RateLimited { retry_after_secs } => {
             let retry = match retry_after_secs {
@@ -160,7 +138,7 @@ pub(crate) fn log_categorized_failure(
             };
             tracing::warn!(
                 "{call} rate-limited for {owner_repo}{retry}: {}",
-                stderr.trim()
+                detail.trim()
             );
         }
         RemoteFetchState::Missing => {
@@ -173,7 +151,7 @@ pub(crate) fn log_categorized_failure(
             tracing::debug!("{call} skipped for {owner_repo}: GitHub client unconfigured");
         }
         RemoteFetchState::Error(_) | RemoteFetchState::Ok(()) => {
-            tracing::debug!("{call} failed for {owner_repo}: {}", stderr.trim());
+            tracing::debug!("{call} failed for {owner_repo}: {}", detail.trim());
         }
     }
 }

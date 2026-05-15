@@ -406,9 +406,18 @@ async fn ingest_ci_status(state: AppState) -> usize {
     for (id, slug, branch, deploy_wf) in jobs {
         let sem = semaphore.clone();
         let login = my_login.clone();
+        let github_client = state.github_client.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
+            // #176: issues now flow through the GithubClient trait
+            // (octocrab in prod, FixturesClient in `make watch-fixtures`).
+            // Run async outside the spawn_blocking that hosts the still-
+            // subprocess pulls/ci/deploy calls. Steps 3-5 of #173 pull
+            // those out the same way.
+            let issue_state = github_client.fetch_open_issues(&slug).await;
+            let slug_for_blocking = slug.clone();
             tokio::task::spawn_blocking(move || {
+                let slug = slug_for_blocking;
                 let ci = git::log::ci_status(&slug, &branch);
                 let (prs, issues) = match git::log::fetch_pr_and_issue_counts(&slug, &login) {
                     Some((p, i)) => (Some(p), Some(i)),
@@ -417,13 +426,12 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 let deploy = deploy_wf.as_ref().and_then(|wf| {
                     git::log::fetch_deploy_health(&slug, wf, &branch).map(|h| (wf.clone(), h))
                 });
-                // Source 2 + 3 + 4: pull the full individual rows alongside
-                // the aggregate counts. Same `gh` call surface — just keep
-                // more of the response. Best-effort: a single repo's hiccup
-                // leaves these vectors empty rather than breaking the pass.
+                // Sources 2 + 4 (PRs + CI runs) still on `gh` subprocess
+                // until steps 3-4 of #173. Same best-effort stance:
+                // hiccup leaves these vectors empty rather than failing
+                // the pass.
                 use crate::ingest::github::RemoteFetchState;
                 let pr_state = crate::ingest::github::fetch_open_prs(&slug);
-                let issue_state = crate::ingest::github::fetch_open_issues(&slug);
                 let ci_state = crate::ingest::github::fetch_recent_runs(&slug, 20);
 
                 let mut rate_limited = false;

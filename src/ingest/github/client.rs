@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use octocrab::Octocrab;
 
 use super::fetch_state::RemoteFetchState;
+use super::issues::{parse_issues_json, IssueRecordInput};
 
 /// Authenticated user as exposed to repo-recall. Trimmed shape: only
 /// the fields the dashboard / refresh path actually reads. Octocrab's
@@ -43,6 +44,11 @@ pub trait GithubClient: Send + Sync {
     /// `GET /user` - viewer's GitHub identity. Replaces
     /// `crate::ingest::git::log::my_gh_login`.
     async fn fetch_user(&self) -> RemoteFetchState<AuthedUser>;
+
+    /// `GET /repos/{owner}/{repo}/issues?state=open&per_page=100` -
+    /// open issues for one repo. PR-tagged rows are filtered by the
+    /// shared parser. Replaces `crate::ingest::github::issues::fetch_open_issues`.
+    async fn fetch_open_issues(&self, owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordInput>>;
 }
 
 /// Build the right client for the current process based on env state:
@@ -122,6 +128,21 @@ impl GithubClient for OctocrabClient {
             Err(e) => super::fetch_state::classify_octocrab_error(&e),
         }
     }
+
+    async fn fetch_open_issues(&self, owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordInput>> {
+        if self.unconfigured {
+            return RemoteFetchState::Unconfigured;
+        }
+        // Raw-JSON path keeps parsing identical to the gh-subprocess
+        // shape and lets the shared `parse_issues_json` own the field
+        // coercion. Per-page cap matches the prior subprocess call.
+        let path = format!("/repos/{owner_repo}/issues?state=open&per_page=100");
+        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
+            Ok(v) => v,
+            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
+        };
+        RemoteFetchState::Ok(parse_issues_json(&value))
+    }
 }
 
 /// Replays `.http` fixture files from a directory. Each trait method
@@ -170,6 +191,26 @@ impl GithubClient for FixturesClient {
         RemoteFetchState::Ok(AuthedUser {
             login: login.to_string(),
         })
+    }
+
+    async fn fetch_open_issues(
+        &self,
+        _owner_repo: &str,
+    ) -> RemoteFetchState<Vec<IssueRecordInput>> {
+        let parsed = match self.read_fixture("issues_open.http") {
+            Ok(p) => p,
+            Err(e) => return RemoteFetchState::Error(e),
+        };
+        if let Some(state) =
+            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
+        {
+            return state;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
+            Ok(v) => v,
+            Err(e) => return RemoteFetchState::Error(format!("issues_open.http body: {e}")),
+        };
+        RemoteFetchState::Ok(parse_issues_json(&value))
     }
 }
 
