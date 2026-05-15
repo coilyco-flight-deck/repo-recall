@@ -417,18 +417,24 @@ async fn ingest_ci_status(state: AppState) -> usize {
             let issue_state = github_client.fetch_open_issues(&slug).await;
             let pr_state = github_client.fetch_open_prs(&slug).await;
             let ci_state = github_client.fetch_recent_runs(&slug, 20).await;
+            let ci_status_state = github_client.fetch_ci_status(&slug, &branch).await;
+            let deploy_state = match deploy_wf.as_ref() {
+                Some(wf) => Some((
+                    wf.clone(),
+                    github_client.fetch_deploy_health(&slug, wf, &branch).await,
+                )),
+                None => None,
+            };
             let slug_for_blocking = slug.clone();
             tokio::task::spawn_blocking(move || {
                 let slug = slug_for_blocking;
-                let ci = git::log::ci_status(&slug, &branch);
                 let (prs, issues) = match git::log::fetch_pr_and_issue_counts(&slug, &login) {
                     Some((p, i)) => (Some(p), Some(i)),
                     None => (None, None),
                 };
-                let deploy = deploy_wf.as_ref().and_then(|wf| {
-                    git::log::fetch_deploy_health(&slug, wf, &branch).map(|h| (wf.clone(), h))
-                });
                 use crate::ingest::github::RemoteFetchState;
+                let ci = ci_status_state.into_option().flatten();
+                let deploy = deploy_state.and_then(|(wf, st)| st.into_option().map(|h| (wf, h)));
 
                 let mut rate_limited = false;
                 let mut max_retry_after_secs: Option<u64> = None;
@@ -542,9 +548,11 @@ async fn ingest_active_repos(state: AppState) -> usize {
     if *state.gh_health.lock().await != git::log::GhHealth::Ok {
         return 0;
     }
-    let actives = tokio::task::spawn_blocking(|| git::log::fetch_active_repos(100))
-        .await
-        .unwrap_or_default();
+    use crate::ingest::github::RemoteFetchState;
+    let actives = match state.github_client.fetch_active_repos(100).await {
+        RemoteFetchState::Ok(v) => v,
+        _ => return 0,
+    };
     if actives.is_empty() {
         return 0;
     }
