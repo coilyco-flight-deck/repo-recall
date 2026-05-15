@@ -30,14 +30,19 @@ pub struct CiRunRecordInput {
 
 /// Pull recent runs for one repo. `limit` becomes `gh run list -L`. Runs
 /// are returned newest-first as `gh` emits them.
-pub fn fetch_recent_runs(owner_repo: &str, limit: usize) -> Option<Vec<CiRunRecordInput>> {
+pub fn fetch_recent_runs(
+    owner_repo: &str,
+    limit: usize,
+) -> super::fetch_state::RemoteFetchState<Vec<CiRunRecordInput>> {
+    use super::fetch_state::{classify_gh_failure, RemoteFetchState};
+    use super::issues::log_categorized_failure;
     // Single `gh run list` covers the headline run fields. Jobs come from a
     // per-run `gh run view <id> --json jobs`. We could batch jobs into a
     // single `gh api` call too, but `gh run list --json jobs` is not
     // supported. Per-run is fine at the cap we use (small N).
     let fields = "databaseId,name,displayTitle,headSha,headBranch,number,event,\
                   createdAt,updatedAt,startedAt,url,attempt,status,conclusion";
-    let output = Command::new("gh")
+    let Ok(output) = Command::new("gh")
         .args([
             "run",
             "list",
@@ -49,16 +54,31 @@ pub fn fetch_recent_runs(owner_repo: &str, limit: usize) -> Option<Vec<CiRunReco
             fields,
         ])
         .output()
-        .ok()?;
+    else {
+        return RemoteFetchState::Error("failed to spawn gh".into());
+    };
     if !output.status.success() {
-        tracing::debug!(
-            "gh run list (records) failed for {owner_repo}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
-        );
-        return None;
+        let state = classify_gh_failure(&output);
+        log_categorized_failure("gh run list", owner_repo, &state, &output.stderr);
+        return match state {
+            RemoteFetchState::Missing => RemoteFetchState::Missing,
+            RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,
+            RemoteFetchState::RateLimited { retry_after_secs } => {
+                RemoteFetchState::RateLimited { retry_after_secs }
+            }
+            RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
+            RemoteFetchState::Ok(()) => {
+                RemoteFetchState::Error("classifier returned Ok on failure".into())
+            }
+        };
     }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let arr = value.as_array()?;
+    let Ok(value): serde_json::Result<serde_json::Value> = serde_json::from_slice(&output.stdout)
+    else {
+        return RemoteFetchState::Error("ci_runs: invalid JSON".into());
+    };
+    let Some(arr) = value.as_array() else {
+        return RemoteFetchState::Error("ci_runs: expected JSON array".into());
+    };
     let mut out = Vec::with_capacity(arr.len());
     for run in arr {
         let run_id = run.get("databaseId").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -92,7 +112,7 @@ pub fn fetch_recent_runs(owner_repo: &str, limit: usize) -> Option<Vec<CiRunReco
             jobs,
         });
     }
-    Some(out)
+    RemoteFetchState::Ok(out)
 }
 
 /// `gh run view <id> --json jobs` -> deduped, sorted job names. Best

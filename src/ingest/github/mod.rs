@@ -9,11 +9,13 @@
 //! that's a separate module.
 
 pub mod ci_runs;
+pub mod fetch_state;
 pub mod issues;
 pub mod labeled;
 pub mod pulls;
 
 pub use ci_runs::{fetch_recent_runs, CiRunRecordInput};
+pub use fetch_state::{classify_gh_failure, classify_gh_stderr, RemoteFetchState};
 pub use issues::{fetch_open_issues, IssueRecordInput};
 pub use labeled::{fetch_labeled_issues_graphql, LabelTarget};
 pub use pulls::{fetch_open_prs, PrRecordInput};

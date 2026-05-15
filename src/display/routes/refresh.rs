@@ -403,11 +403,15 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 // the aggregate counts. Same `gh` call surface — just keep
                 // more of the response. Best-effort: a single repo's hiccup
                 // leaves these vectors empty rather than breaking the pass.
-                let pr_records = crate::ingest::github::fetch_open_prs(&slug).unwrap_or_default();
-                let issue_records =
-                    crate::ingest::github::fetch_open_issues(&slug).unwrap_or_default();
-                let ci_runs =
-                    crate::ingest::github::fetch_recent_runs(&slug, 20).unwrap_or_default();
+                let pr_records = crate::ingest::github::fetch_open_prs(&slug)
+                    .into_option()
+                    .unwrap_or_default();
+                let issue_records = crate::ingest::github::fetch_open_issues(&slug)
+                    .into_option()
+                    .unwrap_or_default();
+                let ci_runs = crate::ingest::github::fetch_recent_runs(&slug, 20)
+                    .into_option()
+                    .unwrap_or_default();
                 RemoteSnapshot {
                     id,
                     ci,

@@ -5,6 +5,7 @@ use std::process::Command;
 
 use chrono::DateTime;
 
+use super::fetch_state::{classify_gh_failure, RemoteFetchState};
 use super::pulls::cap_body;
 
 #[derive(Debug, Clone, Default)]
@@ -27,23 +28,38 @@ pub struct IssueRecordInput {
     pub reactions_json: String,
 }
 
-pub fn fetch_open_issues(owner_repo: &str) -> Option<Vec<IssueRecordInput>> {
-    let output = Command::new("gh")
+pub fn fetch_open_issues(owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordInput>> {
+    let Ok(output) = Command::new("gh")
         .args([
             "api",
             &format!("/repos/{owner_repo}/issues?state=open&per_page=100"),
         ])
         .output()
-        .ok()?;
+    else {
+        return RemoteFetchState::Error("failed to spawn gh".into());
+    };
     if !output.status.success() {
-        tracing::debug!(
-            "gh api /issues (records) failed for {owner_repo}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
-        );
-        return None;
+        let state = classify_gh_failure(&output);
+        log_categorized_failure("gh api /issues", owner_repo, &state, &output.stderr);
+        return match state {
+            RemoteFetchState::Missing => RemoteFetchState::Missing,
+            RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,
+            RemoteFetchState::RateLimited { retry_after_secs } => {
+                RemoteFetchState::RateLimited { retry_after_secs }
+            }
+            RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
+            RemoteFetchState::Ok(()) => {
+                RemoteFetchState::Error("classifier returned Ok on failure".into())
+            }
+        };
     }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let arr = value.as_array()?;
+    let Ok(value): serde_json::Result<serde_json::Value> = serde_json::from_slice(&output.stdout)
+    else {
+        return RemoteFetchState::Error("issues: invalid JSON".into());
+    };
+    let Some(arr) = value.as_array() else {
+        return RemoteFetchState::Error("issues: expected JSON array".into());
+    };
     let mut out = Vec::with_capacity(arr.len());
     for issue in arr {
         if issue.get("pull_request").is_some() {
@@ -120,7 +136,42 @@ pub fn fetch_open_issues(owner_repo: &str) -> Option<Vec<IssueRecordInput>> {
             reactions_json,
         });
     }
-    Some(out)
+    RemoteFetchState::Ok(out)
+}
+
+/// Shared helper: log a categorized failure at the appropriate level.
+/// `RateLimited` is loud (warn) so the user sees the rate-limit
+/// situation immediately rather than wondering why the dashboard went
+/// blank. Other categories stay at debug since they are routine
+/// (404s for transferred repos, auth misses for archived orgs).
+pub(crate) fn log_categorized_failure(
+    call: &str,
+    owner_repo: &str,
+    state: &RemoteFetchState<()>,
+    stderr_bytes: &[u8],
+) {
+    let stderr = String::from_utf8_lossy(stderr_bytes);
+    match state {
+        RemoteFetchState::RateLimited { retry_after_secs } => {
+            let retry = match retry_after_secs {
+                Some(s) => format!(", retry-after {s}s"),
+                None => String::new(),
+            };
+            tracing::warn!(
+                "{call} rate-limited for {owner_repo}{retry}: {}",
+                stderr.trim()
+            );
+        }
+        RemoteFetchState::Missing => {
+            tracing::debug!("{call} 404 for {owner_repo}");
+        }
+        RemoteFetchState::Unauthorized => {
+            tracing::debug!("{call} unauthorized for {owner_repo}");
+        }
+        RemoteFetchState::Error(_) | RemoteFetchState::Ok(()) => {
+            tracing::debug!("{call} failed for {owner_repo}: {}", stderr.trim());
+        }
+    }
 }
 
 fn parse_ts(v: &serde_json::Value, key: &str) -> i64 {

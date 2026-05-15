@@ -4,6 +4,8 @@ use std::process::Command;
 
 use chrono::DateTime;
 
+use super::fetch_state::{classify_gh_failure, RemoteFetchState};
+use super::issues::log_categorized_failure;
 use crate::process::sanitize::{scrub, SanitizeSource};
 
 /// Body cap for stored PR/issue bodies. Per #155, we cap at first ~500
@@ -37,23 +39,38 @@ pub struct PrRecordInput {
 /// Fetch every open PR for `owner_repo` via `gh api /repos/X/pulls`. Capped
 /// at GitHub's REST per_page=100 max. Returns `None` on subprocess/parse
 /// failure so one repo's hiccup can't kill the whole pass.
-pub fn fetch_open_prs(owner_repo: &str) -> Option<Vec<PrRecordInput>> {
-    let output = Command::new("gh")
+pub fn fetch_open_prs(owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> {
+    let Ok(output) = Command::new("gh")
         .args([
             "api",
             &format!("/repos/{owner_repo}/pulls?state=open&per_page=100"),
         ])
         .output()
-        .ok()?;
+    else {
+        return RemoteFetchState::Error("failed to spawn gh".into());
+    };
     if !output.status.success() {
-        tracing::debug!(
-            "gh api /pulls (records) failed for {owner_repo}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
-        );
-        return None;
+        let state = classify_gh_failure(&output);
+        log_categorized_failure("gh api /pulls", owner_repo, &state, &output.stderr);
+        return match state {
+            RemoteFetchState::Missing => RemoteFetchState::Missing,
+            RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,
+            RemoteFetchState::RateLimited { retry_after_secs } => {
+                RemoteFetchState::RateLimited { retry_after_secs }
+            }
+            RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
+            RemoteFetchState::Ok(()) => {
+                RemoteFetchState::Error("classifier returned Ok on failure".into())
+            }
+        };
     }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let arr = value.as_array()?;
+    let Ok(value): serde_json::Result<serde_json::Value> = serde_json::from_slice(&output.stdout)
+    else {
+        return RemoteFetchState::Error("pulls: invalid JSON".into());
+    };
+    let Some(arr) = value.as_array() else {
+        return RemoteFetchState::Error("pulls: expected JSON array".into());
+    };
     let mut out = Vec::with_capacity(arr.len());
     for pr in arr {
         let number = pr.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -107,7 +124,7 @@ pub fn fetch_open_prs(owner_repo: &str) -> Option<Vec<PrRecordInput>> {
                 .unwrap_or_default(),
         });
     }
-    Some(out)
+    RemoteFetchState::Ok(out)
 }
 
 fn pull_str(v: &serde_json::Value, key: &str) -> String {
