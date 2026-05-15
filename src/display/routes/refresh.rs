@@ -373,12 +373,24 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 let deploy = deploy_wf.as_ref().and_then(|wf| {
                     git::log::fetch_deploy_health(&slug, wf, &branch).map(|h| (wf.clone(), h))
                 });
+                // Source 2 + 3 + 4: pull the full individual rows alongside
+                // the aggregate counts. Same `gh` call surface — just keep
+                // more of the response. Best-effort: a single repo's hiccup
+                // leaves these vectors empty rather than breaking the pass.
+                let pr_records = crate::ingest::github::fetch_open_prs(&slug).unwrap_or_default();
+                let issue_records =
+                    crate::ingest::github::fetch_open_issues(&slug).unwrap_or_default();
+                let ci_runs =
+                    crate::ingest::github::fetch_recent_runs(&slug, 20).unwrap_or_default();
                 RemoteSnapshot {
                     id,
                     ci,
                     prs,
                     issues,
                     deploy,
+                    pr_records,
+                    issue_records,
+                    ci_runs,
                 }
             })
             .await
@@ -421,6 +433,15 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     deploy_status,
                     deploy_last_success,
                 )?;
+                for pr in &snap.pr_records {
+                    w.upsert_pr_record(snap.id, pr)?;
+                }
+                for issue in &snap.issue_records {
+                    w.upsert_issue_record(snap.id, issue)?;
+                }
+                for run in &snap.ci_runs {
+                    w.upsert_ci_run_record(snap.id, run)?;
+                }
                 n += 1;
             }
             Ok(n)
@@ -476,6 +497,9 @@ struct RemoteSnapshot {
     prs: Option<git::log::PrCounts>,
     issues: Option<git::log::IssueCounts>,
     deploy: Option<(String, git::log::DeployHealth)>,
+    pr_records: Vec<crate::ingest::github::PrRecordInput>,
+    issue_records: Vec<crate::ingest::github::IssueRecordInput>,
+    ci_runs: Vec<crate::ingest::github::CiRunRecordInput>,
 }
 
 struct RefreshStats {

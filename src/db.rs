@@ -120,6 +120,27 @@ const ISSUE_REFS_BY_REPO_ISSUE: TableDefinition<(u64, u32, &str, u64), u64> =
 const ISSUE_REFS_BY_SOURCE: TableDefinition<(&str, u64, u64, u32), ()> =
     TableDefinition::new("issue_refs_by_source");
 
+// Individual open-PR rows from `gh api /repos/X/pulls?state=open`. Source 2
+// of #155. One row per (repo, number). The aggregate `PrCounts` on the Repo
+// row is still computed in the same pass; this table preserves the full
+// per-PR record for the dashboard and MCP surface.
+const PR_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("pr_records");
+const PR_RECORDS_BY_REPO_NUMBER: TableDefinition<(u64, i64), u64> =
+    TableDefinition::new("pr_records_by_repo_number");
+
+// Individual open-issue rows from `gh api /repos/X/issues?state=open`,
+// filtered to exclude PRs. Source 3 of #155.
+const ISSUE_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("issue_records");
+const ISSUE_RECORDS_BY_REPO_NUMBER: TableDefinition<(u64, i64), u64> =
+    TableDefinition::new("issue_records_by_repo_number");
+
+// Recent CI run records from `gh run list --json …`. Source 4 of #155.
+// Keyed by (repo_id, run_id) since the same run can show up on multiple
+// scans before it completes.
+const CI_RUN_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("ci_run_records");
+const CI_RUN_RECORDS_BY_REPO_RUN: TableDefinition<(u64, i64), u64> =
+    TableDefinition::new("ci_run_records_by_repo_run");
+
 const META_NEXT_REPO: &str = "next_repo_id";
 const META_NEXT_SESSION: &str = "next_session_id";
 const META_NEXT_COMMIT: &str = "next_commit_id";
@@ -130,6 +151,9 @@ const META_NEXT_AUDIT_EVENT: &str = "next_audit_event_id";
 const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 const META_NEXT_DISPATCH: &str = "next_dispatch_id";
 const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
+const META_NEXT_PR_RECORD: &str = "next_pr_record_id";
+const META_NEXT_ISSUE_RECORD: &str = "next_issue_record_id";
+const META_NEXT_CI_RUN_RECORD: &str = "next_ci_run_record_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
@@ -316,6 +340,84 @@ pub struct CiFailure {
     pub repo_path: String,
     pub remote_url: Option<String>,
     pub default_branch: Option<String>,
+}
+
+/// One open pull request from `gh api /repos/X/pulls?state=open`.
+/// Source 2 of #155. Body capped + scrubbed before storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrRecord {
+    pub id: i64,
+    pub repo_id: i64,
+    pub number: i64,
+    pub title: String,
+    pub html_url: String,
+    /// Scrubbed + truncated body (~500 chars).
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub milestone: Option<String>,
+    pub comments_count: i64,
+    pub review_comments_count: i64,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+    pub mergeable_state: Option<String>,
+    pub requested_teams: Vec<String>,
+}
+
+/// One open issue from `gh api /repos/X/issues?state=open`, with the PR
+/// rows filtered out. Source 3 of #155. Body capped + scrubbed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueRecord {
+    pub id: i64,
+    pub repo_id: i64,
+    pub number: i64,
+    pub title: String,
+    pub html_url: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub closed_at: Option<i64>,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub author_login: String,
+    pub milestone: Option<String>,
+    pub comments_count: i64,
+    pub state_reason: Option<String>,
+    pub locked: bool,
+    /// Raw reactions block from the REST response. Shape is owned by
+    /// GitHub and may gain keys; persist as JSON so we don't need a
+    /// schema migration when it changes.
+    pub reactions_json: String,
+}
+
+/// One CI run from `gh run list --json …`. Source 4 of #155. `jobs` is
+/// the deduplicated list of job names (we parse the full `jobs[]` field
+/// but only retain names — steps + status + conclusion are bulky and can
+/// be surfaced on demand later).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiRunRecord {
+    pub id: i64,
+    pub repo_id: i64,
+    pub run_id: i64,
+    pub name: String,
+    pub display_title: String,
+    pub head_sha: String,
+    pub head_branch: String,
+    pub run_number: i64,
+    pub event: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub run_started_at: Option<i64>,
+    pub html_url: String,
+    pub run_attempt: i64,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub jobs: Vec<String>,
 }
 
 /// A reference from a session or commit to a GitHub issue or PR in a
@@ -1424,6 +1526,60 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// Open PRs for one repo, sorted newest-first by `updated_at`.
+    pub fn pr_records_for_repo(&self, repo_id: i64) -> Result<Vec<PrRecord>> {
+        let read = self.db.begin_read()?;
+        let by_key = read.open_table(PR_RECORDS_BY_REPO_NUMBER)?;
+        let prs_t = read.open_table(PR_RECORDS)?;
+        let start = (id_to_u64(repo_id), i64::MIN);
+        let end = (id_to_u64(repo_id), i64::MAX);
+        let mut out = Vec::new();
+        for row in by_key.range(start..=end)? {
+            let (_k, v) = row?;
+            if let Some(g) = prs_t.get(v.value())? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+        }
+        out.sort_by_key(|p: &PrRecord| std::cmp::Reverse(p.updated_at));
+        Ok(out)
+    }
+
+    /// Open issues for one repo, sorted newest-first by `updated_at`.
+    pub fn issue_records_for_repo(&self, repo_id: i64) -> Result<Vec<IssueRecord>> {
+        let read = self.db.begin_read()?;
+        let by_key = read.open_table(ISSUE_RECORDS_BY_REPO_NUMBER)?;
+        let issues_t = read.open_table(ISSUE_RECORDS)?;
+        let start = (id_to_u64(repo_id), i64::MIN);
+        let end = (id_to_u64(repo_id), i64::MAX);
+        let mut out = Vec::new();
+        for row in by_key.range(start..=end)? {
+            let (_k, v) = row?;
+            if let Some(g) = issues_t.get(v.value())? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+        }
+        out.sort_by_key(|i: &IssueRecord| std::cmp::Reverse(i.updated_at));
+        Ok(out)
+    }
+
+    /// CI runs for one repo, sorted newest-first by `created_at`.
+    pub fn ci_runs_for_repo(&self, repo_id: i64) -> Result<Vec<CiRunRecord>> {
+        let read = self.db.begin_read()?;
+        let by_key = read.open_table(CI_RUN_RECORDS_BY_REPO_RUN)?;
+        let runs_t = read.open_table(CI_RUN_RECORDS)?;
+        let start = (id_to_u64(repo_id), i64::MIN);
+        let end = (id_to_u64(repo_id), i64::MAX);
+        let mut out = Vec::new();
+        for row in by_key.range(start..=end)? {
+            let (_k, v) = row?;
+            if let Some(g) = runs_t.get(v.value())? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+        }
+        out.sort_by_key(|r: &CiRunRecord| std::cmp::Reverse(r.created_at));
+        Ok(out)
+    }
+
     /// Return all dispatch records for a repo, newest-first by
     /// `dispatched_at`. Empty when the repo has no `docs/repo-dispatch/`
     /// or all files failed to parse.
@@ -1584,6 +1740,12 @@ impl CacheWriter<'_> {
         clear_table::<u64, &[u8]>(self.txn, LABELED_ISSUES)?;
         clear_table::<(u64, &str, i64), u64>(self.txn, LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
         clear_table::<(&str, &str, u64, i64), ()>(self.txn, LABELED_ISSUES_BY_LABEL_STATE)?;
+        clear_table::<u64, &[u8]>(self.txn, PR_RECORDS)?;
+        clear_table::<(u64, i64), u64>(self.txn, PR_RECORDS_BY_REPO_NUMBER)?;
+        clear_table::<u64, &[u8]>(self.txn, ISSUE_RECORDS)?;
+        clear_table::<(u64, i64), u64>(self.txn, ISSUE_RECORDS_BY_REPO_NUMBER)?;
+        clear_table::<u64, &[u8]>(self.txn, CI_RUN_RECORDS)?;
+        clear_table::<(u64, i64), u64>(self.txn, CI_RUN_RECORDS_BY_REPO_RUN)?;
         Ok(())
     }
 
@@ -1930,6 +2092,127 @@ impl CacheWriter<'_> {
             (),
         )?;
         Ok(true)
+    }
+
+    /// Upsert one open-PR record. Idempotent on (repo_id, number). The
+    /// caller scrubs + truncates body before passing it in.
+    pub fn upsert_pr_record(
+        &self,
+        repo_id: i64,
+        rec: &crate::ingest::github::PrRecordInput,
+    ) -> Result<i64> {
+        let mut by_key = self.txn.open_table(PR_RECORDS_BY_REPO_NUMBER)?;
+        let key = (id_to_u64(repo_id), rec.number);
+        if let Some(g) = by_key.get(key)? {
+            return Ok(u64_to_id(g.value()));
+        }
+        let id = next_id(self.txn, META_NEXT_PR_RECORD)?;
+        let row = PrRecord {
+            id: u64_to_id(id),
+            repo_id,
+            number: rec.number,
+            title: rec.title.clone(),
+            html_url: rec.html_url.clone(),
+            body: rec.body.clone(),
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            head_ref: rec.head_ref.clone(),
+            base_ref: rec.base_ref.clone(),
+            labels: rec.labels.clone(),
+            assignees: rec.assignees.clone(),
+            milestone: rec.milestone.clone(),
+            comments_count: rec.comments_count,
+            review_comments_count: rec.review_comments_count,
+            additions: rec.additions,
+            deletions: rec.deletions,
+            changed_files: rec.changed_files,
+            mergeable_state: rec.mergeable_state.clone(),
+            requested_teams: rec.requested_teams.clone(),
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        self.txn
+            .open_table(PR_RECORDS)?
+            .insert(id, bytes.as_slice())?;
+        by_key.insert(key, id)?;
+        Ok(u64_to_id(id))
+    }
+
+    /// Upsert one open-issue record. Idempotent on (repo_id, number).
+    pub fn upsert_issue_record(
+        &self,
+        repo_id: i64,
+        rec: &crate::ingest::github::IssueRecordInput,
+    ) -> Result<i64> {
+        let mut by_key = self.txn.open_table(ISSUE_RECORDS_BY_REPO_NUMBER)?;
+        let key = (id_to_u64(repo_id), rec.number);
+        if let Some(g) = by_key.get(key)? {
+            return Ok(u64_to_id(g.value()));
+        }
+        let id = next_id(self.txn, META_NEXT_ISSUE_RECORD)?;
+        let row = IssueRecord {
+            id: u64_to_id(id),
+            repo_id,
+            number: rec.number,
+            title: rec.title.clone(),
+            html_url: rec.html_url.clone(),
+            body: rec.body.clone(),
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            closed_at: rec.closed_at,
+            labels: rec.labels.clone(),
+            assignees: rec.assignees.clone(),
+            author_login: rec.author_login.clone(),
+            milestone: rec.milestone.clone(),
+            comments_count: rec.comments_count,
+            state_reason: rec.state_reason.clone(),
+            locked: rec.locked,
+            reactions_json: rec.reactions_json.clone(),
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        self.txn
+            .open_table(ISSUE_RECORDS)?
+            .insert(id, bytes.as_slice())?;
+        by_key.insert(key, id)?;
+        Ok(u64_to_id(id))
+    }
+
+    /// Upsert one CI run record. Idempotent on (repo_id, run_id).
+    pub fn upsert_ci_run_record(
+        &self,
+        repo_id: i64,
+        rec: &crate::ingest::github::CiRunRecordInput,
+    ) -> Result<i64> {
+        let mut by_key = self.txn.open_table(CI_RUN_RECORDS_BY_REPO_RUN)?;
+        let key = (id_to_u64(repo_id), rec.run_id);
+        if let Some(g) = by_key.get(key)? {
+            return Ok(u64_to_id(g.value()));
+        }
+        let id = next_id(self.txn, META_NEXT_CI_RUN_RECORD)?;
+        let row = CiRunRecord {
+            id: u64_to_id(id),
+            repo_id,
+            run_id: rec.run_id,
+            name: rec.name.clone(),
+            display_title: rec.display_title.clone(),
+            head_sha: rec.head_sha.clone(),
+            head_branch: rec.head_branch.clone(),
+            run_number: rec.run_number,
+            event: rec.event.clone(),
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            run_started_at: rec.run_started_at,
+            html_url: rec.html_url.clone(),
+            run_attempt: rec.run_attempt,
+            status: rec.status.clone(),
+            conclusion: rec.conclusion.clone(),
+            jobs: rec.jobs.clone(),
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        self.txn
+            .open_table(CI_RUN_RECORDS)?
+            .insert(id, bytes.as_slice())?;
+        by_key.insert(key, id)?;
+        Ok(u64_to_id(id))
     }
 
     pub fn insert_file_change(
