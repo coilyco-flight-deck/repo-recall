@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,9 @@ pub struct SessionRecord {
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
     pub message_count: i64,
-    pub summary: Option<String>,
+    pub user_message_count: i64,
+    pub assistant_message_count: i64,
+    pub last_prompt: Option<String>,
     pub source_file: String,
     /// Wall-clock span in milliseconds (end - start). `None` when we saw at
     /// most one timestamp. Uses ms rather than seconds so sub-second sessions
@@ -22,6 +25,29 @@ pub struct SessionRecord {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// Most-recent values seen on any record line; useful as a session-level
+    /// pointer for joining across the JSONL graph.
+    pub parent_uuid: Option<String>,
+    pub request_id: Option<String>,
+    pub message_id: Option<String>,
+    /// Count of lines flagged `isSidechain: true` — proxy for subagent
+    /// invocations within the session.
+    pub is_sidechain_count: i64,
+    /// Sorted unique list of `message.model` values observed.
+    pub models_used: Vec<String>,
+    /// Sorted unique list of `tool_use.name` values observed.
+    pub tools_used: Vec<String>,
+    /// Per-tool counts: `{ "<tool>": { "calls": N, "errors": N } }`.
+    /// Stored as a JSON blob because the shape is variable.
+    pub tool_call_counts_json: String,
+    /// `{ "<stop_reason>": N }` aggregated across assistant turns.
+    pub stop_reason_counts_json: String,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ToolStat {
+    calls: i64,
+    errors: i64,
 }
 
 /// Returns the directory we'll parse session files from. Honors the
@@ -78,6 +104,14 @@ struct RawLine {
     content: Option<serde_json::Value>,
     #[serde(default)]
     message: Option<RawMessage>,
+    #[serde(default, alias = "parentUuid")]
+    parent_uuid: Option<String>,
+    #[serde(default, alias = "requestId")]
+    request_id: Option<String>,
+    #[serde(default, alias = "isSidechain")]
+    is_sidechain: Option<bool>,
+    #[serde(default, alias = "lastPrompt")]
+    last_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +124,12 @@ struct RawMessage {
     /// `None` for user turns and older sessions.
     #[serde(default)]
     usage: Option<serde_json::Value>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 /// Parse one JSONL session file into a `SessionRecord`. Returns `Ok(None)` if
@@ -105,12 +145,24 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
     let mut last_ts_ms: Option<i64> = None;
     let mut first_ts: Option<i64> = None;
     let mut last_ts: Option<i64> = None;
-    let mut message_count: i64 = 0;
-    let mut summary: Option<String> = None;
+    let mut user_message_count: i64 = 0;
+    let mut assistant_message_count: i64 = 0;
+    let mut last_prompt: Option<String> = None;
     let mut input_tokens: i64 = 0;
     let mut output_tokens: i64 = 0;
     let mut cache_read_tokens: i64 = 0;
     let mut cache_creation_tokens: i64 = 0;
+    let mut parent_uuid: Option<String> = None;
+    let mut request_id: Option<String> = None;
+    let mut message_id: Option<String> = None;
+    let mut is_sidechain_count: i64 = 0;
+    let mut models_used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut tools_used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut tool_call_counts: BTreeMap<String, ToolStat> = BTreeMap::new();
+    let mut stop_reason_counts: BTreeMap<String, i64> = BTreeMap::new();
+    // Pending tool_use_id -> tool name, so we can attribute is_error tool
+    // results back to the tool that produced them. Cleared as results arrive.
+    let mut pending_tool_uses: BTreeMap<String, String> = BTreeMap::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -171,32 +223,70 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
 
         let line_type = raw.r#type.as_deref().unwrap_or("");
 
-        // Count user + assistant messages only.
-        if line_type == "user" || line_type == "assistant" {
-            message_count += 1;
+        // Count user + assistant messages separately (split out from the
+        // single `message_count` field).
+        match line_type {
+            "user" => user_message_count += 1,
+            "assistant" => assistant_message_count += 1,
+            _ => {}
         }
 
-        // Take the first user message content as summary, if we don't have one.
-        if summary.is_none() && line_type == "user" {
-            let text = extract_text(raw.message.as_ref().and_then(|m| m.content.as_ref()))
-                .or_else(|| extract_text(raw.content.as_ref()));
-            if let Some(t) = text {
-                let trimmed = t.trim();
+        // `last-prompt` line type carries the most-recent user prompt verbatim.
+        // Preferred over the historical "first user message" summary because it
+        // reflects what the session was last working on.
+        if line_type == "last-prompt" {
+            if let Some(lp) = raw.last_prompt.as_deref() {
+                let trimmed = lp.trim();
                 if !trimmed.is_empty() {
-                    summary = Some(truncate(trimmed, 200));
+                    last_prompt = Some(truncate(trimmed, 200));
                 }
             }
         }
 
-        // queue-operation lines may also carry a plain string `content` with the
-        // first user prompt — fall back to that if we never see a "user" line.
-        if summary.is_none() && line_type == "queue-operation" {
-            if let Some(t) = extract_text(raw.content.as_ref()) {
-                let trimmed = t.trim();
-                if !trimmed.is_empty() {
-                    summary = Some(truncate(trimmed, 200));
-                }
+        // Pointer fields: keep the most recent observed value. `parentUuid` is
+        // per-record on user/assistant lines; `requestId` and `message.id`
+        // identify the latest API call.
+        if let Some(p) = raw.parent_uuid.as_deref() {
+            if !p.is_empty() {
+                parent_uuid = Some(p.to_string());
             }
+        }
+        if let Some(r) = raw.request_id.as_deref() {
+            if !r.is_empty() {
+                request_id = Some(r.to_string());
+            }
+        }
+        if let Some(mid) = raw.message.as_ref().and_then(|m| m.id.as_deref()) {
+            if !mid.is_empty() {
+                message_id = Some(mid.to_string());
+            }
+        }
+
+        if raw.is_sidechain.unwrap_or(false) {
+            is_sidechain_count += 1;
+        }
+
+        if let Some(model) = raw.message.as_ref().and_then(|m| m.model.as_deref()) {
+            if !model.is_empty() {
+                models_used.insert(model.to_string());
+            }
+        }
+        if let Some(sr) = raw.message.as_ref().and_then(|m| m.stop_reason.as_deref()) {
+            if !sr.is_empty() {
+                *stop_reason_counts.entry(sr.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        // Walk message content blocks once to collect tool-use names and
+        // tool_result errors. Sessions are short (~hundreds of turns) so this
+        // is cheap and lets us avoid threading the state through walk_content.
+        if let Some(content) = raw.message.as_ref().and_then(|m| m.content.as_ref()) {
+            collect_tool_signals(
+                content,
+                &mut tools_used,
+                &mut tool_call_counts,
+                &mut pending_tool_uses,
+            );
         }
     }
 
@@ -217,42 +307,93 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
         _ => None,
     };
 
+    let tool_call_counts_json = serde_json::to_string(
+        &tool_call_counts
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    serde_json::json!({"calls": v.calls, "errors": v.errors}),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap_or_else(|_| "{}".into());
+    let stop_reason_counts_json =
+        serde_json::to_string(&stop_reason_counts).unwrap_or_else(|_| "{}".into());
+
     Ok(Some(SessionRecord {
         session_uuid: uuid,
         cwd,
         started_at: first_ts,
         ended_at: last_ts,
-        message_count,
-        summary,
+        message_count: user_message_count + assistant_message_count,
+        user_message_count,
+        assistant_message_count,
+        last_prompt,
         source_file: path.display().to_string(),
         duration_ms,
         input_tokens,
         output_tokens,
         cache_read_tokens,
         cache_creation_tokens,
+        parent_uuid,
+        request_id,
+        message_id,
+        is_sidechain_count,
+        models_used: models_used.into_iter().collect(),
+        tools_used: tools_used.into_iter().collect(),
+        tool_call_counts_json,
+        stop_reason_counts_json,
     }))
 }
 
-/// Content in Claude JSONL can be a plain string or an array of blocks like
-/// `[{"type":"text","text":"..."}]`. Extract the first text fragment we find.
-fn extract_text(v: Option<&serde_json::Value>) -> Option<String> {
-    let v = v?;
-    match v {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Array(arr) => {
-            for block in arr {
-                if let Some(obj) = block.as_object() {
-                    let ty = obj.get("type").and_then(|x| x.as_str()).unwrap_or("");
-                    if ty == "text" {
-                        if let Some(t) = obj.get("text").and_then(|x| x.as_str()) {
-                            return Some(t.to_string());
-                        }
+/// Walk one assistant/user `message.content` and collect tool-use names plus
+/// per-tool call + error counts. Tool results are matched back to their
+/// tool_use by `tool_use_id` so an `is_error: true` result increments the
+/// originating tool's error count, not a generic "errors" bucket.
+fn collect_tool_signals(
+    v: &serde_json::Value,
+    tools_used: &mut std::collections::BTreeSet<String>,
+    counts: &mut BTreeMap<String, ToolStat>,
+    pending: &mut BTreeMap<String, String>,
+) {
+    let serde_json::Value::Array(arr) = v else {
+        return;
+    };
+    for block in arr {
+        let Some(obj) = block.as_object() else {
+            continue;
+        };
+        match obj.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+            "tool_use" => {
+                let name = obj
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("(tool)")
+                    .to_string();
+                tools_used.insert(name.clone());
+                counts.entry(name.clone()).or_default().calls += 1;
+                if let Some(id) = obj.get("id").and_then(|x| x.as_str()) {
+                    pending.insert(id.to_string(), name);
+                }
+            }
+            "tool_result" => {
+                let is_err = obj
+                    .get("is_error")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                if !is_err {
+                    continue;
+                }
+                if let Some(id) = obj.get("tool_use_id").and_then(|x| x.as_str()) {
+                    if let Some(name) = pending.remove(id) {
+                        counts.entry(name).or_default().errors += 1;
                     }
                 }
             }
-            None
+            _ => {}
         }
-        _ => None,
     }
 }
 

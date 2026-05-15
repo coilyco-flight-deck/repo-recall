@@ -244,8 +244,8 @@ pub async fn detail(
                         li class=(LI) {
                             div class=(ROW) {
                                 a class={ (LINK) " font-semibold" } href={ "/sessions/" (s.id) } {
-                                    @if let Some(sum) = &s.summary { (sum) }
-                                    @else { "(no summary)" }
+                                    @if let Some(sum) = &s.last_prompt { (sum) }
+                                    @else { "(no prompt)" }
                                 }
                             }
                             div class={ (ROW) " " (META) } {

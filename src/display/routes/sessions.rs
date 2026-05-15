@@ -258,7 +258,7 @@ pub async fn detail(
     let s = &sr.session;
     let body = html! {
         h1 class="text-lg font-semibold mb-2" {
-            @if let Some(sum) = &s.summary { (sum) } @else { "(no summary)" }
+            @if let Some(sum) = &s.last_prompt { (sum) } @else { "(no prompt)" }
         }
         section class={ (PANEL) " mt-4" } {
             dl class="grid grid-cols-[140px_1fr] gap-x-4 gap-y-1" {

@@ -86,20 +86,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
             for path in files.iter() {
                 match sessions::parse_session_file(path) {
                     Ok(Some(rec)) => {
-                        let (session_id, was_new) = w.upsert_session(
-                            &rec.session_uuid,
-                            rec.cwd.as_deref(),
-                            rec.started_at,
-                            rec.ended_at,
-                            rec.message_count,
-                            rec.summary.as_deref(),
-                            &rec.source_file,
-                            rec.duration_ms,
-                            rec.input_tokens,
-                            rec.output_tokens,
-                            rec.cache_read_tokens,
-                            rec.cache_creation_tokens,
-                        )?;
+                        let (session_id, was_new) = w.upsert_session(&rec)?;
                         if !was_new {
                             skipped += 1;
                             continue;

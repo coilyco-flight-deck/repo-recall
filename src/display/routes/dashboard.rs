@@ -635,8 +635,8 @@ fn standup_details(
                         ul class="list-none p-0 m-0 flex flex-col gap-0.5" {
                             @for sr in sessions_today.iter().take(6) {
                                 li class="truncate" {
-                                    @if let Some(s) = &sr.session.summary { (s) }
-                                    @else { "(no summary)" }
+                                    @if let Some(s) = &sr.session.last_prompt { (s) }
+                                    @else { "(no prompt)" }
                                 }
                             }
                             @if sessions_today.len() > 6 {
@@ -1417,8 +1417,8 @@ fn render_sessions(sessions: &[db::SessionWithRepos]) -> Markup {
                     li class=(LI) {
                         div class=(ROW) {
                             a class={ (LINK) " font-semibold" } href={ "/sessions/" (sr.session.id) } {
-                                @if let Some(s) = &sr.session.summary { (s) }
-                                @else { "(no summary)" }
+                                @if let Some(s) = &sr.session.last_prompt { (s) }
+                                @else { "(no prompt)" }
                             }
                         }
                         div class={ (ROW) " " (META) } {

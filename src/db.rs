@@ -191,13 +191,29 @@ pub struct Session {
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
     pub message_count: i64,
-    pub summary: Option<String>,
+    pub user_message_count: i64,
+    pub assistant_message_count: i64,
+    /// Most-recent prompt the user sent in this session, sourced from the
+    /// `last-prompt` JSONL line type. Replaces the prior `summary` field
+    /// (which used the first user message — less useful for "what was this
+    /// session doing").
+    pub last_prompt: Option<String>,
     pub source_file: String,
     pub duration_ms: Option<i64>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    pub parent_uuid: Option<String>,
+    pub request_id: Option<String>,
+    pub message_id: Option<String>,
+    pub is_sidechain_count: i64,
+    pub models_used: Vec<String>,
+    pub tools_used: Vec<String>,
+    /// `{ "<tool>": { "calls": N, "errors": N } }`.
+    pub tool_call_counts_json: String,
+    /// `{ "<stop_reason>": N }`.
+    pub stop_reason_counts_json: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -977,7 +993,7 @@ impl CacheDb {
         for row in read.open_table(SESSIONS)?.iter()? {
             let (_k, v) = row?;
             let s: Session = serde_json::from_slice(v.value())?;
-            if let Some(text) = s.summary {
+            if let Some(text) = s.last_prompt {
                 out.push(IndexDoc {
                     kind: "session".into(),
                     ref_id: s.id,
@@ -1520,48 +1536,46 @@ impl CacheWriter<'_> {
     /// Insert a session if its UUID has not been seen, returning the
     /// `(session_id, true)` on success or `(existing_id, false)` if a
     /// previous file already produced this UUID.
-    #[allow(clippy::too_many_arguments)]
     pub fn upsert_session(
         &self,
-        session_uuid: &str,
-        cwd: Option<&str>,
-        started_at: Option<i64>,
-        ended_at: Option<i64>,
-        message_count: i64,
-        summary: Option<&str>,
-        source_file: &str,
-        duration_ms: Option<i64>,
-        input_tokens: i64,
-        output_tokens: i64,
-        cache_read_tokens: i64,
-        cache_creation_tokens: i64,
+        rec: &crate::ingest::claude::sessions_jsonl::SessionRecord,
     ) -> Result<(i64, bool)> {
         let mut by_uuid = self.txn.open_table(SESSIONS_BY_UUID)?;
-        if let Some(g) = by_uuid.get(session_uuid)? {
+        if let Some(g) = by_uuid.get(rec.session_uuid.as_str())? {
             return Ok((u64_to_id(g.value()), false));
         }
         let id = next_id(self.txn, META_NEXT_SESSION)?;
         let session = Session {
             id: u64_to_id(id),
-            session_uuid: session_uuid.into(),
-            cwd: cwd.map(str::to_string),
-            started_at,
-            ended_at,
-            message_count,
-            summary: summary.map(str::to_string),
-            source_file: source_file.into(),
-            duration_ms,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
+            session_uuid: rec.session_uuid.clone(),
+            cwd: rec.cwd.clone(),
+            started_at: rec.started_at,
+            ended_at: rec.ended_at,
+            message_count: rec.message_count,
+            user_message_count: rec.user_message_count,
+            assistant_message_count: rec.assistant_message_count,
+            last_prompt: rec.last_prompt.clone(),
+            source_file: rec.source_file.clone(),
+            duration_ms: rec.duration_ms,
+            input_tokens: rec.input_tokens,
+            output_tokens: rec.output_tokens,
+            cache_read_tokens: rec.cache_read_tokens,
+            cache_creation_tokens: rec.cache_creation_tokens,
+            parent_uuid: rec.parent_uuid.clone(),
+            request_id: rec.request_id.clone(),
+            message_id: rec.message_id.clone(),
+            is_sidechain_count: rec.is_sidechain_count,
+            models_used: rec.models_used.clone(),
+            tools_used: rec.tools_used.clone(),
+            tool_call_counts_json: rec.tool_call_counts_json.clone(),
+            stop_reason_counts_json: rec.stop_reason_counts_json.clone(),
         };
         let bytes = serde_json::to_vec(&session)?;
         self.txn
             .open_table(SESSIONS)?
             .insert(id, bytes.as_slice())?;
-        by_uuid.insert(session_uuid, id)?;
-        let ts_key = started_at.unwrap_or(i64::MIN);
+        by_uuid.insert(rec.session_uuid.as_str(), id)?;
+        let ts_key = rec.started_at.unwrap_or(i64::MIN);
         self.txn
             .open_table(SESSIONS_BY_STARTED_AT)?
             .insert((ts_key, id), ())?;
