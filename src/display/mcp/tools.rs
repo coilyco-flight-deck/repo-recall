@@ -260,7 +260,7 @@ pub async fn action_required(
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
     let cache = state.cache_db.clone();
-    let stale_after = crate::display::routes::api::stale_ask_threshold_secs();
+    let stale_after = state.stale_ask_threshold_secs;
     let (repos, dispatch_sigs) = tokio::task::spawn_blocking(move || {
         (
             cache.list_repos_with_counts().unwrap_or_default(),

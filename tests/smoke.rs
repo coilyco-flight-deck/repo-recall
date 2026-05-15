@@ -46,6 +46,7 @@ async fn boot_with(
         dispatch_sessions: repo_recall::display::mcp::dispatch::new_store(),
         labeled_ingest_interval_secs: 3600,
         last_labeled_ingest: Arc::new(Mutex::new(None)),
+        stale_ask_threshold_secs: 7 * 86_400,
     };
 
     let app = routes::router(state);

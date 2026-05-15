@@ -61,4 +61,9 @@ pub struct AppState {
     /// In-memory; resets on process start, which is fine - the first refresh
     /// after boot should always pull fresh labeled state.
     pub last_labeled_ingest: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
+    /// Cutoff (in seconds) past which an open structural-context ask
+    /// becomes a `stale_ask` action-required signal. Sourced from
+    /// `signals.stale_ask_days` (default 7 days) at startup. Replaces an
+    /// earlier env-only path that bypassed `Config` entirely.
+    pub stale_ask_threshold_secs: i64,
 }

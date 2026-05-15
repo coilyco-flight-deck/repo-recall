@@ -114,6 +114,7 @@ async fn main() -> miette::Result<()> {
     let remote_target_limit: usize = cfg.ingest.github.remote_target_limit;
     let labeled_ingest_interval_secs: u64 =
         cfg.refresh.per_source.github_remote_labeled.unwrap_or(3600);
+    let stale_ask_threshold_secs: i64 = i64::from(cfg.signals.stale_ask_days) * 86_400;
 
     let state = AppState {
         cache_db,
@@ -132,6 +133,7 @@ async fn main() -> miette::Result<()> {
         dispatch_sessions: repo_recall::display::mcp::dispatch::new_store(),
         labeled_ingest_interval_secs,
         last_labeled_ingest: Arc::new(Mutex::new(None)),
+        stale_ask_threshold_secs,
     };
 
     // Initial scan in the background so the dashboard / first MCP tool call

@@ -51,7 +51,7 @@ pub struct ActionRequiredResponse {
 /// polling client gets `304` between scans.
 pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cache = state.cache_db.clone();
-    let stale_after = stale_ask_threshold_secs();
+    let stale_after = state.stale_ask_threshold_secs;
     let (repos, dispatch_sigs) = tokio::task::spawn_blocking(move || {
         let repos = cache.list_repos_with_counts().unwrap_or_default();
         let sigs = cache.dispatch_signals(stale_after).unwrap_or_default();
@@ -98,17 +98,6 @@ pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) 
         scan_version: state.scan_version.load(Ordering::Acquire),
     };
     json_with_etag(&headers, body.scan_version, &body)
-}
-
-/// Threshold for the `stale_ask` signal, in seconds. Configurable via
-/// `REPO_RECALL_STALE_ASK_DAYS` (default 7). Designed in #92, #115:
-/// "the point of this system is to inspire work."
-pub(crate) fn stale_ask_threshold_secs() -> i64 {
-    std::env::var("REPO_RECALL_STALE_ASK_DAYS")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(7)
-        * 86_400
 }
 
 #[derive(Debug, Clone, Serialize)]
