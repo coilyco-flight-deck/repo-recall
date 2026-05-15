@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           revision=$(git rev-parse HEAD)
-          url="https://github.com/coilysiren/repo-recall.git"
+          url="git@github.com:coilysiren/repo-recall.git"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
