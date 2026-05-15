@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One row from coily's audit JSONL, normalized for storage. Mirrors the
 /// shape produced by cli-guard's `audit` writer. Unknown fields on the
@@ -19,6 +19,56 @@ pub struct AuditRecord {
     pub commit_scope: Option<String>,
     pub audit_override: bool,
     pub source_file: String,
+    /// LUCA join key. Populated by cli-guard #2a (landed); converts the
+    /// audit↔session join from a timestamp-window heuristic to an exact key.
+    pub session_id: Option<String>,
+    /// cli-guard binary version that wrote the row.
+    pub version: Option<String>,
+    /// Error message captured for `decision: "deny"` or upstream-failed rows.
+    pub error: Option<String>,
+    /// Last chunk of subprocess stderr on failure rows.
+    pub stderr_tail: Option<String>,
+    /// Git toplevel cli-guard resolved for the row. May differ from
+    /// `commit_scope` when scope is explicit.
+    pub repo_root: Option<String>,
+    /// Working directory of the spawned subprocess.
+    pub cwd_subprocess: Option<String>,
+    /// Working directory at cli-guard invocation (before any internal cd).
+    pub cwd_at_invocation: Option<String>,
+    /// Outbound network attempts captured by the egress wedge.
+    pub egress: Vec<EgressEntry>,
+    /// Profile-decision block: which profile applied, why, and the
+    /// resolved capability coordinate.
+    pub profile_decision: Option<ProfileDecision>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EgressEntry {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub decision: String,
+    #[serde(default)]
+    pub bytes_up: i64,
+    #[serde(default)]
+    pub bytes_down: i64,
+    #[serde(default)]
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProfileDecision {
+    #[serde(default)]
+    pub allowed: bool,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub reason: String,
+    /// Resolved capability coordinate. Shape is owned by cli-guard and may
+    /// gain fields; stored as raw JSON so additions land without a schema
+    /// migration.
+    #[serde(default)]
+    pub coordinate: serde_json::Value,
 }
 
 /// Resolve the audit directory. Honors `REPO_RECALL_AUDIT_DIR` (point at
@@ -78,6 +128,24 @@ struct RawRow {
     commit_scope: Option<String>,
     #[serde(default)]
     audit_override: bool,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    stderr_tail: Option<String>,
+    #[serde(default)]
+    repo_root: Option<String>,
+    #[serde(default)]
+    cwd_subprocess: Option<String>,
+    #[serde(default)]
+    cwd_at_invocation: Option<String>,
+    #[serde(default)]
+    egress: Vec<EgressEntry>,
+    #[serde(default)]
+    profile_decision: Option<ProfileDecision>,
 }
 
 /// Parse every line of a single JSONL shard into `AuditRecord`. Malformed
@@ -120,6 +188,15 @@ pub fn parse_audit_file(path: &Path) -> Result<Vec<AuditRecord>> {
             commit_scope: raw.commit_scope,
             audit_override: raw.audit_override,
             source_file: source_file.clone(),
+            session_id: raw.session_id,
+            version: raw.version,
+            error: raw.error,
+            stderr_tail: raw.stderr_tail,
+            repo_root: raw.repo_root,
+            cwd_subprocess: raw.cwd_subprocess,
+            cwd_at_invocation: raw.cwd_at_invocation,
+            egress: raw.egress,
+            profile_decision: raw.profile_decision,
         });
     }
     Ok(out)

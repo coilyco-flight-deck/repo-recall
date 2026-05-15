@@ -524,19 +524,7 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
                         .as_deref()
                         .and_then(|s| by_path.get(s).copied())
                         .unwrap_or(0);
-                    w.upsert_audit_event(
-                        repo_id,
-                        &rec.event_id,
-                        rec.ts,
-                        &rec.decision,
-                        &rec.verb,
-                        &rec.argv,
-                        rec.exit_code,
-                        rec.duration_ms,
-                        rec.commit_scope.as_deref(),
-                        rec.audit_override,
-                        &rec.source_file,
-                    )?;
+                    w.upsert_audit_event(repo_id, &rec)?;
                 }
             }
             Ok(())
@@ -576,19 +564,7 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
                         .as_deref()
                         .and_then(|s| by_path.get(s).copied())
                         .unwrap_or(0);
-                    let (_id, was_new) = w.upsert_audit_event(
-                        repo_id,
-                        &rec.event_id,
-                        rec.ts,
-                        &rec.decision,
-                        &rec.verb,
-                        &rec.argv,
-                        rec.exit_code,
-                        rec.duration_ms,
-                        rec.commit_scope.as_deref(),
-                        rec.audit_override,
-                        &rec.source_file,
-                    )?;
+                    let (_id, was_new) = w.upsert_audit_event(repo_id, &rec)?;
                     assert!(!was_new, "second upsert of same event_id should not insert");
                 }
             }

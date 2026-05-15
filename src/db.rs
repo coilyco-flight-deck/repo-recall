@@ -250,6 +250,15 @@ pub struct AuditEvent {
     pub commit_scope: Option<String>,
     pub audit_override: bool,
     pub source_file: String,
+    pub session_id: Option<String>,
+    pub version: Option<String>,
+    pub error: Option<String>,
+    pub stderr_tail: Option<String>,
+    pub repo_root: Option<String>,
+    pub cwd_subprocess: Option<String>,
+    pub cwd_at_invocation: Option<String>,
+    pub egress: Vec<crate::ingest::cli_guard::audit_jsonl::EgressEntry>,
+    pub profile_decision: Option<crate::ingest::cli_guard::audit_jsonl::ProfileDecision>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1586,48 +1595,47 @@ impl CacheWriter<'_> {
     /// Returns `(id, true)` on first sight, `(existing_id, false)` on dup.
     /// `repo_id == 0` is allowed and reserved for rows whose `commit_scope`
     /// didn't match any discovered repo. See #148.
-    #[allow(clippy::too_many_arguments)]
     pub fn upsert_audit_event(
         &self,
         repo_id: i64,
-        event_id: &str,
-        ts: i64,
-        decision: &str,
-        verb: &str,
-        argv: &[String],
-        exit_code: Option<i64>,
-        duration_ms: Option<i64>,
-        commit_scope: Option<&str>,
-        audit_override: bool,
-        source_file: &str,
+        rec: &crate::ingest::cli_guard::audit_jsonl::AuditRecord,
     ) -> Result<(i64, bool)> {
         let mut by_natural = self.txn.open_table(AUDIT_EVENTS_BY_NATURAL_KEY)?;
-        if let Some(g) = by_natural.get(event_id)? {
+        if let Some(g) = by_natural.get(rec.event_id.as_str())? {
             return Ok((u64_to_id(g.value()), false));
         }
         let id = next_id(self.txn, META_NEXT_AUDIT_EVENT)?;
         let evt = AuditEvent {
             id: u64_to_id(id),
             repo_id,
-            event_id: event_id.to_string(),
-            ts,
-            decision: decision.to_string(),
-            verb: verb.to_string(),
-            argv: argv.to_vec(),
-            exit_code,
-            duration_ms,
-            commit_scope: commit_scope.map(str::to_string),
-            audit_override,
-            source_file: source_file.to_string(),
+            event_id: rec.event_id.clone(),
+            ts: rec.ts,
+            decision: rec.decision.clone(),
+            verb: rec.verb.clone(),
+            argv: rec.argv.clone(),
+            exit_code: rec.exit_code,
+            duration_ms: rec.duration_ms,
+            commit_scope: rec.commit_scope.clone(),
+            audit_override: rec.audit_override,
+            source_file: rec.source_file.clone(),
+            session_id: rec.session_id.clone(),
+            version: rec.version.clone(),
+            error: rec.error.clone(),
+            stderr_tail: rec.stderr_tail.clone(),
+            repo_root: rec.repo_root.clone(),
+            cwd_subprocess: rec.cwd_subprocess.clone(),
+            cwd_at_invocation: rec.cwd_at_invocation.clone(),
+            egress: rec.egress.clone(),
+            profile_decision: rec.profile_decision.clone(),
         };
         let bytes = serde_json::to_vec(&evt)?;
         self.txn
             .open_table(AUDIT_EVENTS)?
             .insert(id, bytes.as_slice())?;
-        by_natural.insert(event_id, id)?;
+        by_natural.insert(rec.event_id.as_str(), id)?;
         self.txn
             .open_table(AUDIT_EVENTS_BY_REPO_TS)?
-            .insert((id_to_u64(repo_id), -ts, id), ())?;
+            .insert((id_to_u64(repo_id), -rec.ts, id), ())?;
         Ok((u64_to_id(id), true))
     }
 
