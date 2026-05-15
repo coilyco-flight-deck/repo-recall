@@ -134,6 +134,8 @@ async fn main() -> miette::Result<()> {
         labeled_ingest_interval_secs,
         last_labeled_ingest: Arc::new(Mutex::new(None)),
         stale_ask_threshold_secs,
+        remote_backoff_until: Arc::new(Mutex::new(None)),
+        remote_backoff_secs: Arc::new(Mutex::new(0)),
     };
 
     // Initial scan in the background so the dashboard / first MCP tool call

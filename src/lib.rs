@@ -66,4 +66,26 @@ pub struct AppState {
     /// `signals.stale_ask_days` (default 7 days) at startup. Replaces an
     /// earlier env-only path that bypassed `Config` entirely.
     pub stale_ask_threshold_secs: i64,
+    /// When set, the remote-state pass is skipped until this instant.
+    /// Populated when a refresh pass observes a `RateLimited` from any
+    /// gh fetcher: the next pass takes the larger of the parsed
+    /// `Retry-After` and the current `remote_backoff_secs`. Cleared
+    /// (set to `None`) on the first successful pass after the cooldown.
+    pub remote_backoff_until: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
+    /// Current per-step backoff in seconds, doubled on each
+    /// rate-limit-tagged pass (clamped to [`REMOTE_BACKOFF_MIN_SECS`,
+    /// `REMOTE_BACKOFF_MAX_SECS`]) and reset to 0 on the first
+    /// successful pass. Independent of the parsed Retry-After: the
+    /// effective sleep is `max(retry_after, backoff_secs)`.
+    pub remote_backoff_secs: Arc<Mutex<u64>>,
 }
+
+/// Lower bound for the exponential remote-state backoff. First
+/// rate-limit hit stalls the next pass by at least 5 minutes, even if
+/// gh did not return a Retry-After header.
+pub const REMOTE_BACKOFF_MIN_SECS: u64 = 300;
+
+/// Upper bound for the exponential remote-state backoff. Tracks the
+/// REST primary-rate-limit reset window so a sustained block does not
+/// cause arbitrary stalling beyond what the budget actually requires.
+pub const REMOTE_BACKOFF_MAX_SECS: u64 = 3600;

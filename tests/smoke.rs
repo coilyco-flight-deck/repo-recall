@@ -47,6 +47,8 @@ async fn boot_with(
         labeled_ingest_interval_secs: 3600,
         last_labeled_ingest: Arc::new(Mutex::new(None)),
         stale_ask_threshold_secs: 7 * 86_400,
+        remote_backoff_until: Arc::new(Mutex::new(None)),
+        remote_backoff_secs: Arc::new(Mutex::new(0)),
     };
 
     let app = routes::router(state);

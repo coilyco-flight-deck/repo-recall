@@ -334,6 +334,24 @@ async fn ingest_gh_refs(state: AppState) -> usize {
 /// subprocess runs in its own `spawn_blocking` so network latency overlaps;
 /// a bounded `JoinSet` caps in-flight `gh` calls to avoid fork-bombing.
 async fn ingest_ci_status(state: AppState) -> usize {
+    // Skip the entire remote pass while we're inside a rate-limit
+    // cooldown window. Set by a prior pass that observed a
+    // `RateLimited` from any gh fetcher; cleared automatically when
+    // the deadline passes.
+    {
+        let until_guard = state.remote_backoff_until.lock().await;
+        if let Some(until) = *until_guard {
+            let now = chrono::Utc::now();
+            if now < until {
+                let remaining = (until - now).num_seconds().max(0);
+                tracing::warn!(
+                    "remote-state pass skipped: backoff in effect for {remaining}s more"
+                );
+                return 0;
+            }
+        }
+    }
+
     // Re-probe `gh` on every refresh — the user may have installed it or
     // logged in since startup, and the banner should update.
     let health = tokio::task::spawn_blocking(git::log::gh_health)
@@ -403,15 +421,30 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 // the aggregate counts. Same `gh` call surface — just keep
                 // more of the response. Best-effort: a single repo's hiccup
                 // leaves these vectors empty rather than breaking the pass.
-                let pr_records = crate::ingest::github::fetch_open_prs(&slug)
-                    .into_option()
-                    .unwrap_or_default();
-                let issue_records = crate::ingest::github::fetch_open_issues(&slug)
-                    .into_option()
-                    .unwrap_or_default();
-                let ci_runs = crate::ingest::github::fetch_recent_runs(&slug, 20)
-                    .into_option()
-                    .unwrap_or_default();
+                use crate::ingest::github::RemoteFetchState;
+                let pr_state = crate::ingest::github::fetch_open_prs(&slug);
+                let issue_state = crate::ingest::github::fetch_open_issues(&slug);
+                let ci_state = crate::ingest::github::fetch_recent_runs(&slug, 20);
+
+                let mut rate_limited = false;
+                let mut max_retry_after_secs: Option<u64> = None;
+                for st in [
+                    pr_state.clone().discard_payload(),
+                    issue_state.clone().discard_payload(),
+                    ci_state.clone().discard_payload(),
+                ] {
+                    if let RemoteFetchState::RateLimited { retry_after_secs } = st {
+                        rate_limited = true;
+                        if let Some(s) = retry_after_secs {
+                            max_retry_after_secs =
+                                Some(max_retry_after_secs.map_or(s, |cur| cur.max(s)));
+                        }
+                    }
+                }
+
+                let pr_records = pr_state.into_option().unwrap_or_default();
+                let issue_records = issue_state.into_option().unwrap_or_default();
+                let ci_runs = ci_state.into_option().unwrap_or_default();
                 RemoteSnapshot {
                     id,
                     ci,
@@ -421,6 +454,8 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     pr_records,
                     issue_records,
                     ci_runs,
+                    rate_limited,
+                    max_retry_after_secs,
                 }
             })
             .await
@@ -435,6 +470,10 @@ async fn ingest_ci_status(state: AppState) -> usize {
             results.push(snap);
         }
     }
+
+    // #167: drive the rate-limit backoff state machine off the
+    // categorized RemoteFetchState the per-repo tasks recorded above.
+    update_remote_backoff(&state, &results).await;
 
     let cache_db = state.cache_db.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
@@ -521,6 +560,44 @@ async fn ingest_active_repos(state: AppState) -> usize {
     .unwrap_or(0)
 }
 
+/// Inspect a finished pass's snapshots and advance or reset the
+/// rate-limit backoff stored on `AppState`. Idempotent: a pass with
+/// zero rate-limit hits clears any prior backoff.
+async fn update_remote_backoff(state: &AppState, results: &[RemoteSnapshot]) {
+    let any_rl = results.iter().any(|s| s.rate_limited);
+    let max_retry: Option<u64> = results.iter().filter_map(|s| s.max_retry_after_secs).max();
+
+    let mut backoff_secs = state.remote_backoff_secs.lock().await;
+    let mut until = state.remote_backoff_until.lock().await;
+
+    if !any_rl {
+        if *backoff_secs > 0 || until.is_some() {
+            tracing::info!("remote-state pass clean; clearing rate-limit backoff");
+        }
+        *backoff_secs = 0;
+        *until = None;
+        return;
+    }
+
+    let new_secs = if *backoff_secs == 0 {
+        crate::REMOTE_BACKOFF_MIN_SECS
+    } else {
+        backoff_secs.saturating_mul(2).clamp(
+            crate::REMOTE_BACKOFF_MIN_SECS,
+            crate::REMOTE_BACKOFF_MAX_SECS,
+        )
+    };
+    *backoff_secs = new_secs;
+
+    let effective = max_retry.unwrap_or(0).max(new_secs);
+    let deadline = chrono::Utc::now() + chrono::Duration::seconds(effective as i64);
+    *until = Some(deadline);
+    tracing::warn!(
+        "rate-limit hit on remote pass; next pass blocked for {effective}s (backoff_step={new_secs}s, retry_after={:?})",
+        max_retry,
+    );
+}
+
 struct RemoteSnapshot {
     id: i64,
     ci: Option<String>,
@@ -530,6 +607,14 @@ struct RemoteSnapshot {
     pr_records: Vec<crate::ingest::github::PrRecordInput>,
     issue_records: Vec<crate::ingest::github::IssueRecordInput>,
     ci_runs: Vec<crate::ingest::github::CiRunRecordInput>,
+    /// True if any of this snapshot's gh fetchers reported
+    /// `RemoteFetchState::RateLimited`. Aggregated across the pass to
+    /// drive `AppState::remote_backoff_*`.
+    rate_limited: bool,
+    /// The largest parsed `Retry-After` (seconds) from any rate-limited
+    /// call in this snapshot. The pass-level aggregator keeps the max
+    /// across all snapshots and seeds the next pass's backoff floor.
+    max_retry_after_secs: Option<u64>,
 }
 
 struct RefreshStats {
