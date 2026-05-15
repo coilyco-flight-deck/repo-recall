@@ -117,6 +117,15 @@ card:
         enabled: true
         cap_rows: 5
         cap_window_days: 30
+      # Hottest directories (file-churn rolled up by leading path components).
+      # `depth` = how many path components define a directory bucket; e.g.
+      # depth=2 buckets `src/ingest/git/log.rs` under `src/ingest`. Files
+      # shallower than `depth` keep their actual depth.
+      - id: hot_dirs
+        enabled: true
+        cap_rows: 5
+        cap_window_days: 30
+        depth: 2
       # "View all" link to the verbose card if any row was capped.
       - id: overflow_link
         enabled: true
@@ -139,6 +148,10 @@ card:
       - id: churn
         cap_rows: 50
         cap_window_days: 90
+      - id: hot_dirs
+        cap_rows: 50
+        cap_window_days: 90
+        depth: 2
 
 mcp:
   default_commit_limit: 50       # recall_repo_detail default.

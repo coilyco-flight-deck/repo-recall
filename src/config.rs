@@ -324,6 +324,14 @@ impl Default for CardLayer {
                     cap_window_days: Some(30),
                     ..Default::default()
                 },
+                CardRow {
+                    id: "hot_dirs".into(),
+                    enabled: true,
+                    cap_rows: Some(5),
+                    cap_window_days: Some(30),
+                    depth: Some(2),
+                    ..Default::default()
+                },
                 CardRow::enabled("overflow_link"),
             ],
         }
@@ -381,6 +389,14 @@ impl Default for CardVerbose {
                     cap_window_days: Some(90),
                     ..Default::default()
                 },
+                CardRow {
+                    id: "hot_dirs".into(),
+                    enabled: true,
+                    cap_rows: Some(50),
+                    cap_window_days: Some(90),
+                    depth: Some(2),
+                    ..Default::default()
+                },
             ],
         }
     }
@@ -394,6 +410,9 @@ pub struct CardRow {
     pub cap_rows: Option<usize>,
     pub cap_window_days: Option<u32>,
     pub sort: Option<String>,
+    /// Path-component rollup depth for directory-rollup rows (`hot_dirs`).
+    /// Ignored by other row ids.
+    pub depth: Option<u32>,
 }
 
 impl CardRow {
@@ -610,8 +629,8 @@ mod tests {
         assert_eq!(c.ingest.git.churn_window_days, 30);
         assert_eq!(c.signals.stale_ask_days, 7);
         assert_eq!(c.dashboard.cards_per_row.desktop, 2);
-        assert_eq!(c.card.short.rows.len(), 10);
-        assert_eq!(c.card.verbose.rows.len(), 6);
+        assert_eq!(c.card.short.rows.len(), 11);
+        assert_eq!(c.card.verbose.rows.len(), 7);
         assert!(c.dashboard.sort.action_required_floats_to_top);
     }
 
@@ -639,8 +658,8 @@ discovery:
         let parsed: Config = serde_yaml::from_str(&content).expect("example file parses");
         // Sanity-check a few fields land where the YAML claims they should.
         assert_eq!(parsed.server.port, 7777);
-        assert_eq!(parsed.card.short.rows.len(), 10);
-        assert_eq!(parsed.card.verbose.rows.len(), 6);
+        assert_eq!(parsed.card.short.rows.len(), 11);
+        assert_eq!(parsed.card.verbose.rows.len(), 7);
     }
 
     #[test]

@@ -161,6 +161,40 @@ pub struct FileChange {
     pub file_path: String,
     pub additions: i64,
     pub deletions: i64,
+    /// When git detected a rename for this row (via `-M`), the old path
+    /// before the move. `None` for non-rename changes.
+    pub rename_from: Option<String>,
+}
+
+/// Parse a numstat path that may carry a git rename annotation. Without
+/// `-z`, git emits renames in two shapes:
+///
+///   `prefix/{old => new}/suffix`  - common prefix + suffix factored out
+///   `oldpath => newpath`          - no shared affix
+///
+/// Returns `(rename_from, file_path)`. When no rename marker is present,
+/// `rename_from` is `None` and `file_path` is the raw path.
+pub fn parse_numstat_path(raw: &str) -> (Option<String>, String) {
+    if let (Some(open), Some(close)) = (raw.find('{'), raw.find('}')) {
+        if close > open {
+            let inside = &raw[open + 1..close];
+            if let Some(arrow) = inside.find(" => ") {
+                let prefix = &raw[..open];
+                let suffix = &raw[close + 1..];
+                let old = format!("{prefix}{}{suffix}", &inside[..arrow]);
+                let new = format!("{prefix}{}{suffix}", &inside[arrow + 4..]);
+                let old = old.replace("//", "/");
+                let new = new.replace("//", "/");
+                return (Some(old), new);
+            }
+        }
+    }
+    if let Some(arrow) = raw.find(" => ") {
+        let old = raw[..arrow].to_string();
+        let new = raw[arrow + 4..].to_string();
+        return (Some(old), new);
+    }
+    (None, raw.to_string())
 }
 
 /// Walk `git log --numstat` in a single subprocess per repo and return one
@@ -183,6 +217,7 @@ pub fn file_changes_since(repo_path: &Path, since_ts: i64) -> Vec<FileChange> {
             "log",
             &format!("--since=@{since_ts}"),
             "--no-merges",
+            "-M",
             "--pretty=format:H|%H|%at|%ae",
             "--numstat",
         ])
@@ -233,15 +268,15 @@ pub fn file_changes_since(repo_path: &Path, since_ts: i64) -> Vec<FileChange> {
         let Ok(del) = del_s.parse::<i64>() else {
             continue;
         };
-        // Git reports renames as `old => new` or `{dir => other}/file`;
-        // keep it simple — record the raw path string as git emits it.
+        let (rename_from, file_path) = parse_numstat_path(path);
         out.push(FileChange {
             sha: cur_sha.clone(),
             author_email: cur_email.clone(),
             timestamp: cur_ts,
-            file_path: path.to_string(),
+            file_path,
             additions: add,
             deletions: del,
+            rename_from,
         });
     }
     out
@@ -1143,7 +1178,28 @@ fn parse_owner_repo(raw: &str) -> Option<OwnerRepo> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_remote_url;
+    use super::{normalize_remote_url, parse_numstat_path};
+
+    #[test]
+    fn parse_numstat_path_no_rename() {
+        let (from, to) = parse_numstat_path("src/db.rs");
+        assert_eq!(from, None);
+        assert_eq!(to, "src/db.rs");
+    }
+
+    #[test]
+    fn parse_numstat_path_braced_rename() {
+        let (from, to) = parse_numstat_path("src/ingest/{old => new}/file.rs");
+        assert_eq!(from.as_deref(), Some("src/ingest/old/file.rs"));
+        assert_eq!(to, "src/ingest/new/file.rs");
+    }
+
+    #[test]
+    fn parse_numstat_path_fully_renamed() {
+        let (from, to) = parse_numstat_path("a/b/c.rs => d/e/f.rs");
+        assert_eq!(from.as_deref(), Some("a/b/c.rs"));
+        assert_eq!(to, "d/e/f.rs");
+    }
 
     #[test]
     fn normalizes_ssh_shorthand() {

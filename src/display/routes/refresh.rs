@@ -674,15 +674,7 @@ fn ingest_commits(
                 .map(|fc| fc.additions + fc.deletions)
                 .sum();
             for fc in &file_changes {
-                w.insert_file_change(
-                    *repo_id,
-                    &fc.sha,
-                    &fc.file_path,
-                    fc.additions,
-                    fc.deletions,
-                    &fc.author_email,
-                    fc.timestamp,
-                )?;
+                w.insert_file_change(*repo_id, fc)?;
             }
             // Cap per-repo at 50 paths: enough for the dashboard sample,
             // small enough that a pathological refactor cannot blow up the

@@ -143,6 +143,20 @@ pub struct FileHotspot {
     pub authors: i64,
 }
 
+/// Directory-level churn rollup. `path` is the directory prefix at the
+/// rollup depth (top-N path components). `depth` is the number of
+/// components in `path` — equal to the depth the rollup was computed
+/// at, capped by the actual path length for shallow files.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirChurn {
+    pub path: String,
+    pub depth: u32,
+    pub additions: i64,
+    pub deletions: i64,
+    pub file_count: i64,
+    pub commit_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub kind: String,
@@ -453,6 +467,8 @@ struct FileChangeRecord {
     deletions: i64,
     author_email: String,
     timestamp: i64,
+    #[serde(default)]
+    rename_from: Option<String>,
 }
 
 /// Internal on-disk record for `uncommitted_files` rows.
@@ -995,6 +1011,73 @@ impl CacheDb {
         });
         hotspots.truncate(limit.max(0) as usize);
         Ok(hotspots)
+    }
+
+    /// Per-directory churn rollup over the same FileChange records that feed
+    /// `file_hotspots`. `depth` controls how many leading path components
+    /// define each directory bucket (e.g. depth=2 rolls `src/ingest/git/log.rs`
+    /// up to `src/ingest`). Files shallower than `depth` are bucketed at
+    /// their actual depth. Pure query-time aggregation — no pre-aggregation.
+    pub fn dir_hotspots(
+        &self,
+        repo_id: i64,
+        since_ts: i64,
+        depth: u32,
+        limit: i64,
+    ) -> Result<Vec<DirChurn>> {
+        let read = self.db.begin_read()?;
+        let by_repo_ts = read.open_table(FILE_CHANGES_BY_REPO_TS)?;
+        let fc_t = read.open_table(FILE_CHANGES)?;
+        let key_lo = (id_to_u64(repo_id), since_ts, 0u64);
+        let key_hi = (id_to_u64(repo_id), i64::MAX, u64::MAX);
+
+        struct Acc {
+            additions: i64,
+            deletions: i64,
+            files: HashSet<String>,
+            commits: HashSet<String>,
+            actual_depth: u32,
+        }
+        let mut by_dir: HashMap<String, Acc> = HashMap::new();
+        for row in by_repo_ts.range(key_lo..=key_hi)? {
+            let (k, _) = row?;
+            let (_rid, _ts, fid) = k.value();
+            let Some(g) = fc_t.get(fid)? else {
+                continue;
+            };
+            let f: FileChangeRecord = serde_json::from_slice(g.value())?;
+            let (bucket, bucket_depth) = bucket_dir(&f.file_path, depth);
+            let acc = by_dir.entry(bucket).or_insert_with(|| Acc {
+                additions: 0,
+                deletions: 0,
+                files: HashSet::new(),
+                commits: HashSet::new(),
+                actual_depth: bucket_depth,
+            });
+            acc.additions += f.additions;
+            acc.deletions += f.deletions;
+            acc.files.insert(f.file_path);
+            acc.commits.insert(f.sha);
+        }
+        let mut out: Vec<DirChurn> = by_dir
+            .into_iter()
+            .map(|(p, a)| DirChurn {
+                path: p,
+                depth: a.actual_depth,
+                additions: a.additions,
+                deletions: a.deletions,
+                file_count: a.files.len() as i64,
+                commit_count: a.commits.len() as i64,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            (b.additions + b.deletions)
+                .cmp(&(a.additions + a.deletions))
+                .then_with(|| b.commit_count.cmp(&a.commit_count))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        out.truncate(limit.max(0) as usize);
+        Ok(out)
     }
 
     /// Read every record that needs to land in tantivy. The shape mirrors
@@ -1849,27 +1932,22 @@ impl CacheWriter<'_> {
         Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn insert_file_change(
         &self,
         repo_id: i64,
-        sha: &str,
-        file_path: &str,
-        additions: i64,
-        deletions: i64,
-        author_email: &str,
-        timestamp: i64,
+        fc: &crate::ingest::git::log::FileChange,
     ) -> Result<()> {
         let id = next_id(self.txn, META_NEXT_FILE_CHANGE)?;
         let rec = FileChangeRecord {
             id: u64_to_id(id),
             repo_id,
-            sha: sha.into(),
-            file_path: file_path.into(),
-            additions,
-            deletions,
-            author_email: author_email.into(),
-            timestamp,
+            sha: fc.sha.clone(),
+            file_path: fc.file_path.clone(),
+            additions: fc.additions,
+            deletions: fc.deletions,
+            author_email: fc.author_email.clone(),
+            timestamp: fc.timestamp,
+            rename_from: fc.rename_from.clone(),
         };
         let bytes = serde_json::to_vec(&rec)?;
         self.txn
@@ -1877,7 +1955,7 @@ impl CacheWriter<'_> {
             .insert(id, bytes.as_slice())?;
         self.txn
             .open_table(FILE_CHANGES_BY_REPO_TS)?
-            .insert((id_to_u64(repo_id), timestamp, id), ())?;
+            .insert((id_to_u64(repo_id), fc.timestamp, id), ())?;
         Ok(())
     }
 
@@ -2113,6 +2191,22 @@ fn id_to_u64(id: i64) -> u64 {
 
 fn u64_to_id(id: u64) -> i64 {
     id as i64
+}
+
+/// Take the first `depth` `/`-separated components of `path` as the rollup
+/// bucket. Returns `(bucket_path, bucket_depth)`. Files shallower than the
+/// target depth are bucketed at their actual depth (so a top-level `README.md`
+/// stays bucketed as `README.md` rather than disappearing). Depth `0` is
+/// treated as depth `1` to avoid an empty bucket key.
+fn bucket_dir(path: &str, depth: u32) -> (String, u32) {
+    let d = depth.max(1) as usize;
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() > d {
+        let bucket = parts[..d].join("/");
+        (bucket, d as u32)
+    } else {
+        (path.to_string(), parts.len() as u32)
+    }
 }
 
 fn order_by_started_at_desc(a: Option<i64>, b: Option<i64>) -> std::cmp::Ordering {
