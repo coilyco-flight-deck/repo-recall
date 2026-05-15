@@ -15,7 +15,7 @@ pub mod issues;
 pub mod labeled;
 pub mod pulls;
 
-pub use ci_runs::{fetch_recent_runs, CiRunRecordInput};
+pub use ci_runs::{parse_job_names_json, parse_runs_json, CiRunRecordInput};
 pub use client::{build_client, AuthedUser, FixturesClient, GithubClient, OctocrabClient};
 pub use fetch_state::{classify_gh_failure, classify_gh_stderr, RemoteFetchState};
 pub use issues::{parse_issues_json, IssueRecordInput};

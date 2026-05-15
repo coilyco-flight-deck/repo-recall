@@ -1,10 +1,11 @@
-//! CI run ingest from `gh run list --json …`. Source 4 of #155. We pull
-//! the rich field set including `jobs[]`, but persist only deduplicated
-//! job names — jobs[].steps / status / conclusion are bulky and can be
-//! surfaced on demand later.
-
-use std::collections::BTreeSet;
-use std::process::Command;
+//! CI run ingest. Source 4 of #155. The wire layer lives in
+//! [`super::client::GithubClient::fetch_recent_runs`]; this module
+//! owns the typed input shape and the pure JSON-to-record parser
+//! that both the octocrab and fixtures impls call into.
+//!
+//! Field naming follows GitHub REST snake_case (`id`, `display_title`,
+//! `head_sha`, ...) rather than the camelCase that `gh run list --json`
+//! emitted, because the rewrite (#173) sources directly from REST.
 
 use chrono::DateTime;
 
@@ -28,124 +29,57 @@ pub struct CiRunRecordInput {
     pub jobs: Vec<String>,
 }
 
-/// Pull recent runs for one repo. `limit` becomes `gh run list -L`. Runs
-/// are returned newest-first as `gh` emits them.
-pub fn fetch_recent_runs(
-    owner_repo: &str,
-    limit: usize,
-) -> super::fetch_state::RemoteFetchState<Vec<CiRunRecordInput>> {
-    use super::fetch_state::{classify_gh_failure, RemoteFetchState};
-    use super::issues::log_categorized_failure;
-    // Single `gh run list` covers the headline run fields. Jobs come from a
-    // per-run `gh run view <id> --json jobs`. We could batch jobs into a
-    // single `gh api` call too, but `gh run list --json jobs` is not
-    // supported. Per-run is fine at the cap we use (small N).
-    let fields = "databaseId,name,displayTitle,headSha,headBranch,number,event,\
-                  createdAt,updatedAt,startedAt,url,attempt,status,conclusion";
-    let Ok(output) = Command::new("gh")
-        .args([
-            "run",
-            "list",
-            "-R",
-            owner_repo,
-            "-L",
-            &limit.to_string(),
-            "--json",
-            fields,
-        ])
-        .output()
-    else {
-        return RemoteFetchState::Error("failed to spawn gh".into());
-    };
-    if !output.status.success() {
-        let state = classify_gh_failure(&output);
-        log_categorized_failure(
-            "gh run list",
-            owner_repo,
-            &state,
-            &String::from_utf8_lossy(&output.stderr),
-        );
-        return match state {
-            RemoteFetchState::Missing => RemoteFetchState::Missing,
-            RemoteFetchState::Unauthorized => RemoteFetchState::Unauthorized,
-            RemoteFetchState::RateLimited { retry_after_secs } => {
-                RemoteFetchState::RateLimited { retry_after_secs }
-            }
-            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
-            RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
-            RemoteFetchState::Ok(()) => {
-                RemoteFetchState::Error("classifier returned Ok on failure".into())
-            }
-        };
-    }
-    let Ok(value): serde_json::Result<serde_json::Value> = serde_json::from_slice(&output.stdout)
-    else {
-        return RemoteFetchState::Error("ci_runs: invalid JSON".into());
-    };
-    let Some(arr) = value.as_array() else {
-        return RemoteFetchState::Error("ci_runs: expected JSON array".into());
+/// Pure parser. Takes the GitHub REST `GET /repos/X/actions/runs`
+/// response body (an object with `workflow_runs` array) and returns
+/// the typed records. `jobs` is left empty - the caller fills it
+/// per-run via a separate endpoint.
+pub fn parse_runs_json(value: &serde_json::Value) -> Vec<CiRunRecordInput> {
+    let arr = match value.get("workflow_runs").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
     };
     let mut out = Vec::with_capacity(arr.len());
     for run in arr {
-        let run_id = run.get("databaseId").and_then(|v| v.as_i64()).unwrap_or(0);
+        let run_id = run.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         if run_id == 0 {
             continue;
         }
-        let jobs = fetch_job_names(owner_repo, run_id);
         out.push(CiRunRecordInput {
             run_id,
             name: pull_str(run, "name"),
-            display_title: pull_str(run, "displayTitle"),
-            head_sha: pull_str(run, "headSha"),
-            head_branch: pull_str(run, "headBranch"),
-            run_number: run.get("number").and_then(|v| v.as_i64()).unwrap_or(0),
+            display_title: pull_str(run, "display_title"),
+            head_sha: pull_str(run, "head_sha"),
+            head_branch: pull_str(run, "head_branch"),
+            run_number: run.get("run_number").and_then(|v| v.as_i64()).unwrap_or(0),
             event: pull_str(run, "event"),
-            created_at: pull_ts(run, "createdAt"),
-            updated_at: pull_ts(run, "updatedAt"),
+            created_at: pull_ts(run, "created_at"),
+            updated_at: pull_ts(run, "updated_at"),
             run_started_at: run
-                .get("startedAt")
+                .get("run_started_at")
                 .and_then(|v| v.as_str())
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|d| d.timestamp()),
-            html_url: pull_str(run, "url"),
-            run_attempt: run.get("attempt").and_then(|v| v.as_i64()).unwrap_or(0),
+            html_url: pull_str(run, "html_url"),
+            run_attempt: run.get("run_attempt").and_then(|v| v.as_i64()).unwrap_or(0),
             status: pull_str(run, "status"),
             conclusion: run
                 .get("conclusion")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            jobs,
+            jobs: Vec::new(),
         });
     }
-    RemoteFetchState::Ok(out)
+    out
 }
 
-/// `gh run view <id> --json jobs` -> deduped, sorted job names. Best
-/// effort; an empty vec on any failure.
-fn fetch_job_names(owner_repo: &str, run_id: i64) -> Vec<String> {
-    let Ok(out) = Command::new("gh")
-        .args([
-            "run",
-            "view",
-            &run_id.to_string(),
-            "-R",
-            owner_repo,
-            "--json",
-            "jobs",
-        ])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_slice(&out.stdout) else {
-        return Vec::new();
-    };
+/// Pure parser. Takes the GitHub REST `GET /repos/X/actions/runs/<id>/jobs`
+/// response body (an object with `jobs` array) and returns a
+/// deduped, sorted list of job names.
+pub fn parse_job_names_json(value: &serde_json::Value) -> Vec<String> {
+    use std::collections::BTreeSet;
     let mut names: BTreeSet<String> = BTreeSet::new();
-    if let Some(arr) = v.get("jobs").and_then(|j| j.as_array()) {
+    if let Some(arr) = value.get("jobs").and_then(|j| j.as_array()) {
         for j in arr {
             if let Some(n) = j.get("name").and_then(|x| x.as_str()) {
                 names.insert(n.to_string());

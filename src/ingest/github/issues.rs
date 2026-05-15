@@ -9,7 +9,6 @@
 
 use chrono::DateTime;
 
-use super::fetch_state::RemoteFetchState;
 use super::pulls::cap_body;
 
 #[derive(Debug, Clone, Default)]
@@ -117,43 +116,6 @@ pub fn parse_issues_json(value: &serde_json::Value) -> Vec<IssueRecordInput> {
         });
     }
     out
-}
-
-/// Shared helper: log a categorized failure at the appropriate level.
-/// `RateLimited` is loud (warn) so the user sees the rate-limit
-/// situation immediately rather than wondering why the dashboard went
-/// blank. Other categories stay at debug since they are routine
-/// (404s for transferred repos, auth misses for archived orgs).
-pub(crate) fn log_categorized_failure(
-    call: &str,
-    owner_repo: &str,
-    state: &RemoteFetchState<()>,
-    detail: &str,
-) {
-    match state {
-        RemoteFetchState::RateLimited { retry_after_secs } => {
-            let retry = match retry_after_secs {
-                Some(s) => format!(", retry-after {s}s"),
-                None => String::new(),
-            };
-            tracing::warn!(
-                "{call} rate-limited for {owner_repo}{retry}: {}",
-                detail.trim()
-            );
-        }
-        RemoteFetchState::Missing => {
-            tracing::debug!("{call} 404 for {owner_repo}");
-        }
-        RemoteFetchState::Unauthorized => {
-            tracing::debug!("{call} unauthorized for {owner_repo}");
-        }
-        RemoteFetchState::Unconfigured => {
-            tracing::debug!("{call} skipped for {owner_repo}: GitHub client unconfigured");
-        }
-        RemoteFetchState::Error(_) | RemoteFetchState::Ok(()) => {
-            tracing::debug!("{call} failed for {owner_repo}: {}", detail.trim());
-        }
-    }
 }
 
 fn parse_ts(v: &serde_json::Value, key: &str) -> i64 {
