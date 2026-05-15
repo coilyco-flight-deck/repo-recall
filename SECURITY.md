@@ -29,7 +29,12 @@ repo-recall is a local hydration layer over the operator's git repos, GitHub sta
 - `gh` subprocess argv constructed from user-controlled input (repo names, branch names) producing different argv than the same string typed at a shell
 - redb cache or tantivy index written outside `$REPO_RECALL_CACHE_DIR` / `$REPO_RECALL_INDEX_DIR`, or with permissions wider than the invoking user
 - search index or session ingest treating one user's data as another's (cross-user mixing on a shared host)
-- `gh api graphql` calls anywhere in the codebase (REST only; see AGENTS.md)
+- `gh api graphql` calls anywhere in the codebase outside the single sanctioned site in `src/ingest/github/labeled.rs` (REST only; see AGENTS.md "No GraphQL" exception)
+- the labeled-issue GraphQL query widening beyond the explicitly-listed `repo:owner/name` filters built from repos we discovered on disk
+
+## Scope discipline: repos on disk only
+
+repo-recall only searches repos it discovered on disk. No org-wide queries, no probing for repos the operator hasn't told it about. The labeled-issue GraphQL ingest builds its `repo:owner/name` filter list from the local repo set; the GitHub search endpoint cannot widen the result set beyond that list. There is no "scan the org" or "scan everything I have access to" path.
 
 ## Out of scope
 

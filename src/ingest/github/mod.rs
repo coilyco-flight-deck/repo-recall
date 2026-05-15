@@ -10,8 +10,10 @@
 
 pub mod ci_runs;
 pub mod issues;
+pub mod labeled;
 pub mod pulls;
 
 pub use ci_runs::{fetch_recent_runs, CiRunRecordInput};
 pub use issues::{fetch_open_issues, IssueRecordInput};
+pub use labeled::{fetch_labeled_issues_graphql, LabelTarget};
 pub use pulls::{fetch_open_prs, PrRecordInput};

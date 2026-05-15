@@ -41,6 +41,10 @@ refresh:
     sessions:      null
     docs:          null
     cli_guard:     null
+    # Labeled-issue GraphQL ingest (Source 6 of #155). The sole sanctioned
+    # GraphQL call site — runs hourly to stay well inside GitHub's GraphQL
+    # secondary budget while still picking up dispatch-label churn quickly.
+    github_remote_labeled: 3600
 
 ingest:
   github:

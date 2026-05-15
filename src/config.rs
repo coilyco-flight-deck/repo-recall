@@ -100,7 +100,7 @@ impl Default for Refresh {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PerSource {
     pub git_log: Option<u64>,
@@ -108,6 +108,24 @@ pub struct PerSource {
     pub sessions: Option<u64>,
     pub docs: Option<u64>,
     pub cli_guard: Option<u64>,
+    /// Cadence for the labeled-issue GraphQL ingest (Source 6 of #155).
+    /// Default 3600s (hourly): well inside the GraphQL secondary budget
+    /// and the dispatch labels are slow-moving. Consumed by the
+    /// per-source refresh substrate (#146).
+    pub github_remote_labeled: Option<u64>,
+}
+
+impl Default for PerSource {
+    fn default() -> Self {
+        Self {
+            git_log: None,
+            github_remote: None,
+            sessions: None,
+            docs: None,
+            cli_guard: None,
+            github_remote_labeled: Some(3600),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
