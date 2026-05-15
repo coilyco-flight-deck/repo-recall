@@ -1,0 +1,51 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Media-Type: github.v3; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4998
+X-Ratelimit-Reset: 1893456000
+X-Ratelimit-Resource: graphql
+X-Ratelimit-Used: 2
+
+{
+  "data": {
+    "q0": {
+      "nodes": [
+        {
+          "__typename": "Issue",
+          "number": 146,
+          "title": "Per-source refresh cadence (replace single global wipe-and-rebuild)",
+          "createdAt": "2026-05-14T22:10:39Z",
+          "closedAt": null,
+          "state": "OPEN",
+          "repository": { "nameWithOwner": "coilysiren/repo-recall" },
+          "labels": {
+            "nodes": [
+              { "name": "structural-ask" }
+            ]
+          }
+        },
+        {
+          "__typename": "Issue",
+          "number": 488,
+          "title": "Convert language: system pre-commit hooks to language: python",
+          "createdAt": "2026-05-10T18:22:14Z",
+          "closedAt": null,
+          "state": "OPEN",
+          "repository": { "nameWithOwner": "coilysiren/coilyco-ai" },
+          "labels": {
+            "nodes": [
+              { "name": "structural-ask" },
+              { "name": "tooling" }
+            ]
+          }
+        }
+      ]
+    },
+    "q1": {
+      "nodes": []
+    }
+  }
+}

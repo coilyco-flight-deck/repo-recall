@@ -1,0 +1,19 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 0
+X-Ratelimit-Reset: 1893456000
+X-Ratelimit-Resource: graphql
+X-Ratelimit-Used: 5000
+
+{
+  "data": null,
+  "errors": [
+    {
+      "type": "RATE_LIMITED",
+      "message": "API rate limit exceeded for installation. Reset at 2027-01-01T00:00:00Z."
+    }
+  ]
+}

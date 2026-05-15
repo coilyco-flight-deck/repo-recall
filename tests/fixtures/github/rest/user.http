@@ -1,0 +1,48 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+Last-Modified: Tue, 12 May 2026 21:25:42 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Media-Type: github.v3; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4959
+X-Ratelimit-Reset: 1778831044
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 41
+
+{
+  "login": "coilysiren",
+  "id": 5768468,
+  "node_id": "MDQ6VXNlcjU3Njg0Njg=",
+  "avatar_url": "https://avatars.githubusercontent.com/u/5768468?v=4",
+  "gravatar_id": "",
+  "url": "https://api.github.com/users/coilysiren",
+  "html_url": "https://github.com/coilysiren",
+  "followers_url": "https://api.github.com/users/coilysiren/followers",
+  "following_url": "https://api.github.com/users/coilysiren/following{/other_user}",
+  "gists_url": "https://api.github.com/users/coilysiren/gists{/gist_id}",
+  "starred_url": "https://api.github.com/users/coilysiren/starred{/owner}{/repo}",
+  "subscriptions_url": "https://api.github.com/users/coilysiren/subscriptions",
+  "organizations_url": "https://api.github.com/users/coilysiren/orgs",
+  "repos_url": "https://api.github.com/users/coilysiren/repos",
+  "events_url": "https://api.github.com/users/coilysiren/events{/privacy}",
+  "received_events_url": "https://api.github.com/users/coilysiren/received_events",
+  "type": "User",
+  "user_view_type": "public",
+  "site_admin": false,
+  "name": "Kai",
+  "company": null,
+  "blog": "https://www.coilysiren.me/",
+  "location": "East Bay, CA",
+  "email": "coilysiren@gmail.com",
+  "hireable": true,
+  "bio": "\u2699\u2692 lights out, platform's green, agents are working the line \u2692\u2699",
+  "twitter_username": null,
+  "notification_email": "coilysiren@gmail.com",
+  "public_repos": 96,
+  "public_gists": 31,
+  "followers": 601,
+  "following": 116,
+  "created_at": "2013-10-24T19:39:28Z",
+  "updated_at": "2026-05-12T21:25:42Z"
+}

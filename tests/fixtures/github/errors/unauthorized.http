@@ -1,0 +1,11 @@
+HTTP/2.0 401 Unauthorized
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Media-Type: github.v3; format=json
+
+{
+  "message": "Bad credentials",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "401"
+}

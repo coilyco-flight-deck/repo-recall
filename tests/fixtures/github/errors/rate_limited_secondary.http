@@ -1,0 +1,17 @@
+HTTP/2.0 403 Forbidden
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+Retry-After: 60
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Media-Type: github.v3; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4321
+X-Ratelimit-Reset: 1893456000
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 679
+
+{
+  "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again. If you reach out to GitHub Support for help, please include the request ID.",
+  "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits",
+  "status": "403"
+}

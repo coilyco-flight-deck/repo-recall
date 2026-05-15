@@ -103,10 +103,23 @@ async fn main() -> miette::Result<()> {
     let commits_per_repo: usize = cfg.discovery.commits_per_repo;
 
     let gh_health = git::log::gh_health();
-    let my_gh_login = if gh_health == git::log::GhHealth::Ok {
-        git::log::my_gh_login()
-    } else {
-        None
+    let github_client = repo_recall::ingest::github::build_client();
+    // #173 step 1: validating wire-up. Replaces the legacy
+    // `git::log::my_gh_login` subprocess at this single site. Other
+    // call sites continue to use the subprocess until steps 2-6.
+    // Bounded probe so a slow/blocked network never wedges startup.
+    let my_gh_login = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        github_client.fetch_user(),
+    )
+    .await
+    {
+        Ok(repo_recall::ingest::github::RemoteFetchState::Ok(u)) => Some(u.login),
+        Ok(_) => None,
+        Err(_) => {
+            tracing::warn!("github auth probe timed out after 3s; my_gh_login = None");
+            None
+        }
     };
     let my_git_email = detect_my_git_email();
 
@@ -137,6 +150,7 @@ async fn main() -> miette::Result<()> {
         remote_backoff_until: Arc::new(Mutex::new(None)),
         remote_backoff_secs: Arc::new(Mutex::new(0)),
         last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        github_client,
     };
 
     // Initial scan in the background so the dashboard / first MCP tool call

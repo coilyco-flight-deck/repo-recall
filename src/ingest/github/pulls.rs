@@ -58,6 +58,7 @@ pub fn fetch_open_prs(owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>> 
             RemoteFetchState::RateLimited { retry_after_secs } => {
                 RemoteFetchState::RateLimited { retry_after_secs }
             }
+            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
             RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
             RemoteFetchState::Ok(()) => {
                 RemoteFetchState::Error("classifier returned Ok on failure".into())

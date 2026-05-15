@@ -1,0 +1,21 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4997
+X-Ratelimit-Reset: 1893456000
+X-Ratelimit-Resource: graphql
+X-Ratelimit-Used: 3
+
+{
+  "data": null,
+  "errors": [
+    {
+      "type": "INVALID_CURSOR_ARGUMENTS",
+      "path": ["q0"],
+      "locations": [{ "line": 2, "column": 3 }],
+      "message": "`first` argument value `1000` is greater than the max limit of `100`."
+    }
+  ]
+}

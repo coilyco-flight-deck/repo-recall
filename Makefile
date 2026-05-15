@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch build release test smoke fmt fmt-check lint check ci clean css css-check css-watch
+.PHONY: help install run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean css css-check css-watch
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
@@ -48,6 +48,12 @@ watch: ## cargo-watch + caddy https proxy at https://$(https_host):$(https_port)
 		echo "caddy: https://$(https_host):$(https_port) -> 127.0.0.1:$(port) (log: /tmp/repo-recall-caddy.log)"; \
 		REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) \
 			cargo watch -w src -w Cargo.toml -w static -x run
+
+watch-fixtures: ## Same as `watch`, but feeds GitHub responses from tests/fixtures/github/rest (no real API calls).
+	REPO_RECALL_GITHUB_FIXTURES_DIR=$(CURDIR)/tests/fixtures/github/rest $(MAKE) watch
+
+watch-fixtures-errors: ## Same as `watch`, but replays the failure-mode fixtures (401, 403 rate-limited, 502, etc.).
+	REPO_RECALL_GITHUB_FIXTURES_DIR=$(CURDIR)/tests/fixtures/github/errors $(MAKE) watch
 
 build: ## Compile the binary in debug mode. Forward extras (`--release`, `-p`) verbatim.
 	cargo build

@@ -1,0 +1,162 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+Link: <https://api.github.com/repositories/1219902657/issues?per_page=2&state=open&after=Y3Vyc29yOnYyOpLPAAABnimkUNjPAAAAAQlMIm8%3D&page=2>; rel="next"
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Media-Type: github.v3; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4963
+X-Ratelimit-Reset: 1778831044
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 37
+
+[
+  {
+    "url": "https://api.github.com/repos/coilysiren/repo-recall/issues/166",
+    "repository_url": "https://api.github.com/repos/coilysiren/repo-recall",
+    "labels_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/166/labels{/name}",
+    "comments_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/166/comments",
+    "events_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/166/events",
+    "html_url": "https://github.com/coilysiren/repo-recall/issues/166",
+    "id": 4450952753,
+    "node_id": "I_kwDOSLY8wc8AAAABCUwmMQ",
+    "number": 166,
+    "title": "Title: Persist last-good remote-state across refresh wipes so a single bad pass doesn't blank the dashboard",
+    "user": {
+      "login": "coilysiren",
+      "id": 5768468,
+      "node_id": "MDQ6VXNlcjU3Njg0Njg=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5768468?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/coilysiren",
+      "html_url": "https://github.com/coilysiren",
+      "followers_url": "https://api.github.com/users/coilysiren/followers",
+      "following_url": "https://api.github.com/users/coilysiren/following{/other_user}",
+      "gists_url": "https://api.github.com/users/coilysiren/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/coilysiren/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/coilysiren/subscriptions",
+      "organizations_url": "https://api.github.com/users/coilysiren/orgs",
+      "repos_url": "https://api.github.com/users/coilysiren/repos",
+      "events_url": "https://api.github.com/users/coilysiren/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/coilysiren/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "labels": [],
+    "state": "open",
+    "locked": false,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2026-05-15T03:18:31Z",
+    "updated_at": "2026-05-15T03:18:31Z",
+    "closed_at": null,
+    "assignee": null,
+    "author_association": "OWNER",
+    "active_lock_reason": null,
+    "sub_issues_summary": {
+      "total": 0,
+      "completed": 0,
+      "percent_completed": 0
+    },
+    "issue_dependencies_summary": {
+      "blocked_by": 0,
+      "total_blocked_by": 0,
+      "blocking": 0,
+      "total_blocking": 0
+    },
+    "body": "Problem\n\nCacheDb::open_in_dir deletes the prior cache.redb on startup, and every refresh starts with wipe() to truncate every table (per AGENTS.md: \"the cache is wipe-on-restart\"). When a refresh pass fails to reach gh (down or rate-limited), all remote-state columns blank out across the dashboard, even though we had perfectly good data 2.5 minutes ago. A single bad pass erases the whole remote view.\n\nWhere\n\nsrc/db.rs - wipe-on-startup + per-refresh wipe() design.\nsrc/display/routes/refresh.rs - remote-state pass writes blanks on failure rather than preserving prior values.\nProposed\n\nCarry last-good remote-state across refresh passes. Two viable shapes:\n\nIn-memory shadow keyed by repo_id that the writer falls back to when the new pass returns no value.\nSoft-update for remote columns only: skip the column-wipe step in wipe() for RemoteState attributes, then overwrite-on-success rather than wipe-then-fill.\nPair with an \"as of\" timestamp per remote column so stale values render with a freshness pill instead of being indistinguishable from current ones.",
+    "closed_by": null,
+    "reactions": {
+      "url": "https://api.github.com/repos/coilysiren/repo-recall/issues/166/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "timeline_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/166/timeline",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "pinned_comment": null
+  },
+  {
+    "url": "https://api.github.com/repos/coilysiren/repo-recall/issues/165",
+    "repository_url": "https://api.github.com/repos/coilysiren/repo-recall",
+    "labels_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/165/labels{/name}",
+    "comments_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/165/comments",
+    "events_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/165/events",
+    "html_url": "https://github.com/coilysiren/repo-recall/issues/165",
+    "id": 4450951791,
+    "node_id": "I_kwDOSLY8wc8AAAABCUwibw",
+    "number": 165,
+    "title": "Title: Categorize remote-fetch failures and surface a \"rate limited\" pill instead of silent blanks",
+    "user": {
+      "login": "coilysiren",
+      "id": 5768468,
+      "node_id": "MDQ6VXNlcjU3Njg0Njg=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5768468?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/coilysiren",
+      "html_url": "https://github.com/coilysiren",
+      "followers_url": "https://api.github.com/users/coilysiren/followers",
+      "following_url": "https://api.github.com/users/coilysiren/following{/other_user}",
+      "gists_url": "https://api.github.com/users/coilysiren/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/coilysiren/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/coilysiren/subscriptions",
+      "organizations_url": "https://api.github.com/users/coilysiren/orgs",
+      "repos_url": "https://api.github.com/users/coilysiren/repos",
+      "events_url": "https://api.github.com/users/coilysiren/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/coilysiren/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "labels": [],
+    "state": "open",
+    "locked": false,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2026-05-15T03:18:15Z",
+    "updated_at": "2026-05-15T03:18:15Z",
+    "closed_at": null,
+    "assignee": null,
+    "author_association": "OWNER",
+    "active_lock_reason": null,
+    "sub_issues_summary": {
+      "total": 0,
+      "completed": 0,
+      "percent_completed": 0
+    },
+    "issue_dependencies_summary": {
+      "blocked_by": 0,
+      "total_blocked_by": 0,
+      "blocking": 0,
+      "total_blocking": 0
+    },
+    "body": "Problem\n\nWhen a gh call fails, the dashboard renders the affected remote-state columns as blank. There is no way to tell whether the repo genuinely has no PRs/issues/CI, the repo is unauthenticated, the repo is missing, or GitHub rate-limited us. All four states look identical to the user.\n\nWhere\n\nsrc/ingest/github/{issues,pulls,ci_runs}.rs - failures collapse into None with a debug! log.\nsrc/display/routes/templates.rs - no failure-state pill in the existing PILL bundles.\nProposed\n\nDistinguish failure modes at the ingest boundary by inspecting gh exit code + stderr (404 vs 401/403 vs 403+rate-limit headers vs other). Surface the categorized state up to the dashboard as a discriminated enum (e.g. RemoteFetchState::{Ok, Missing, Unauthorized, RateLimited, Error}) and render a \"rate limited, paused\" pill instead of a silent blank when relevant.",
+    "closed_by": null,
+    "reactions": {
+      "url": "https://api.github.com/repos/coilysiren/repo-recall/issues/165/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "timeline_url": "https://api.github.com/repos/coilysiren/repo-recall/issues/165/timeline",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "pinned_comment": null
+  }
+]

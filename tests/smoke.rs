@@ -50,6 +50,7 @@ async fn boot_with(
         remote_backoff_until: Arc::new(Mutex::new(None)),
         remote_backoff_secs: Arc::new(Mutex::new(0)),
         last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        github_client: repo_recall::ingest::github::build_client(),
     };
 
     let app = routes::router(state);

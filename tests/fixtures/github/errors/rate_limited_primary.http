@@ -1,0 +1,16 @@
+HTTP/2.0 403 Forbidden
+Content-Type: application/json; charset=utf-8
+Date: Fri, 01 Jan 2027 00:00:00 GMT
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Media-Type: github.v3; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 0
+X-Ratelimit-Reset: 1893456000
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 5000
+
+{
+  "message": "API rate limit exceeded for user ID 5768468.",
+  "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+  "status": "403"
+}

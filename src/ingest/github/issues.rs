@@ -47,6 +47,7 @@ pub fn fetch_open_issues(owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordIn
             RemoteFetchState::RateLimited { retry_after_secs } => {
                 RemoteFetchState::RateLimited { retry_after_secs }
             }
+            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
             RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
             RemoteFetchState::Ok(()) => {
                 RemoteFetchState::Error("classifier returned Ok on failure".into())
@@ -167,6 +168,9 @@ pub(crate) fn log_categorized_failure(
         }
         RemoteFetchState::Unauthorized => {
             tracing::debug!("{call} unauthorized for {owner_repo}");
+        }
+        RemoteFetchState::Unconfigured => {
+            tracing::debug!("{call} skipped for {owner_repo}: GitHub client unconfigured");
         }
         RemoteFetchState::Error(_) | RemoteFetchState::Ok(()) => {
             tracing::debug!("{call} failed for {owner_repo}: {}", stderr.trim());

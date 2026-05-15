@@ -85,6 +85,14 @@ pub struct AppState {
     /// pass does not blank the entire dashboard. Cleared on process
     /// restart by design (the cache itself rebuilds from disk).
     pub last_good_remote: Arc<Mutex<std::collections::HashMap<i64, CachedRemoteState>>>,
+    /// GitHub API client. Either an [`ingest::github::OctocrabClient`]
+    /// sourced from `gh auth token` (production), an anonymous octocrab
+    /// when no token is available (every method returns
+    /// `RemoteFetchState::Unconfigured`), or a
+    /// [`ingest::github::FixturesClient`] when
+    /// `REPO_RECALL_GITHUB_FIXTURES_DIR` is set (`make watch-fixtures`
+    /// + unit tests). #173 step 1.
+    pub github_client: Arc<dyn ingest::github::GithubClient>,
 }
 
 /// One repo's last-good remote-state, captured on the most recent

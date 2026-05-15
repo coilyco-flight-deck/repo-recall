@@ -66,6 +66,7 @@ pub fn fetch_recent_runs(
             RemoteFetchState::RateLimited { retry_after_secs } => {
                 RemoteFetchState::RateLimited { retry_after_secs }
             }
+            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
             RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
             RemoteFetchState::Ok(()) => {
                 RemoteFetchState::Error("classifier returned Ok on failure".into())

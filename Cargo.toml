@@ -37,6 +37,10 @@ tantivy = "0.26"
 pmcp = { version = "2.6", features = ["schema-generation", "streamable-http"] }
 schemars = "1.0"
 async-trait = "0.1"
+# GitHub API client. Replaces the per-call `gh` subprocess (#173).
+# Default features pull rustls + retry + tracing; we don't need the
+# JWT-app or opentls features.
+octocrab = "0.50"
 
 [profile.release]
 opt-level = 3
@@ -47,3 +51,4 @@ strip = "symbols"
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde_json = "1"
+tempfile = "3"

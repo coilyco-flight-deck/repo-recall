@@ -14,9 +14,9 @@
 
 use std::process::Output;
 
-/// Categorized result of one `gh` subprocess invocation. Generic over
-/// the success payload so a fetcher can return `RemoteFetchState<Vec<T>>`
-/// without losing the typed data.
+/// Categorized result of one GitHub fetch. Generic over the success
+/// payload so a fetcher can return `RemoteFetchState<Vec<T>>` without
+/// losing the typed data.
 #[derive(Debug, Clone)]
 pub enum RemoteFetchState<T> {
     /// Call succeeded and the payload parsed.
@@ -29,9 +29,14 @@ pub enum RemoteFetchState<T> {
     Unauthorized,
     /// 403 with `x-ratelimit-remaining: 0` or a "secondary rate limit"
     /// hit. `retry_after_secs` is parsed from the `Retry-After` header
-    /// when present; `None` means "we know we're throttled but `gh`
-    /// didn't surface a deadline."
+    /// when present; `None` means "we know we're throttled but the
+    /// server didn't surface a deadline."
     RateLimited { retry_after_secs: Option<u64> },
+    /// No GitHub credential at all: empty `gh auth token` and the
+    /// process is not running in fixture mode either. Surfaced as a
+    /// distinct dashboard pill so a missing token does not look like
+    /// a transient outage.
+    Unconfigured,
     /// Any other failure: subprocess spawn error, non-403/404 HTTP
     /// status, JSON parse failure. The string is the trimmed stderr (or
     /// a synthetic description) for one debug log line.
@@ -50,6 +55,7 @@ impl<T> RemoteFetchState<T> {
             RemoteFetchState::RateLimited { retry_after_secs } => {
                 RemoteFetchState::RateLimited { retry_after_secs }
             }
+            RemoteFetchState::Unconfigured => RemoteFetchState::Unconfigured,
             RemoteFetchState::Error(s) => RemoteFetchState::Error(s),
         }
     }
@@ -106,6 +112,53 @@ pub fn classify_gh_stderr(stderr: &str) -> RemoteFetchState<()> {
     }
 
     RemoteFetchState::Error(stderr.trim().to_string())
+}
+
+/// Classify an HTTP status + headers pair into a failure variant. Returns
+/// `None` when status is 2xx and headers don't indicate a soft failure
+/// (caller is expected to parse the body in that case). Used by the
+/// fixtures replay path and the future octocrab-direct path.
+pub fn classify_http_status<T>(
+    status: u16,
+    headers: &[(String, String)],
+) -> Option<RemoteFetchState<T>> {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    match status {
+        200..=299 => None,
+        404 => Some(RemoteFetchState::Missing),
+        401 => Some(RemoteFetchState::Unauthorized),
+        403 => {
+            let remaining = header("x-ratelimit-remaining").and_then(|s| s.parse::<i64>().ok());
+            let retry_after = header("retry-after").and_then(|s| s.parse::<u64>().ok());
+            if remaining == Some(0) || retry_after.is_some() {
+                Some(RemoteFetchState::RateLimited {
+                    retry_after_secs: retry_after,
+                })
+            } else {
+                Some(RemoteFetchState::Unauthorized)
+            }
+        }
+        _ => Some(RemoteFetchState::Error(format!("HTTP {status}"))),
+    }
+}
+
+/// Classify an `octocrab::Error` into a failure variant. Mirrors
+/// `classify_gh_stderr` for the typed-error path, so post-rewrite
+/// callers don't have to stringify before classifying.
+pub fn classify_octocrab_error<T>(err: &octocrab::Error) -> RemoteFetchState<T> {
+    if let octocrab::Error::GitHub { source, .. } = err {
+        let status: u16 = source.status_code.into();
+        let headers: Vec<(String, String)> = Vec::new();
+        if let Some(state) = classify_http_status::<T>(status, &headers) {
+            return state;
+        }
+    }
+    RemoteFetchState::Error(err.to_string())
 }
 
 /// Pull a `Retry-After: <secs>` value out of a stderr blob. Returns
