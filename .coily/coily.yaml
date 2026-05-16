@@ -44,8 +44,6 @@ catalog:
   owner: kai
   lifecycle: production
   description: "Hydration layer for agent work. Joins OTel spans, git/gh state, Claude Code sessions, and local docs context into one queryable surface (web + MCP)."
-  dependsOn:
-    - coilysiren/otel-a2a-relay
   providesApis:
     - recall-web
     - recall-mcp
