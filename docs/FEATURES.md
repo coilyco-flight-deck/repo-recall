@@ -1,159 +1,66 @@
 # Features
 
-Baseline inventory of what `repo-recall` does. Use this to evaluate scope changes over time. Update when a category gains, drops, or meaningfully reshapes a capability.
+Inventory of what `repo-recall` does. Surfaces: `Dashboard` (`/`), `Repo` (`/repos/{id}`), `Session` (`/sessions/{id}`), `Search`, `JSON API`, `MCP`.
 
-Each entry notes **where to find it in the UI**. Most features render on one of four HTML pages — `Dashboard` (`/`), `Repo detail` (`/repos/{id}`), `Session detail` (`/sessions/{id}`), `Search` (`/search`) — or are exposed only over `JSON API` / `MCP` with no HTML surface.
+Local dashboard joining Claude Code sessions to discovered git repos. Loopback, no auth. Single binary co-hosts axum + MCP stdio. Header has logo, scan-cwd, search. `gh` health banner when missing. Dashboard polls `/api/scan-version` every 5s, reload on bump. Every page opens `/livereload` WS.
 
-## Purpose
+## Core dashboard
 
-Local dev dashboard that indexes Claude Code session history and joins sessions to git repos discovered on disk. Answers two questions:
+Top-down: stats strip → pills → standup → CI banner → autonomy → two-column grid.
 
-- Which Claude Code sessions worked on this repo?
-- Which repos did this session touch?
+- **Stats strip** - counts + next-refresh countdown + author filter (`?author=me/all`) + `↻ refresh`.
+- **Action-required pills** - one chip per kind (failing CI, dirty trees, mid-op, detached HEAD, review queue, drafts, no-reviewer, assigned, deploy failing/stale, autonomous-block, stale-ask).
+- **Standup + CI-failing alert + Autonomy scorecard** - 24h digest, failure list, AFK rates.
+- **Multi-repo list** - 30d commits/churn/authors + signal pills. Action-required sorts top.
+- **Active-not-cloned + needs-push/pull + uncommitted work + recent sessions/commits** - htmx-driven panels.
 
-Runs locally, binds to 127.0.0.1 by default, no auth, no telemetry. Single binary co-hosts an axum HTTP dashboard and an MCP stdio server. Built in Rust on axum, redb, tantivy, maud, pmcp.
+## Detail pages
 
-## Global chrome
+- **Repo** - inline push/pull, dispatches, open asks, hotspots (10 churned, 30d), sessions, commits.
+- **Session** - summary, metadata, transcript (collapsible tool calls), linked repos (cwd + content-mention).
+- **Search** - tantivy partitioned hits. Unicode + lowercase + Porter stemming.
 
-Persistent across every HTML page.
+## Git + GitHub
 
-- **Header** - `every page ▸ top strip`. Logo links back to `/`, scan-cwd path shown center, search box on the right (submits to `/search`). Below the header, a `gh` health banner appears when `gh` is missing or unauthenticated.
-- **Auto-reload** - `Dashboard ▸ invisible`. `static/dashboard-reload.js` polls `/api/scan-version` every 5s and triggers `location.reload()` on bump. Scoped to the dashboard; detail pages do not auto-reload mid-read.
-- **Dev livereload** - `every page ▸ invisible`. Every page opens a WebSocket to `/livereload`; the client (`static/livereload.js`) reconnects and reloads when the process restarts under `cargo watch`.
+- **Commits + working tree** - `git log --all --no-merges` 30d; untracked/modified counts, stash, branch, ahead/behind, in-progress op, detached HEAD.
+- **Inline actions** - `POST /api/repos/{id}/push|pull` + `/api/clone` return htmx fragments.
+- **GitHub** - `gh run list` CI; open/draft PRs, issues, review queue, no-reviewer, assigned; deploy workflow status → `deploy_failing` / `deploy_stale`; review-requested file lists via `/api/action-required`.
 
-## Core dashboard and navigation
+## Claude Code sessions
 
-The dashboard renders top-down: stats strip → action-required pills row → today's standup → CI-failing banner → autonomy scorecard → two-column grid.
-
-- **Stats strip** - `Dashboard ▸ top, above everything`. Big-number stats for repos / sessions / commits / links / earliest session / last scan, plus the next-refresh countdown, the author filter toggle, and a "↻ refresh" button that POSTs to `/refresh` over htmx.
-- **Next-refresh countdown** - `Dashboard ▸ stats strip`. Server-rendered initial value plus `static/refresh-countdown.js` to decrement the visible label every second. Renders "scanning…" before the first scan completes; hidden when `REPO_RECALL_REFRESH_INTERVAL_SECS=0`.
-- **Author filter** - `Dashboard ▸ stats strip`. `?author=me` / `?author=all` toggle. Restricts the visible commit set to your git email (or `REPO_RECALL_AUTHOR`).
-- **Action-required pills row** - `Dashboard ▸ expandable strip below stats`. Single dark-purple `<details>` element with one chip per signal kind (failing CI, dirty trees, mid-op, detached HEAD, awaiting your review, your draft PRs, your PRs with no reviewer, issues assigned, deploy failing/stale, autonomous-block, stale-ask). Each chip anchor-jumps to the grouped section below.
-- **Today's standup** - `Dashboard ▸ expandable below action-required row`. Collapsed by default. When opened, shows a 24-hour digest: commits per repo, sessions started today, dirty-repo count, failing-CI count.
-- **CI-failing alert panel** - `Dashboard ▸ above autonomy scorecard`. A separate panel-alert section listing every repo with `ci_status = "failure"`. Hidden when none are.
-- **Autonomy / agent-readiness scorecard** - `Dashboard ▸ above the two-column grid`. Workspace rollup of AFK success rate, dispatches total/open/closed/succeeded/blocked, open structural-ask count, per-repo success rates, and the eight newest open asks. Hidden when both metrics buckets are empty.
-- **Multi-repo list** - `Dashboard ▸ "repos" panel (left column)`. Walks cwd N levels deep. Each row shows session count, 30-day commits, 30-day churn, 30-day authors, plus inline pills for every action-required and informational signal (uncommitted, in-progress op, detached HEAD, stash count, ahead/behind, CI, review-requested, deploy state, open PRs, open issues). Action-required repos hard-sort to the top; dormant repos render at 40% opacity. Click a row to drill into the repo detail page.
-- **Active on GitHub, not cloned** - `Dashboard ▸ left column`. One row per remote repo pushed in the last 30 days that isn't on disk yet, with a one-click `git clone` button. Older repos are silently dropped to keep the panel actionable.
-- **Needs-push / needs-pull panels** - `Dashboard ▸ left column`. Only render when `commits_ahead > 0` or `commits_behind > 0` exists somewhere. Each row offers an inline `git push` / `git pull` button via htmx.
-- **Uncommitted work** - `Dashboard ▸ right column, top`. Grouped by repo with file counts; styled as a panel-alert variant when non-empty.
-- **Recent sessions / Recent commits** - `Dashboard ▸ right column`. Two stacked panels, newest-first.
-- **Repo detail page** - `Repo detail ▸ full page`. H1 with repo name + path, then inline `git pull` / `git push` buttons, then `repo-dispatch` records, then open structural-asks, then hotspots (top 10 churned files, last 30d), then sessions, then commits.
-- **Session detail page** - `Session detail ▸ full page`. H1 with the 200-char summary, then a metadata `dl` (uuid, started/ended, messages, duration, tokens, est. cost, cwd, source file), then the transcript (collapsible tool calls), then linked repos by cwd, then linked repos by content mention (only when non-empty; flagged as fuzzy).
-- **Full-text search** - `Search ▸ full page`. One input, results partitioned into "repos / sessions / commits" panels. Tantivy index, Unicode + lowercase + Porter stemming so "refactor" matches "refactoring".
-
-## Git integration (local state)
-
-- **Commit analysis** - `Dashboard ▸ "repos" pills` + `Repo detail ▸ commits panel`. `git log --all --no-merges` per repo aggregates 30-day commits, authors, LOC churn.
-- **Working-tree inspection** - `Dashboard ▸ "uncommitted work" panel` + `Repo detail ▸ pills`. Untracked + modified counts, stash count, branch, ahead/behind, in-progress op detection (rebase, merge, cherry-pick, revert, bisect), detached HEAD.
-- **Inline git actions** - `Repo detail ▸ top of page` (page-wide push/pull) + `Dashboard ▸ "needs push" / "needs pull" rows` (per-repo push/pull). `POST /api/repos/{id}/push` and `/pull` return htmx fragments swapped inline.
-- **Repo clone** - `Dashboard ▸ "active on github, not cloned" rows`. `POST /api/clone` returns an htmx fragment that swaps the row to a "cloned" state.
-
-## GitHub integration (remote state)
-
-- **CI status** - `Dashboard ▸ "CI failing" top banner` + `Dashboard ▸ "repos" row pills` + contributes to `ci_failing` action-required signal. `gh run list` for default-branch result, parallel post-pass with bounded semaphore so failures don't break the dashboard.
-- **PR and issue tracking** - `Dashboard ▸ "repos" row pills` + action-required signals. Open / draft PRs, open issues, PRs awaiting your review, your PRs awaiting review, your PRs with no reviewer assigned, drafts of yours, your open PRs, issues assigned to you.
-- **Deploy workflow health** - `Dashboard ▸ "repos" row pills` + `deploy_failing` / `deploy_stale` action-required signals. Detects deploy workflows, reports status and last-success timestamp.
-- **Review-requested file lists** - `JSON API only` (`/api/action-required`). When you're in `requestedReviewers`, repo-recall pre-fetches changed-file paths so an orchestrator can size the review before opening it. Not rendered in HTML.
-
-## Claude Code session integration
-
-- **Session metadata extraction** - `Session detail ▸ metadata panel` + `Dashboard ▸ "recent sessions"` + `Repo detail ▸ "sessions" panel`. Parses `~/.claude/projects/**/*.jsonl`. Extracts UUID, cwd, timestamps, message count, tokens, cost estimate, 200-char summary. Tolerates malformed records.
-- **Session-to-repo join** - `Session detail ▸ "linked repos — cwd match"` + `Repo detail ▸ "sessions"`. Longest-prefix match of session cwd against discovered repo paths. Schema (`session_repos.match_type`) is extensible for future match signals.
-- **Content-mention join (fuzzy)** - `Session detail ▸ "linked repos — content mention"`. Repo names that appear as bare words anywhere in the transcript. Flagged inline as best-effort / over-counts. Hidden when empty.
-- **Session transcript** - `Session detail ▸ "transcript (N turns)"`. Collapsible tool calls per turn.
-- **Issue-ref extraction** - `Repo detail ▸ "repo-dispatch" panel (issue links per dispatch)` + `JSON API` (`/api/repos/{id}/tickets/{n}/history`) + `MCP` (`recall_ticket_history`). At ingest time, sessions and commits are scanned for `<owner>/<repo>#<n>` and `github.com/<owner>/<repo>/(pull|issues)/<n>` references. Refs are stored in an `issue_refs` index keyed by `(repo, issue_number)` and `(source_kind, source_id)`, so per-ticket recall returns sessions plus commits without a re-scan.
+- **Metadata extraction** - parses `~/.claude/projects/**/*.jsonl`. UUID, cwd, timestamps, messages, tokens, cost, 200-char summary. Malformed tolerated.
+- **Joins** - cwd longest-prefix (`session_repos.match_type` extensible) + fuzzy content-mention (bare-word repo names).
+- **Issue-ref extraction** - ingest scans sessions + commits for `owner/repo#n` + URLs. `issue_refs` indexed by `(repo, issue)` + `(source_kind, source_id)`. Powers `/api/repos/{id}/tickets/{n}/history`.
 
 ## Dispatch substrate
 
-Repo-recall is the planning substrate for recall-dispatch (the AFK / autonomous-engineering planner). Everything in this section exists so an agent can ground a dispatch in real prior work and so a closed dispatch loops back as a measurable outcome.
+Planning substrate for recall-dispatch (AFK planner).
 
-- **Per-doc ingest sources** - `Substrate plumbing, no UI yet`. One `IngestSource` per file: `README.md`, `AGENTS.md`, `docs/FEATURES.md`, `docs/AUTONOMY.md`. Each reports its own Green / Yellow / Red health for a given repo. The per-source health column on the dashboard is the intended next step; the trait + implementations are in place.
-- **`docs/repo-dispatch/` ingest** - `Repo detail ▸ "repo-dispatch (N)" panel`. Walks each repo's `docs/repo-dispatch/` directory at refresh. Parses frontmatter (`issue_refs`, `score`, `autonomy_confidence`, `autonomy_confidence_basis`, `prompt_hash`, `dispatched_at`, `tracking_issue`) plus the verbatim prompt body. Files are write-once; status lives on the tracking issue, never the file. Renders file path, dispatched-at, score, autonomy 1-5, tracking-issue link, issue-ref links, confidence basis.
-- **Labeled-issue ingest** - `Dashboard ▸ autonomy scorecard "open structural-asks" list` + `Repo detail ▸ "open structural-asks" panel` + `JSON API` (`/api/structural-asks`). Fans `gh issue list --label <L> --state <S>` across every GitHub-hosted repo with a bounded semaphore. Tracked label/state pairs: `structural-ask` (open), `autonomous-block` (open), `repo-dispatch` (open and closed).
-- **Dispatch-artifact emitter** - `JSON API` (`POST /api/repos/{id}/dispatches`) + `MCP` (`recall_record_dispatch`). Writes a write-once dispatch markdown to `<repo>/docs/repo-dispatch/<slug>.md` plus a flat pollable mirror at `~/.repo-recall/dispatch/<repo>/<slug>.md` (override with `REPO_RECALL_DISPATCH_ROOT`). Tmp + rename writes; 409 on slug collision; 422 on missing/invalid `issue_refs`. The caller commits the in-repo file; repo-recall never touches git on its own. The resulting file shows up on `Repo detail` next refresh.
-- **AFK metrics rollup** - `Dashboard ▸ autonomy scorecard panel` + `JSON API` (`/api/autonomy/metrics`) + `MCP` (`recall_autonomy_metrics`). Aggregates closed `repo-dispatch` tracking issues into `successes` / `abandons` / `blocks` / `open` buckets per repo and workspace-wide. "Success" requires a commit-backed close (joined via `issue_refs`); other closes count as abandons.
-- **`IngestSource` + `Health` trait** - `Substrate plumbing, no UI yet`. Single trait every ingest source implements (`id`, `label`, `report`). Designed so the dashboard can iterate implementors and render one Green / Yellow / Red dot per source per repo. Sources can decline to apply (e.g. github sources on a repo with no origin).
+- **Per-doc ingest** - `IngestSource` per file (README, AGENTS, FEATURES, AUTONOMY).
+- **`docs/repo-dispatch/`** - parses frontmatter (issue_refs, score, autonomy_confidence, basis, prompt_hash, dispatched_at, tracking_issue) + prompt. Write-once; status on tracking issue.
+- **Labeled-issue ingest** - `gh issue list --label <L> --state <S>` across repos. Labels: `structural-ask`, `autonomous-block` (open), `repo-dispatch` (open + closed).
+- **Emitter** - `POST /api/repos/{id}/dispatches`. Write-once md + mirror at `~/.repo-recall/dispatch/`. 409/422.
+- **AFK metrics** - `/api/autonomy/metrics`. Closed dispatches → successes/abandons/blocks/open. Success = commit-backed close.
 
-## Action-required signals
+## Action-required
 
-Three rendering surfaces on the dashboard: the expandable pills row at top (one chip per signal kind, click to jump), the dedicated panels (CI-failing alert, uncommitted-work alert), and per-repo `data-flag="…"` pills inline on each "repos" row.
+Curated: failing CI, dirty tree, in-progress op, detached HEAD, review-requested, drafts/no-reviewer/open PRs, assigned, deploy failing/stale. Dispatch: `autonomous_block`, `stale_ask` (default 7d). `GET /api/action-required` returns stable `<repo_id>:<signal>`.
 
-- **Curated derivation** - `Dashboard ▸ pills row + CI banner + "repos" row pills`. Failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, your draft PRs, your PRs with no reviewer, your open PRs, issues assigned to you, deploy failing / stale. Each carries a detail string.
-- **Dispatch-substrate signals** - `Dashboard ▸ pills row + autonomy scorecard` + `JSON API` (`/api/action-required`) + `MCP` (`recall_action_required`). `autonomous_block` (≥1 open `autonomous-block` issue) and `stale_ask` (≥1 open `structural-ask` issue older than the threshold, default 7 days, override via `REPO_RECALL_STALE_ASK_DAYS`). Detail strings include the oldest issue number to deep-link to the one most worth resolving.
-- **JSON API with stable ids** - `JSON API only` (`GET /api/action-required`). Returns `<repo_id>:<signal>` ids so orchestrators can distinguish "still broken" from "different problem now."
+## HTTP + MCP
 
-## HTTP and content negotiation
+HTML or JSON per endpoint via `Accept` / `?format=json`. JSON carries `ETag: "<scan_version>"`. MCP stdio (pmcp 2.6) co-runs with axum. Web-bridge at `/mcp/*`. Nine tools: `recall_dashboard/_repo/_session/_search/_action_required/_ticket_history/_autonomy_metrics/_record_dispatch/_refresh`.
 
-- **HTML or JSON per endpoint** - `Every HTML page`. `Accept: application/json` or `?format=json`. Advertises JSON alternate via `Link` and `Vary: Accept`.
-- **ETag + If-None-Match** - `JSON API`. JSON responses carry `ETag: "<scan_version>"`. Clients get `304 Not Modified` between refreshes.
+## Activity + ops + distribution
 
-## MCP integration
+Activity score `Σ ln(1 + xᵢ / Mᵢ)` across commits_30d, sessions, authors_30d, churn. Action-required hard-sorts above. `.repo-recall-ignore` suppresses signals (opt-in).
 
-- **Co-hosted MCP server** - `stdio + HTTP bridge`. Same binary runs axum HTTP and MCP stdio server (pmcp 2.6). Falls back to MCP-only if HTTP port is bound. Web-bridge mounted at `/mcp/*`.
-- **Nine MCP tools** - `MCP only`. `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_ticket_history`, `recall_autonomy_metrics`, `recall_record_dispatch`, `recall_refresh`. JSON-only responses. Each tool wraps the same data layer the corresponding axum route uses.
+Background refresh: `REPO_RECALL_REFRESH_INTERVAL_SECS` (150s, 0 disables). Wipe-on-restart cache, no migrations. `GET /openapi.json`.
 
-## Activity scoring
+Homebrew tap `coilysiren/tap`, `brew services` managed. GHA reads conventional commits, tags + releases + pushes formula. `Cargo.toml` pinned `0.0.0-dev`.
 
-- **Composite log score** - `Dashboard ▸ "repos" sort order`. `Σ ln(1 + xᵢ / Mᵢ)` across commits_30d, sessions, authors_30d, LOC churn. Rewards breadth, diminishing returns, zero-safe, corpus-normalized. Action-required repos hard-sort above by-score order regardless.
-- **Repo ignore** - `Dashboard ▸ invisible (suppression)`. `.repo-recall-ignore` at repo root suppresses signals and hides from dashboard. No auto-detection of vendor clones, opt-in only.
+## Code + data
 
-## Operational
-
-- **Background refresh** - `invisible`. `REPO_RECALL_REFRESH_INTERVAL_SECS` (default 150s, 0 disables). Single refresh lock; manual `POST /refresh` and `POST /api/refresh` share it.
-- **Scan version polling** - `JSON API` (`GET /api/scan-version`). The cheapest "did anything change" probe; powers the dashboard auto-reload script and ETag keys.
-- **Wipe-on-restart cache** - `invisible`. `cache.redb` deleted at startup. No migrations.
-- **Manual refresh** - `Dashboard ▸ stats strip "↻ refresh" button` + `POST /refresh` (fire-and-forget, used by the button) + `POST /api/refresh` (sync, waits for completion) + `MCP` (`recall_refresh`).
-- **OpenAPI spec** - `Machine-readable, no UI` (`GET /openapi.json`).
-
-## Distribution
-
-- **Homebrew tap** - `Install surface`. `coilysiren/tap`. Binary plus static assets. `brew services` manages the daemon. Per-user service file persists across `brew upgrade`.
-- **Auto-release pipeline** - `CI`. GitHub Actions reads conventional-commit prefixes (`feat:` minor, `BREAKING CHANGE:` major, default patch), tags, releases, pushes formula. `Cargo.toml` pinned at `0.0.0-dev`.
-
-## Code layout
-
-Source tree is partitioned by responsibility:
-
-- **`src/ingest/`** - Every data source that reads substrate. `ingest/claude/sessions_jsonl.rs` (session files), `ingest/git/{discovery, log}.rs` (repo walk + `git log`), `ingest/docs/{readme, agents_md, features_md, autonomy_md, repo_dispatch}.rs` (per-doc + per-dispatch sources), `ingest/health.rs` (the shared `IngestSource` + `Health` trait).
-- **`src/process/`** - Pure transforms over ingested data. `process/activity.rs` (composite score, action-required), `process/join.rs` (cwd → repo matching, GitHub issue-ref parsing).
-- **`src/display/`** - User-facing surfaces. `display/routes/` (axum), `display/mcp/` (pmcp tools), `display/dispatch_artifacts.rs` (write-once emitter).
-- **`src/{db, search, signals}.rs`** - Cache DB schema, tantivy index, action-required signal catalog.
-
-## Data model
-
-One redb database plus a tantivy index.
-
-- **Cache DB** (`cache.redb`, wipe-on-restart) - repos, sessions, commits, file_changes, uncommitted_files, active_remote_repos, issue_refs (with `(repo, issue)` and `(source_kind, source_id)` indexes), labeled_issues (with `(repo, label, number)` and `(label, state)` indexes), dispatches (parsed from `docs/repo-dispatch/`). Hand-designed secondary indexes per query path.
-- **Search index** (tantivy, wipe-on-restart) - repos, sessions, commits. Unicode + lowercase + Porter stemming.
-
-## Integrations
-
-- **GitHub** - via `gh` CLI: `run list`, `api repos/.../pulls`, `api repos/.../issues`, `api user`, `issue list --label <L> --state <S>`.
-- **Claude Code** - reads `~/.claude/projects/**/*.jsonl`.
-- **git** - subprocess (`log`, `push`, `pull --ff-only`, `status`, `describe`).
-
-## CLI surface
-
-Single binary, no subcommands.
-
-- `repo-recall` - boots HTTP dashboard + MCP stdio server.
-- `repo-recall --version` / `-V`.
-
-Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL_PORT`, `REPO_RECALL_HOST`, `REPO_RECALL_COMMITS_PER_REPO`, `REPO_RECALL_CACHE_DIR`, `REPO_RECALL_INDEX_DIR`, `REPO_RECALL_SESSIONS_DIR`, `REPO_RECALL_REFRESH_INTERVAL_SECS`, `REPO_RECALL_REMOTE_TARGET_LIMIT`, `REPO_RECALL_DISPATCH_ROOT`, `REPO_RECALL_STALE_ASK_DAYS`, `REPO_RECALL_AUTHOR`, `REPO_RECALL_MCP_ORIGINS`, `REPO_RECALL_STATIC`, `RUST_LOG`.
-
-## HTTP surface
-
-**HTML pages** - `GET /` (Dashboard), `GET /repos/{id}` (Repo detail), `GET /sessions/{id}` (Session detail), `GET /search`.
-
-**JSON APIs** - same paths with `?format=json`, plus `GET /api/action-required`, `GET /api/scan-version`, `GET /api/autonomy/metrics`, `GET /api/structural-asks`, `GET /api/repos/{id}/dispatches`, `GET /api/repos/{id}/tickets/{n}/history`, `POST /api/refresh`.
-
-**Actions (htmx fragments)** - `POST /api/repos/{id}/push`, `POST /api/repos/{id}/pull`, `POST /api/clone`, `POST /api/repos/{id}/dispatches` (write-once dispatch artifact).
-
-**WebSocket** - `GET /livereload` (dev reconnect).
-
-**Admin** - `POST /refresh`, `GET /openapi.json`.
-
-**MCP bridge** - `GET /mcp/*` (pmcp web-bridging).
+`src/ingest/`, `src/process/`, `src/display/` (axum + mcp + dispatch_artifacts), `src/{db, search, signals}.rs`. Cache DB (`cache.redb`, wipe-on-restart) holds repos/sessions/commits/file_changes/uncommitted_files/active_remote_repos/issue_refs/labeled_issues/dispatches with hand-designed secondary indexes. tantivy index over repos/sessions/commits.
 
 ## See also
 
@@ -161,4 +68,4 @@ Configuration via env vars: `REPO_RECALL_CWD`, `REPO_RECALL_DEPTH`, `REPO_RECALL
 - [AGENTS.md](../AGENTS.md) - agent-facing operating rules.
 - [.coily/coily.yaml](../.coily/coily.yaml) - allowlisted commands.
 
-Cross-reference convention from [coilysiren/agentic-os-kai#313](https://github.com/coilysiren/agentic-os-kai/issues/313).
+Cross-reference convention from [coilysiren/agentic-os#59](https://github.com/coilysiren/agentic-os/issues/59).
