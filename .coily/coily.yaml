@@ -34,6 +34,18 @@ commands:
   watch:
     run: make watch
     description: cargo-watch + caddy https proxy at https://$(https_host):$(https_port)
+  web-install:
+    run: make web-install
+    description: Install npm deps for the web/ SPA subtree.
+  web-build:
+    run: make web-build
+    description: Type-check and build the static React SPA bundle at web/dist.
+  web-dev:
+    run: make web-dev
+    description: Vite dev server for the React SPA, proxying /api, /openapi.json, /mcp to the Rust process.
+  watch-all:
+    run: make watch-all
+    description: cargo-watch + Vite dev server concurrently (concurrently-wrapped, kill-others-on-fail).
 
 # Catalog metadata for the cross-repo knowledge graph.
 # Schema: coilysiren/agentic-os-kai#420 (tracker).
