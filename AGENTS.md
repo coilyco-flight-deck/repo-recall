@@ -4,7 +4,7 @@
 
 `repo-recall` joins on-disk repos against three sources (git, gh, Claude Code session JSONL) and serves the view to axum + MCP (pmcp stdio) in one process. Loopback-only, no telemetry, no auth.
 
-Stack: Rust 2021 stable. axum 0.8 + tokio, redb (KV), tantivy (FTS), pmcp 2.6. JSON + MCP surface, no HTML tier (stripped in #191; React SPA stub lands in #192). No config file.
+Stack: Rust 2021 stable for the API binary (axum 0.8 + tokio, redb KV, tantivy FTS, pmcp 2.6 MCP). React + Vite + Tailwind v4 for the static frontend under `web/`, served by Caddy in its own container (same shape as galaxy-gen). JSON + MCP surface only on the Rust side; no HTML rendering. No config file.
 
 ## Structure
 
@@ -33,7 +33,7 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 - **Remote pass runs second.** Main refresh is local + blocking in one `spawn_blocking`. Remote uses tokio tasks + bounded semaphore (8). Failures swallowed at `debug!`.
 - **No GraphQL, one exception.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath). Exception: `src/ingest/github/labeled.rs` collapses 4N REST per refresh to one aliased-search at `refresh.per_source.github_remote_labeled` (3600s).
 - **Git log shelled out.** `git log --all --no-merges` subprocess, NUL-separated. No libgit2.
-- **HTML tier stripped in #191.** JSON-only routes; a static-compiled React SPA stub lands in #192.
+- **Two-artifact shape.** Rust binary serves JSON + MCP. `web/` is a Vite + React + Tailwind v4 SPA built to `web/dist/` and served by Caddy in production via `Dockerfile.web` + `deploy/Caddyfile`. Vite dev server proxies `/api`, `/openapi.json`, `/mcp` to the Rust process so a single browser origin works locally. `make watch-all` runs both with `concurrently`.
 - **Refresh signal is `GET /api/scan-version`** - monotonic counter bumped at end of refresh. ETag keys on the same counter.
 - **MCP server co-runs with axum.** `src/mcp/` calls existing modules. Port-bind failure falls back to MCP-only.
 - **MCP stdout reserved for JSON-RPC.** In `mcp` mode tracing writes stderr; axum writes stdout.

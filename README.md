@@ -13,7 +13,12 @@ Local-only. Binds `127.0.0.1`, cache lives in `$TMPDIR`. Outbound limited to `gh
 
 ## Surface
 
-JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML; the frontend is staged for re-introduction as a static-compiled SPA on top of this JSON contract.
+Two artifacts deployed side by side:
+
+- **Rust binary** - JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML.
+- **React SPA** under `web/` - static bundle built by Vite, served by Caddy in its own container in production. Consumes the JSON surface above. Hello World stub today; the real card dashboard lands in [#144](https://github.com/coilysiren/repo-recall/issues/144).
+
+Local dev: `make watch-all` runs cargo-watch on the Rust side and the Vite dev server on the web side concurrently. The Vite dev server proxies `/api`, `/openapi.json`, and `/mcp` to the Rust binary so a single browser origin works.
 
 ## JSON endpoints
 

@@ -56,7 +56,7 @@ Homebrew tap (`coilysiren/tap`), `brew services`-managed. Conventional commits d
 
 ## Frontend status
 
-The HTML UI tier was stripped in #191. A static-compiled React SPA stub lands in #192, then the two-state repo-card dashboard from #144 builds on top. Until those land, the surface is JSON-only.
+Two-artifact deploy: the Rust binary serves JSON + MCP, and a static React SPA under `web/` is built by Vite and served by Caddy in its own container (same shape as galaxy-gen). The web bundle today is a Hello World stub (#192); the two-state repo-card dashboard from #144 builds on top of the scaffold. Local dev uses `make watch-all` (cargo-watch + Vite dev server with API proxy).
 
 ## See also
 

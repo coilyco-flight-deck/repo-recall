@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7
+# -----------------------------------------------------------------------------
+# repo-recall web: static React SPA served by Caddy. Mirrors the galaxy-gen
+# deploy pattern (npm/Vite build then COPY into caddy:alpine, deploy/Caddyfile
+# does the serve config).
+#
+# Build context is the repo root so we can COPY both web/ and deploy/.
+#
+# Sibling container serves the JSON API + MCP host (the Rust binary, shipped
+# via Homebrew today and via a separate Dockerfile when this stack gets a
+# k8s deploy). The k8s ingress routes /api, /openapi.json, and /mcp to that
+# container; this image only knows about the static bundle.
+# -----------------------------------------------------------------------------
+
+# Stage 1: Vite build.
+FROM node:24-bookworm-slim AS builder
+WORKDIR /app
+
+# Cache npm deps first so source-only changes don't reinstall.
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci
+
+COPY web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json ./
+COPY web/vite.config.ts web/postcss.config.js web/index.html ./
+COPY web/src ./src
+RUN npm run build
+
+# Stage 2: caddy serves the bundle.
+FROM caddy:2-alpine
+COPY --from=builder /app/dist /usr/share/caddy
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -q -O - http://127.0.0.1:8080/healthz || exit 1

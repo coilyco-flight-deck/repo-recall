@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean
+.PHONY: help install run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean web-install web-dev web-build watch-all docker-build-web
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
@@ -14,10 +14,29 @@ https_port ?= 7443
 help: ## Show this help
 	@perl -nle'print $& if m{^[a-zA-Z_-]+:.*?## .*$$}' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install dev tooling (cargo-watch, pre-commit hooks)
+install: ## Install dev tooling (cargo-watch, pre-commit hooks, web/ npm deps)
 	cargo install cargo-watch --locked
 	@command -v pre-commit >/dev/null || pip install --user pre-commit
 	pre-commit install
+	$(MAKE) web-install
+
+web-install: ## Install npm deps for the web/ subtree
+	cd web && npm ci
+
+web-dev: ## Vite dev server (proxies /api, /openapi.json, /mcp to $(or $(VITE_API_TARGET),http://127.0.0.1:$(port)))
+	cd web && VITE_API_TARGET=$(or $(VITE_API_TARGET),http://127.0.0.1:$(port)) npm run dev
+
+web-build: ## Build the static SPA bundle at web/dist
+	cd web && npm run build
+
+watch-all: ## Run cargo-watch + Vite dev server concurrently (two-step orchestrator wrapped via npx concurrently)
+	cd web && npx --yes concurrently --kill-others-on-fail \
+		-n api,web -c blue,green \
+		"$(MAKE) -C .. watch" \
+		"$(MAKE) -C .. web-dev"
+
+docker-build-web: ## Build the static React + Caddy image (Dockerfile.web)
+	docker build -t repo-recall-web:dev -f Dockerfile.web .
 
 run: ## Run the server (cargo + caddy https proxy at https://$(https_host):$(https_port))
 	@caddy reverse-proxy --from https://$(https_host):$(https_port) --to 127.0.0.1:$(port) --internal-certs > /tmp/repo-recall-caddy.log 2>&1 & \
