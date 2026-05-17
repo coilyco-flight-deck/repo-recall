@@ -11,7 +11,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile  # TODO: add when the API gains a Docker image (today it ships via Homebrew).
+      dockerfile: Dockerfile
     image: repo-recall-api:dev
     ports:
       - "7777:7777"
@@ -21,8 +21,7 @@ services:
       REPO_RECALL_CWD: "/work"
     volumes:
       - ${HOME}/projects/coilysiren:/work:ro
-      - ${HOME}/.claude:/root/.claude:ro
-    profiles: ["full"]  # opt-in until the API Dockerfile lands.
+      - ${HOME}/.claude:/home/repo-recall/.claude:ro
 
   web:
     build:
@@ -33,7 +32,10 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
+      # Compose: API is a sibling service, reachable by service name on the
+      # default bridge. k8s shares a Pod and talks over localhost (the
+      # Caddyfile default).
+      API_UPSTREAM: "api:7777"
     depends_on:
       api:
         condition: service_started
-        required: false

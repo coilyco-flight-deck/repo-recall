@@ -1,15 +1,24 @@
 # repo-recall web: static React SPA served by Caddy. TLS is terminated
-# upstream by traefik + cert-manager in the k3s cluster; this server speaks
-# plain HTTP on the container port (default 8080) and trusts the ingress.
+# upstream (tailscale-operator ts-proxy on the tailnet); this server speaks
+# plain HTTP on the container port (default 8080).
 #
-# Sibling container serves the JSON API + MCP host at 127.0.0.1:7777 in the
-# Rust binary. The ingress routes /api, /openapi.json, and /mcp directly to
-# that container; this Caddyfile only knows about the static bundle.
+# The Rust API + MCP host runs in a sibling container on :7777. In the k3s
+# deploy both containers share a Pod, so the API is reachable at
+# localhost:7777. In local docker-compose the service is named `api` and
+# Docker's bridge DNS resolves it. $API_UPSTREAM overrides the default.
 
 :{$PORT:8080} {
     root * /usr/share/caddy
 
     encode zstd gzip
+
+    # JSON API + MCP host live on the sibling container. Path-match the
+    # three surfaces the Rust binary owns; everything else falls through to
+    # the SPA + try_files fallback below.
+    @api {
+        path /api/* /openapi.json /mcp /mcp/*
+    }
+    reverse_proxy @api {$API_UPSTREAM:localhost:7777}
 
     # Hashed bundle filenames are immutable; cache them aggressively.
     @hashed {
