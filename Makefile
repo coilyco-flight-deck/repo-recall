@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean css css-check css-watch
+.PHONY: help install run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
@@ -14,25 +14,10 @@ https_port ?= 7443
 help: ## Show this help
 	@perl -nle'print $& if m{^[a-zA-Z_-]+:.*?## .*$$}' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install dev tooling (cargo-watch, pre-commit hooks, tailwindcss)
+install: ## Install dev tooling (cargo-watch, pre-commit hooks)
 	cargo install cargo-watch --locked
 	@command -v pre-commit >/dev/null || pip install --user pre-commit
-	@command -v tailwindcss >/dev/null || brew install tailwindcss
 	pre-commit install
-
-css: ## Compile static/tailwind.css from static/tailwind.input.css
-	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --minify
-
-css-check: css ## Rebuild CSS and warn if it drifted from the committed copy
-	@if ! git diff --exit-code -- static/tailwind.css >/dev/null; then \
-		echo 'note: static/tailwind.css drifted on regen.'; \
-		echo '      tailwindcss v4 standalone output is not byte-identical across'; \
-		echo '      platforms, so this is informational. Commit it if you intended'; \
-		echo '      to refresh the bundle; otherwise `git checkout -- static/tailwind.css`.'; \
-	fi
-
-css-watch: ## Rebuild CSS on every input/source change (run alongside `make watch`)
-	tailwindcss -i static/tailwind.input.css -o static/tailwind.css --watch
 
 run: ## Run the server (cargo + caddy https proxy at https://$(https_host):$(https_port))
 	@caddy reverse-proxy --from https://$(https_host):$(https_port) --to 127.0.0.1:$(port) --internal-certs > /tmp/repo-recall-caddy.log 2>&1 & \
@@ -47,7 +32,7 @@ watch: ## cargo-watch + caddy https proxy at https://$(https_host):$(https_port)
 		trap "kill $$CADDY_PID 2>/dev/null" EXIT INT TERM; \
 		echo "caddy: https://$(https_host):$(https_port) -> 127.0.0.1:$(port) (log: /tmp/repo-recall-caddy.log)"; \
 		REPO_RECALL_CWD=$(cwd) REPO_RECALL_PORT=$(port) REPO_RECALL_DEPTH=$(depth) \
-			cargo watch -w src -w Cargo.toml -w static -x run
+			cargo watch -w src -w Cargo.toml -x run
 
 watch-fixtures: ## Same as `watch`, but feeds GitHub responses from tests/fixtures/github/rest (no real API calls).
 	REPO_RECALL_GITHUB_FIXTURES_DIR=$(CURDIR)/tests/fixtures/github/rest $(MAKE) watch

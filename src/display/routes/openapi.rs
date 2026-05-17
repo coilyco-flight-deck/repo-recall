@@ -2,11 +2,7 @@
 //!
 //! Hand-maintained, not generated. The endpoint exists so a cold-start agent
 //! that lands on any URL can follow the `Link: ...; rel="service-desc"`
-//! header back to a machine-readable description of what's callable. Keep
-//! the document narrow: dashboard JSON view + the `/api/*` orchestrator
-//! slice. UI-only routes (`/repos/{id}`, `/sessions/{id}`, `/search`,
-//! `/livereload`) stay out — they're HTML or WebSocket and not useful
-//! to an API consumer.
+//! header back to a machine-readable description of what's callable.
 
 use axum::response::IntoResponse;
 use axum::Json;
@@ -18,20 +14,16 @@ pub async fn spec() -> impl IntoResponse {
         "info": {
             "title": "repo-recall",
             "version": "1",
-            "description": "Local Claude Code session index. JSON surface served by content negotiation on `/` and dedicated endpoints under `/api/*`."
+            "description": "Local Claude Code session index. JSON-only surface; the MCP host runs in the same process at `/mcp`."
         },
         "paths": {
             "/": {
                 "get": {
                     "summary": "Dashboard JSON view",
-                    "description": "Returns the same data the HTML dashboard renders. Triggered by `Accept: application/json` or `?format=json`. Carries an `ETag` keyed on the monotonic scan version; pass `If-None-Match` to short-circuit unchanged scans.",
-                    "parameters": [
-                        {"name": "format", "in": "query", "schema": {"type": "string", "enum": ["json"]}, "required": false},
-                        {"name": "Accept", "in": "header", "schema": {"type": "string"}, "required": false}
-                    ],
+                    "description": "Returns the full dashboard projection: repos, recent sessions, recent commits, action-required signals, banner counts, autonomy rollup, structural asks. Carries an `ETag` keyed on the monotonic scan version; pass `If-None-Match` to short-circuit unchanged scans.",
                     "responses": {
                         "200": {"description": "Dashboard payload", "content": {"application/json": {}}},
-                        "304": {"description": "Not Modified (ETag matched)"}
+                        "304": {"description": "Not Modified, ETag matched"}
                     }
                 }
             },
@@ -52,8 +44,31 @@ pub async fn spec() -> impl IntoResponse {
             "/api/refresh": {
                 "post": {
                     "summary": "Synchronous refresh",
-                    "description": "Awaits the scan and returns the new scan_version. Sync sibling of `POST /refresh` (which fires-and-forgets).",
+                    "description": "Awaits the scan and returns the new scan_version.",
                     "responses": {"200": {"description": "Refresh complete", "content": {"application/json": {}}}}
+                }
+            },
+            "/api/autonomy/metrics": {
+                "get": {
+                    "summary": "Autonomy rollup",
+                    "description": "Per-repo autonomy / agent-readiness metrics.",
+                    "responses": {"200": {"description": "Autonomy metrics", "content": {"application/json": {}}}}
+                }
+            },
+            "/api/structural-asks": {
+                "get": {
+                    "summary": "Open structural-ask issues across the workspace",
+                    "responses": {"200": {"description": "Structural-ask list", "content": {"application/json": {}}}}
+                }
+            },
+            "/api/repos/{repo_id}/dispatches": {
+                "get": {"summary": "List dispatches for a repo", "responses": {"200": {"description": "Dispatch list", "content": {"application/json": {}}}}},
+                "post": {"summary": "Emit a dispatch artifact for a repo", "responses": {"200": {"description": "Dispatch result", "content": {"application/json": {}}}}}
+            },
+            "/api/repos/{repo_id}/tickets/{issue_number}/history": {
+                "get": {
+                    "summary": "Ticket history for a repo issue",
+                    "responses": {"200": {"description": "Ticket history payload", "content": {"application/json": {}}}}
                 }
             }
         }

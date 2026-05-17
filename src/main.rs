@@ -80,11 +80,6 @@ async fn main() -> miette::Result<()> {
     tracing::info!("cwd:   {}", cwd.display());
     tracing::info!("cache: {}", cache_dir.display());
 
-    // Publish cwd so the layout header can render it without threading state
-    // through every `page(..)` call site. Set-once; ignored if already set
-    // (e.g. across hot reloads in tests).
-    let _ = repo_recall::display::routes::templates::SCAN_CWD.set(cwd.clone());
-
     // Underlying errors are `anyhow::Error`, which does not implement
     // `std::error::Error`, so `.into_diagnostic()` won't see them. Render via
     // `miette::miette!` and tack on a wrap_err for the labeled "failed to

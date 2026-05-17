@@ -1,29 +1,18 @@
-use axum::http::{header, HeaderValue, Response};
-use axum::middleware::{self, Next};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::services::ServeDir;
 
 use crate::display::mcp;
 use crate::AppState;
 
-pub mod actions;
 pub mod api;
 pub mod dashboard;
-pub mod fallback;
 pub mod negotiate;
 pub mod openapi;
 pub mod refresh;
-pub mod repos;
-pub mod search;
-pub mod sessions;
-pub mod templates;
-pub mod ws;
 
 pub fn router(state: AppState) -> Router {
-    let static_dir = std::env::var("REPO_RECALL_STATIC")
-        .ok()
-        .unwrap_or_else(|| format!("{}/static", env!("CARGO_MANIFEST_DIR")));
     let mcp_router = match mcp::http_router(state.clone()) {
         Ok(r) => Some(r),
         Err(e) => {
@@ -33,10 +22,6 @@ pub fn router(state: AppState) -> Router {
     };
     let base = Router::new()
         .route("/", get(dashboard::index))
-        .route("/repos/{id}", get(repos::detail))
-        .route("/sessions/{id}", get(sessions::detail))
-        .route("/search", get(search::search))
-        .route("/refresh", post(refresh::trigger))
         .route("/openapi.json", get(openapi::spec))
         .route("/api/action-required", get(api::action_required))
         .route(
@@ -51,13 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/autonomy/metrics", get(api::autonomy_metrics))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
-        .route("/api/repos/{id}/push", post(actions::push))
-        .route("/api/repos/{id}/pull", post(actions::pull))
-        .route("/api/clone", post(actions::clone_active))
-        .route("/livereload", get(ws::livereload_handler))
-        .nest_service("/static", ServeDir::new(static_dir))
-        .fallback(fallback::not_found)
-        .layer(middleware::from_fn(advertise_json_alternate))
+        .fallback(not_found_json)
         .with_state(state);
     match mcp_router {
         Some(r) => base.nest("/mcp", r),
@@ -65,26 +44,16 @@ pub fn router(state: AppState) -> Router {
     }
 }
 
-/// Advertise the JSON content-negotiation surface to discovering clients.
-///
-/// `Vary: Accept` is correctness: the same URL serves HTML or JSON depending
-/// on the request, so any cache between us and the client must key on it.
-/// The `Link` header points an agent at the dashboard's JSON variant without
-/// requiring it to parse HTML for the `<link rel="alternate">` hint. Both
-/// land on every response so a cold-start probe at any path finds the trail.
-async fn advertise_json_alternate(
-    req: axum::extract::Request,
-    next: Next,
-) -> Response<axum::body::Body> {
-    let mut res = next.run(req).await;
-    let h = res.headers_mut();
-    h.append(header::VARY, HeaderValue::from_static("Accept"));
-    h.append(
-        header::LINK,
-        HeaderValue::from_static(
-            "</?format=json>; rel=\"alternate\"; type=\"application/json\", \
-             </openapi.json>; rel=\"service-desc\"; type=\"application/json\"",
-        ),
+async fn not_found_json(uri: axum::http::Uri) -> Response {
+    let body = serde_json::json!({
+        "error": "not_found",
+        "path": uri.to_string(),
+    });
+    let payload = serde_json::to_vec(&body).unwrap_or_else(|_| b"null".to_vec());
+    let mut res = (StatusCode::NOT_FOUND, payload).into_response();
+    res.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
     );
     res
 }

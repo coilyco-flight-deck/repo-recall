@@ -4,19 +4,18 @@
 
 `repo-recall` joins on-disk repos against three sources (git, gh, Claude Code session JSONL) and serves the view to axum + MCP (pmcp stdio) in one process. Loopback-only, no telemetry, no auth.
 
-Stack: Rust 2021 stable. axum 0.8 + tokio, redb (KV), tantivy (FTS), maud (compile-time HTML), htmx (CDN), pmcp 2.6. No config file.
+Stack: Rust 2021 stable. axum 0.8 + tokio, redb (KV), tantivy (FTS), pmcp 2.6. JSON + MCP surface, no HTML tier (stripped in #191; React SPA stub lands in #192). No config file.
 
 ## Structure
 
-`src/main.rs` (entry), `lib.rs` (AppState), `db.rs` (redb schema, wipe-rebuild), `scanner.rs` (discovery), `sessions.rs` + `commits.rs` (sources), `join.rs` (cwd→repo, longest-prefix), `activity.rs` (scoring + categories), `routes/` (axum), `mcp/` (pmcp). `static/` for tailwind + livereload. `tests/smoke.rs` (axum) + `mcp_smoke.rs` (stdio).
+`src/main.rs` (entry), `lib.rs` (AppState), `db.rs` (redb schema, wipe-rebuild), `scanner.rs` (discovery), `sessions.rs` + `commits.rs` (sources), `join.rs` (cwd→repo, longest-prefix), `activity.rs` (scoring + categories), `routes/` (axum, JSON-only), `mcp/` (pmcp). `tests/smoke.rs` (axum) + `mcp_smoke.rs` (stdio).
 
 ## Dev loop
 
-`make install` (cargo-watch + pre-commit), `make watch` (livereload), `make test` (axum + MCP smoke), `make ci` (fmt + clippy + check + test).
+`make install` (cargo-watch + pre-commit), `make watch` (cargo-watch over src + Cargo.toml), `make test` (axum + MCP smoke), `make ci` (fmt + clippy + check + test).
 
 Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECALL_REFRESH_INTERVAL_SECS` (150, 0 disables), `REPO_RECALL_REMOTE_TARGET_LIMIT` (25), `REPO_RECALL_GITHUB_FIXTURES_DIR` (fixtures replay, loud WARN).
 
-Browser auto-reload: every page opens `/livereload` WS; `cargo watch` restart triggers reconnect-reload. Always-on.
 
 ## Conventions
 
@@ -34,7 +33,7 @@ Browser auto-reload: every page opens `/livereload` WS; `cargo watch` restart tr
 - **Remote pass runs second.** Main refresh is local + blocking in one `spawn_blocking`. Remote uses tokio tasks + bounded semaphore (8). Failures swallowed at `debug!`.
 - **No GraphQL, one exception.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath). Exception: `src/ingest/github/labeled.rs` collapses 4N REST per refresh to one aliased-search at `refresh.per_source.github_remote_labeled` (3600s).
 - **Git log shelled out.** `git log --all --no-merges` subprocess, NUL-separated. No libgit2.
-- **Templates are maud macros; CSS/JS are files.** Tailwind v4 standalone CLI compiles `static/tailwind.input.css` → `static/tailwind.css` (committed). Reused class bundles as `pub const` in `routes/templates.rs`.
+- **HTML tier stripped in #191.** JSON-only routes; a static-compiled React SPA stub lands in #192.
 - **Refresh signal is `GET /api/scan-version`** - monotonic counter bumped at end of refresh. ETag keys on the same counter.
 - **MCP server co-runs with axum.** `src/mcp/` calls existing modules. Port-bind failure falls back to MCP-only.
 - **MCP stdout reserved for JSON-RPC.** In `mcp` mode tracing writes stderr; axum writes stdout.

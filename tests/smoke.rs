@@ -1,8 +1,5 @@
 //! End-to-end smoke test: boot the real router on a random port, exercise the
-//! public endpoints, and assert they return the right status codes and have
-//! the expected HTML scaffolding. This is intentionally shallow — it catches
-//! "did the router compile and serve HTML" regressions, not fine-grained
-//! content bugs.
+//! public JSON endpoints, and assert status + shape.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,7 +73,7 @@ fn uuid_like() -> String {
 }
 
 #[tokio::test]
-async fn dashboard_renders() {
+async fn dashboard_returns_json() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -84,77 +81,6 @@ async fn dashboard_renders() {
         .unwrap();
 
     let res = client.get(format!("{base}/")).send().await.unwrap();
-    assert_eq!(res.status(), 200);
-    let body = res.text().await.unwrap();
-    assert!(body.contains("<title>repo-recall"), "missing title tag");
-    assert!(
-        body.contains("/livereload"),
-        "livereload script not wired in"
-    );
-}
-
-#[tokio::test]
-async fn unknown_path_is_404() {
-    let (base, _h) = boot().await;
-    let res = reqwest::get(format!("{base}/does-not-exist"))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 404);
-    let body = res.text().await.unwrap();
-    assert!(body.contains("404"), "404 page should say 404");
-    assert!(body.contains("/does-not-exist"), "404 should echo the path");
-}
-
-#[tokio::test]
-async fn unknown_repo_and_session_return_404() {
-    let (base, _h) = boot().await;
-    let client = reqwest::Client::new();
-    assert_eq!(
-        client
-            .get(format!("{base}/repos/99999"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        404,
-    );
-    assert_eq!(
-        client
-            .get(format!("{base}/sessions/99999"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        404,
-    );
-}
-
-#[tokio::test]
-async fn static_assets_are_served() {
-    let (base, _h) = boot().await;
-    let client = reqwest::Client::new();
-    for path in [
-        "/static/tailwind.css",
-        "/static/livereload.js",
-        "/static/icons/icon-192.png",
-        "/static/icons/icon-512.png",
-        "/static/manifest.webmanifest",
-    ] {
-        let res = client.get(format!("{base}{path}")).send().await.unwrap();
-        assert_eq!(res.status(), 200, "expected 200 for {path}");
-    }
-}
-
-#[tokio::test]
-async fn dashboard_serves_json_via_accept() {
-    let (base, _h) = boot().await;
-    let client = reqwest::Client::new();
-    let res = client
-        .get(format!("{base}/"))
-        .header("accept", "application/json")
-        .send()
-        .await
-        .unwrap();
     assert_eq!(res.status(), 200);
     assert_eq!(
         res.headers()
@@ -167,16 +93,44 @@ async fn dashboard_serves_json_via_accept() {
     assert!(body.get("repos").is_some());
     assert!(body.get("banner").is_some());
     assert!(body.get("scan_version").is_some());
+    assert!(body.get("action_required").is_some());
+    assert!(body.get("gh_health").is_some());
 }
 
 #[tokio::test]
-async fn dashboard_serves_json_via_format_param() {
+async fn unknown_path_is_404_json() {
     let (base, _h) = boot().await;
-    let res = reqwest::get(format!("{base}/?format=json")).await.unwrap();
-    assert_eq!(res.status(), 200);
+    let res = reqwest::get(format!("{base}/does-not-exist"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 404);
+    assert_eq!(
+        res.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+    );
     let body: serde_json::Value = res.json().await.unwrap();
-    assert!(body.get("action_required").is_some());
-    assert!(body.get("gh_health").is_some());
+    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["path"], "/does-not-exist");
+}
+
+#[tokio::test]
+async fn removed_html_routes_return_404() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::new();
+    for path in ["/repos/99999", "/sessions/99999", "/search", "/refresh"] {
+        assert_eq!(
+            client
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404,
+            "expected 404 for removed route {path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -208,9 +162,6 @@ async fn autonomy_metrics_endpoint_returns_zero_rollup_in_empty_workspace() {
 
 #[tokio::test]
 async fn ticket_history_endpoint_returns_empty_for_unknown_issue() {
-    // No repos / issues exist in the test boot. Endpoint should still
-    // return a well-shaped envelope rather than 404, since "unindexed
-    // issue" is the expected normal case.
     let (base, _h) = boot().await;
     let res = reqwest::get(format!("{base}/api/repos/1/tickets/42/history"))
         .await
@@ -249,23 +200,6 @@ async fn etag_returns_304_when_unchanged() {
 }
 
 #[tokio::test]
-async fn dashboard_html_carries_data_attrs_when_repos_present() {
-    // No repos in the test boot, so data-repo-id won't appear, but the
-    // surrounding markup contract should still be present (no panic, valid
-    // HTML). Just verifies the new attribute names don't break rendering.
-    let (base, _h) = boot().await;
-    let body = reqwest::get(format!("{base}/"))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    // The repo-list block is empty in the test environment, but the action
-    // banner / counters should still render.
-    assert!(body.contains("<title>repo-recall"));
-}
-
-#[tokio::test]
 async fn scan_version_endpoint_is_cheap_poll() {
     let (base, _h) = boot().await;
     let res = reqwest::get(format!("{base}/api/scan-version"))
@@ -277,40 +211,41 @@ async fn scan_version_endpoint_is_cheap_poll() {
 }
 
 #[tokio::test]
-async fn refresh_returns_accepted() {
+async fn api_refresh_returns_ok() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::new();
-    let res = client.post(format!("{base}/refresh")).send().await.unwrap();
-    assert_eq!(res.status(), 202);
+    let res = client
+        .post(format!("{base}/api/refresh"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
 }
 
 #[tokio::test]
-async fn gh_missing_shows_warning_banner() {
+async fn gh_health_surfaces_in_dashboard_json() {
     let (base, _h) = boot_with(repo_recall::ingest::git::log::GhHealth::Missing).await;
-    let body = reqwest::get(format!("{base}/"))
+    let body: serde_json::Value = reqwest::get(format!("{base}/"))
         .await
         .unwrap()
-        .text()
+        .json()
         .await
         .unwrap();
-    assert!(body.contains("gh CLI not found"), "banner message missing");
-    assert!(body.contains("⚠"), "warning emoji missing");
+    assert_eq!(body["gh_health"], "missing");
 }
 
 #[tokio::test]
-async fn gh_ok_hides_warning_banner() {
-    let (base, _h) = boot_with(repo_recall::ingest::git::log::GhHealth::Ok).await;
-    let body = reqwest::get(format!("{base}/"))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+async fn openapi_doc_is_served() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/openapi.json")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    let doc: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(doc["openapi"], "3.1.0");
+    assert!(doc["paths"]["/"].is_object(), "openapi missing root path");
     assert!(
-        !body.contains("gh CLI not found"),
-        "banner leaked when healthy"
+        doc["paths"]["/api/action-required"].is_object(),
+        "openapi missing /api/action-required"
     );
-    assert!(!body.contains("gh CLI not authenticated"));
 }
 
 #[tokio::test]
@@ -362,7 +297,7 @@ async fn git_log_parses_commits() {
 #[tokio::test]
 async fn worktree_snapshot_drops_stat_stale_modifications() {
     // Set up a real repo, commit a file, then mutate the file's mtime
-    // *without* changing its content. `git status` will report it as
+    // without changing its content. `git status` will report it as
     // modified because the cached stat info no longer matches; `git diff`
     // will be silent. Confirm the snapshot drops the phantom from the
     // count + path sample. Untracked entries should still come through.
@@ -386,18 +321,12 @@ async fn worktree_snapshot_drops_stat_stale_modifications() {
     run(&["add", "tracked.txt"]);
     run(&["commit", "-q", "-m", "add tracked.txt"]);
 
-    // Force the index to think tracked.txt's stat is stale: bump the
-    // mtime forward without rewriting bytes. `touch -t` lands a fixed
-    // future timestamp on macOS + Linux without dragging in a filetime
-    // crate just for one test.
     let touch = Command::new("touch")
         .args(["-t", "203012311200", tracked.to_str().unwrap()])
         .status()
         .unwrap();
     assert!(touch.success(), "touch failed");
 
-    // Drop an untracked file alongside it so we can prove untracked
-    // counts still come through unaffected.
     std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
 
     let snap = repo_recall::ingest::git::log::worktree_snapshot(&dir, 16);
@@ -419,68 +348,8 @@ async fn worktree_snapshot_drops_stat_stale_modifications() {
 }
 
 #[tokio::test]
-async fn json_surface_is_discoverable() {
-    let (base, _h) = boot().await;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    // Mechanism 1: <link rel="alternate"> in the HTML head.
-    let html = client.get(format!("{base}/")).send().await.unwrap();
-    let html_headers = html.headers().clone();
-    let body = html.text().await.unwrap();
-    assert!(
-        body.contains("rel=\"alternate\"") && body.contains("application/json"),
-        "dashboard <head> missing alternate-json link"
-    );
-
-    // Mechanism 2: Vary + Link headers on every response.
-    let vary = html_headers
-        .get("vary")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(vary.contains("Accept"), "Vary header missing Accept");
-    let link = html_headers
-        .get("link")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        link.contains("rel=\"alternate\"") && link.contains("application/json"),
-        "Link header missing alternate-json target"
-    );
-    assert!(
-        link.contains("rel=\"service-desc\""),
-        "Link header missing service-desc pointer at /openapi.json"
-    );
-
-    // Mechanism 3: /openapi.json serves a real OpenAPI doc.
-    let oa = client
-        .get(format!("{base}/openapi.json"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(oa.status(), 200);
-    let oa_doc: serde_json::Value = oa.json().await.unwrap();
-    assert_eq!(oa_doc["openapi"], "3.1.0");
-    assert!(
-        oa_doc["paths"]["/"].is_object(),
-        "openapi missing root path"
-    );
-    assert!(
-        oa_doc["paths"]["/api/action-required"].is_object(),
-        "openapi missing /api/action-required"
-    );
-}
-
-#[tokio::test]
 async fn cli_guard_audit_ingest_round_trips_through_cache() {
     // End-to-end exercise of the cli-guard audit JSONL ingest path (#148).
-    // Drop a JSONL shard in a temp dir, run the producer pipeline
-    // (list + parse + upsert), then verify list_all_audit_events returns
-    // both rows. Skips the env-var-resolution glue (default_audit_dir) on
-    // purpose - that's a thin shim and process-global env writes race
-    // other parallel tests.
     use repo_recall::ingest::cli_guard::audit_jsonl as audit;
 
     let cache_dir = std::env::temp_dir().join(format!("repo-recall-audit-{}", uuid_like()));
@@ -502,7 +371,6 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
     )
     .unwrap();
 
-    // Seed two repos so the join lights up; the third row stays unrouted.
     let repos = cache_db
         .write_batch(|w| {
             let id1 = w.upsert_repo("/repo/r1", "r1", 0, None, None)?;
@@ -541,7 +409,6 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
     let all = cache_db.list_all_audit_events().expect("read all");
     assert_eq!(all.len(), 3, "two routed + one unrouted, malformed dropped");
 
-    // Per-repo scan: r1 has 1, r2 has 1, repo_id=0 (unrouted) has 1.
     let r1 = cache_db
         .audit_events_for_repo(repos[0].0, None, 50)
         .expect("r1");
@@ -561,7 +428,6 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
     assert_eq!(unrouted.len(), 1);
     assert_eq!(unrouted[0].verb, "whoami");
 
-    // Idempotent: re-running the upsert does not duplicate.
     cache_db
         .write_batch(|w| {
             for path in &files {
