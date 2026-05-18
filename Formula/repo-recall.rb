@@ -15,7 +15,6 @@ class RepoRecall < Formula
     # 60s heartbeat, --verbose, and on-timeout postmortem so a hung
     # build is loud rather than a silent stall under brew's progress bar.
     system "bash", buildpath/"scripts/brew-build.sh", *std_cargo_args
-    pkgshare.install "static"
   end
 
   service do
@@ -28,7 +27,6 @@ class RepoRecall < Formula
       REPO_RECALL_CWD: "#{Dir.home}/projects/coilysiren",
       REPO_RECALL_PORT: "7777",
       REPO_RECALL_DEPTH: "4",
-      REPO_RECALL_STATIC: opt_pkgshare/"static",
       PATH: "#{HOMEBREW_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     )
   end
