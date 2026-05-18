@@ -1,6 +1,6 @@
 ---
 name: recall-dispatch
-description: Substrate-querying autonomous-engineering planner. Reads org backlog from GitHub, recent agent activity from repo-recall's session index, prior dispatch outcomes from closed issues plus their commits, and per-repo agent profiles from docs/AUTONOMY.md. Triages tickets, scores them for AFK-ability against substrate-derived priors, surfaces structural-context asks Kai still needs to answer, and emits one copy-pastable dispatch prompt per repo, ordered to maximize work without intervention. Aliases - recall dispatch, recall-dispatch, recall launchpad, autonomous engineering, AFK queue, lights-out queue, autonomous dispatch, AFK dispatch, plan the AFK run, queue autonomous work, run the lights-out factory, what should the bots work on.
+description: Autonomous-engineering planner that triages the org backlog, scores tickets for AFK-ability, and emits per-repo dispatch prompts ordered to maximize unattended work. Triggers - recall dispatch, autonomous engineering, AFK queue.
 ---
 
 # Recall Dispatch
