@@ -23,7 +23,6 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
     rm -rf src target/release/deps/repo_recall* target/release/repo-recall*
 
 COPY src ./src
-COPY tests ./tests
 
 # build.rs prefers $REPO_RECALL_VERSION over `git describe`. The release
 # workflow can set this when building from a tag; for plain main builds the
