@@ -1,18 +1,28 @@
 name: docker
 
-# Build and push the two container images to GHCR.
+# Build, push, and (on main) sideload + roll on kai-server.
 #
 # Images:
 #   ghcr.io/coilysiren/repo-recall-api  (Dockerfile, Rust + axum + MCP on :7777)
 #   ghcr.io/coilysiren/repo-recall-web  (Dockerfile.web, caddy + static SPA)
 #
-# Tags (per image): `latest` on main, plus the short commit SHA. The k3s
-# deploy in coilysiren/infrastructure pins to `latest` for the tailnet-only
-# path; switch to a sha- or tag-pinned image once the deploy stabilizes.
+# Two paths on every push to main:
 #
-# Trigger: push to main, and tag pushes (the release workflow pushes tags;
-# this lets a release publish a versioned image without rerunning Cargo for
-# every pre-tag commit).
+# 1. Public GHCR push. The matrix `build` job tags `latest` + short-sha
+#    and publishes to ghcr.io/coilysiren/*. Anyone who wants to deploy
+#    repo-recall on their own k8s cluster pulls from here.
+#
+# 2. Kai-server sideload. The `ship` job (needs build) pulls the
+#    just-pushed images, docker-save them, pipes the tarball over
+#    tailscale ssh into kai-server's containerd via
+#    `k3s ctr -n k8s.io images import -`, then `kubectl set image` +
+#    `rollout status` to land the SHA-pinned image. Sidesteps ghcr.io
+#    flakiness for the homelab deploy while keeping the public image
+#    available for third-party consumers. Pattern mirrors
+#    coilysiren/galaxy-gen's build-publish-deploy.yml.
+#
+# Tag pushes only do the GHCR step (release flow publishes a versioned
+# image; the homelab rolls from main).
 
 on:
   push:
@@ -22,6 +32,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write  # tailscale OIDC for the `ship` job
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -77,3 +88,69 @@ jobs:
           # `git describe` on plain main commits.
           build-args: |
             REPO_RECALL_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+
+  # Kai-server sideload. Only on main pushes (tag pushes are a release
+  # publish flow; the homelab rolls from main commits). Pulls the
+  # just-pushed GHCR images, saves them as tarballs, pipes them over
+  # tailscale ssh into kai-server's k3s containerd, then rolls the
+  # deployment to the SHA-pinned image refs. This bypasses any
+  # cluster-side GHCR pull (ghcr.io has been flaky enough that the
+  # homelab benefits from a registry-free path) while keeping the
+  # public images available for anyone else who wants to deploy
+  # repo-recall on their own cluster.
+  ship:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC-based tailnet join. The federated identity for this repo is
+      # provisioned in coilysiren/infrastructure/terraform/tailscale-oidc/;
+      # TS_CLIENT_ID and TS_AUDIENCE are repo secrets set by
+      # `make sync-tailscale-oidc-secrets`.
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          use-cache: "true"
+          hostname: github-actions-${{ github.run_id }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull both just-pushed images, retag them with a short-sha-only
+      # local ref the k3s containerd can see (the registry prefix would
+      # be redundant after import), then save + stream them over
+      # tailscale ssh into kai-server. `set image` updates both
+      # containers in the same Pod template, and the rollout-status
+      # check times out at 2m which is generous for a Recreate strategy
+      # on a single-replica deployment.
+      - name: Sideload to kai-server + roll
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SHORT="${SHA:0:7}"
+          for name in repo-recall-api repo-recall-web; do
+            remote="ghcr.io/coilysiren/${name}:sha-${SHORT}"
+            local="coilysiren/${name}:${SHORT}"
+            docker pull "$remote"
+            docker tag "$remote" "$local"
+            docker save "$local" | \
+              tailscale ssh deploy@kai-server \
+                "sudo k3s ctr -n k8s.io images import -"
+          done
+          tailscale ssh deploy@kai-server "kubectl -n repo-recall set image deploy/repo-recall \
+            api=coilysiren/repo-recall-api:${SHORT} \
+            web=coilysiren/repo-recall-web:${SHORT}"
+          tailscale ssh deploy@kai-server \
+            "kubectl -n repo-recall rollout status deploy/repo-recall --timeout=2m"
