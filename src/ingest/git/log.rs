@@ -545,35 +545,6 @@ fn unstaged_diff_is_empty(repo_path: &Path) -> bool {
     status.success()
 }
 
-/// State of the local `gh` CLI install — drives a startup banner so the
-/// user knows why the CI column might be empty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GhHealth {
-    /// `gh` runs and reports an authenticated account.
-    #[default]
-    Ok,
-    /// `gh` is installed but not logged in. `gh auth login` fixes it.
-    NotAuthenticated,
-    /// Couldn't invoke `gh` at all (not installed / not on PATH).
-    Missing,
-}
-
-/// Probe the `gh` install. Cheap — two subprocesses that finish in ms — so
-/// safe to call at startup and on every refresh. Never returns an error:
-/// any unexpected subprocess failure collapses to `Missing`.
-pub fn gh_health() -> GhHealth {
-    let Ok(output) = Command::new("gh").arg("--version").output() else {
-        return GhHealth::Missing;
-    };
-    if !output.status.success() {
-        return GhHealth::Missing;
-    }
-    match Command::new("gh").args(["auth", "status"]).output() {
-        Ok(o) if o.status.success() => GhHealth::Ok,
-        _ => GhHealth::NotAuthenticated,
-    }
-}
-
 /// Locate the repo's deploy workflow on disk. We sniff
 /// `.github/workflows/*.{yml,yaml}` for a basename containing "deploy"
 /// (case-insensitive), first match wins. Returns the *filename* (not the
@@ -750,24 +721,6 @@ pub fn fetch_pr_and_issue_counts(
     }
 
     Some((counts, issues))
-}
-
-/// Current viewer's GitHub login via `gh api user --json login`. Called once
-/// at startup + on each refresh; cheap, and lets us flag PRs involving "me".
-pub fn my_gh_login() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["api", "user", "--jq", ".login"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
 }
 
 /// One GitHub issue surfaced by `gh issue list --label LABEL`. Used by

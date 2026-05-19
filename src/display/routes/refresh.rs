@@ -352,22 +352,20 @@ async fn ingest_ci_status(state: AppState) -> usize {
         }
     }
 
-    // Re-probe `gh` on every refresh — the user may have installed it or
-    // logged in since startup, and the banner should update.
-    let health = tokio::task::spawn_blocking(git::log::gh_health)
-        .await
-        .unwrap_or(git::log::GhHealth::Missing);
-    *state.gh_health.lock().await = health;
-    if health != git::log::GhHealth::Ok {
-        return 0;
-    }
-    // Re-probe viewer login so it updates if the user switched accounts.
-    let my_login = tokio::task::spawn_blocking(git::log::my_gh_login)
-        .await
-        .ok()
-        .flatten();
-    *state.my_gh_login.lock().await = my_login.clone();
-    let my_login = my_login.unwrap_or_default();
+    // Re-probe the viewer on every refresh - the user may have logged in
+    // since startup, switched accounts, or hit a fresh rate limit. The
+    // banner updates from the same call. Skip the rest of the pass on
+    // anything but `Ok`.
+    use crate::ingest::github::RemoteFetchState;
+    let viewer_state = state.github_client.fetch_user().await;
+    let my_login = match &viewer_state {
+        RemoteFetchState::Ok(u) => u.login.clone(),
+        _ => {
+            *state.viewer.lock().await = viewer_state;
+            return 0;
+        }
+    };
+    *state.viewer.lock().await = viewer_state;
 
     let target_limit = state.remote_target_limit;
     let cache_db = state.cache_db.clone();
@@ -545,10 +543,10 @@ async fn ingest_ci_status(state: AppState) -> usize {
 /// unauthenticated. Caps at 100 repos — enough to surface the user's active
 /// workspace, small enough not to balloon the gh API budget.
 async fn ingest_active_repos(state: AppState) -> usize {
-    if *state.gh_health.lock().await != git::log::GhHealth::Ok {
+    use crate::ingest::github::RemoteFetchState;
+    if !matches!(&*state.viewer.lock().await, RemoteFetchState::Ok(_)) {
         return 0;
     }
-    use crate::ingest::github::RemoteFetchState;
     let actives = match state.github_client.fetch_active_repos(100).await {
         RemoteFetchState::Ok(v) => v,
         _ => return 0,
@@ -735,8 +733,8 @@ const LABEL_INGEST_TARGETS: &[crate::ingest::github::LabelTarget] = &[
 /// 3600s). The full per-source substrate (#146) is still TODO; this is
 /// the surgical mitigation for the labeled-issue site only.
 async fn ingest_labeled_issues(state: AppState) -> usize {
-    let health = *state.gh_health.lock().await;
-    if health != git::log::GhHealth::Ok {
+    use crate::ingest::github::RemoteFetchState;
+    if !matches!(&*state.viewer.lock().await, RemoteFetchState::Ok(_)) {
         return 0;
     }
     let cache_db = state.cache_db.clone();

@@ -9,7 +9,6 @@ use repo_recall::{
     config,
     db::CacheDb,
     display::{mcp, routes},
-    ingest::git,
     search, AppState,
 };
 
@@ -97,23 +96,20 @@ async fn main() -> miette::Result<()> {
     let scan_depth: usize = cfg.discovery.scan_depth;
     let commits_per_repo: usize = cfg.discovery.commits_per_repo;
 
-    let gh_health = git::log::gh_health();
     let github_client = repo_recall::ingest::github::build_client();
-    // #173 step 1: validating wire-up. Replaces the legacy
-    // `git::log::my_gh_login` subprocess at this single site. Other
-    // call sites continue to use the subprocess until steps 2-6.
-    // Bounded probe so a slow/blocked network never wedges startup.
-    let my_gh_login = match tokio::time::timeout(
+    // Bounded startup probe so a slow/blocked network never wedges boot.
+    // Timeout collapses to `Error` so the banner reflects the failure
+    // instead of silently rendering "ok".
+    let viewer = match tokio::time::timeout(
         std::time::Duration::from_secs(3),
         github_client.fetch_user(),
     )
     .await
     {
-        Ok(repo_recall::ingest::github::RemoteFetchState::Ok(u)) => Some(u.login),
-        Ok(_) => None,
+        Ok(state) => state,
         Err(_) => {
-            tracing::warn!("github auth probe timed out after 3s; my_gh_login = None");
-            None
+            tracing::warn!("github auth probe timed out after 3s; viewer = Error");
+            repo_recall::ingest::github::RemoteFetchState::Error("startup probe timed out".into())
         }
     };
     let my_git_email = detect_my_git_email();
@@ -133,8 +129,7 @@ async fn main() -> miette::Result<()> {
         remote_target_limit,
         refresh_lock: Arc::new(Mutex::new(())),
         last_scan: Arc::new(Mutex::new(None)),
-        gh_health: Arc::new(Mutex::new(gh_health)),
-        my_gh_login: Arc::new(Mutex::new(my_gh_login)),
+        viewer: Arc::new(Mutex::new(viewer)),
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,

@@ -10,11 +10,16 @@ use tokio::sync::Mutex;
 use repo_recall::{db::CacheDb, display::routes, AppState};
 
 async fn boot() -> (String, tokio::task::JoinHandle<()>) {
-    boot_with(repo_recall::ingest::git::log::GhHealth::Ok).await
+    boot_with(repo_recall::ingest::github::RemoteFetchState::Ok(
+        repo_recall::ingest::github::AuthedUser {
+            login: "test-viewer".into(),
+        },
+    ))
+    .await
 }
 
 async fn boot_with(
-    gh: repo_recall::ingest::git::log::GhHealth,
+    viewer: repo_recall::ingest::github::RemoteFetchState<repo_recall::ingest::github::AuthedUser>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     // Unique cache dir per test run so parallel `cargo test` invocations
     // don't collide.
@@ -35,8 +40,7 @@ async fn boot_with(
         remote_target_limit: 0,
         refresh_lock: Arc::new(Mutex::new(())),
         last_scan: Arc::new(Mutex::new(None)),
-        gh_health: Arc::new(Mutex::new(gh)),
-        my_gh_login: Arc::new(Mutex::new(None)),
+        viewer: Arc::new(Mutex::new(viewer)),
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
@@ -224,14 +228,14 @@ async fn api_refresh_returns_ok() {
 
 #[tokio::test]
 async fn gh_health_surfaces_in_dashboard_json() {
-    let (base, _h) = boot_with(repo_recall::ingest::git::log::GhHealth::Missing).await;
+    let (base, _h) = boot_with(repo_recall::ingest::github::RemoteFetchState::Unconfigured).await;
     let body: serde_json::Value = reqwest::get(format!("{base}/"))
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(body["gh_health"], "missing");
+    assert_eq!(body["gh_health"], "unconfigured");
 }
 
 #[tokio::test]

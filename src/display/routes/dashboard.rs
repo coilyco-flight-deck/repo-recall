@@ -148,7 +148,7 @@ pub async fn index(
     };
 
     let last_scan = *state.last_scan.lock().await;
-    let gh_health = *state.gh_health.lock().await;
+    let viewer_str = viewer_state_str(&*state.viewer.lock().await);
 
     // Banner counters: skip vendored repos. Their signals are noise, not
     // action items.
@@ -234,7 +234,7 @@ pub async fn index(
             links: links_n,
             commits: commits_n,
         },
-        gh_health: gh_health_str(gh_health),
+        gh_health: viewer_str,
         last_scan: last_scan.map(|t| t.timestamp()),
         earliest_session: earliest_ts,
         author_filter: filter_label,
@@ -244,10 +244,16 @@ pub async fn index(
     json_with_etag(&headers, body.scan_version, &body)
 }
 
-fn gh_health_str(h: crate::ingest::git::log::GhHealth) -> &'static str {
-    match h {
-        crate::ingest::git::log::GhHealth::Ok => "ok",
-        crate::ingest::git::log::GhHealth::Missing => "missing",
-        crate::ingest::git::log::GhHealth::NotAuthenticated => "not_authenticated",
+fn viewer_state_str(
+    v: &crate::ingest::github::RemoteFetchState<crate::ingest::github::AuthedUser>,
+) -> &'static str {
+    use crate::ingest::github::RemoteFetchState;
+    match v {
+        RemoteFetchState::Ok(_) => "ok",
+        RemoteFetchState::Unconfigured => "unconfigured",
+        RemoteFetchState::Unauthorized => "not_authenticated",
+        RemoteFetchState::RateLimited { .. } => "rate_limited",
+        RemoteFetchState::Missing => "missing",
+        RemoteFetchState::Error(_) => "error",
     }
 }

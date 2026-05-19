@@ -44,8 +44,8 @@ pub struct AuthedUser {
 /// [`super::fetch_state`] keeps owning categorization.
 #[async_trait]
 pub trait GithubClient: Send + Sync {
-    /// `GET /user` - viewer's GitHub identity. Replaces
-    /// `crate::ingest::git::log::my_gh_login`.
+    /// `GET /user` - viewer's GitHub identity. Single source of truth
+    /// for the authenticated login + the dashboard's `gh_health` banner.
     async fn fetch_user(&self) -> RemoteFetchState<AuthedUser>;
 
     /// `GET /repos/{owner}/{repo}/issues?state=open&per_page=100` -

@@ -28,13 +28,12 @@ pub struct AppState {
     pub remote_target_limit: usize,
     pub refresh_lock: Arc<Mutex<()>>,
     pub last_scan: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
-    /// State of the local `gh` CLI. Updated at startup and re-checked at the
-    /// start of each refresh so the banner disappears as soon as the user
-    /// installs / logs in.
-    pub gh_health: Arc<Mutex<ingest::git::log::GhHealth>>,
-    /// GitHub login of the authenticated user, cached from `gh api user`.
-    /// `None` when `gh_health != Ok`. Drives the "awaiting my review" split.
-    pub my_gh_login: Arc<Mutex<Option<String>>>,
+    /// Categorized state of the GitHub viewer. Updated at startup and
+    /// re-checked at the start of each refresh so the banner disappears
+    /// as soon as the user logs in. `RemoteFetchState::Ok` carries the
+    /// authenticated user's login (drives the "awaiting my review"
+    /// split); the other variants drive the banner.
+    pub viewer: Arc<Mutex<ingest::github::RemoteFetchState<ingest::github::AuthedUser>>>,
     /// Viewer's git email (from `git config --global user.email`), used as
     /// the default author for `?author=me` filtering. Fallback when
     /// `REPO_RECALL_AUTHOR` isn't set.
