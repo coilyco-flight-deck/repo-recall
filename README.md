@@ -67,7 +67,8 @@ No config, no wizard. Walks cwd + 4 levels for `.git`, parses `~/.claude/project
 ## Install via Homebrew
 
 ```sh
-brew install coilysiren/tap/repo-recall
+brew tap coilysiren/repo-recall https://github.com/coilysiren/repo-recall
+brew install coilysiren/repo-recall/repo-recall
 brew services start repo-recall
 ```
 

@@ -44,9 +44,9 @@ Metadata + 200-char summary only, not transcripts. Loopback by default; `REPO_RE
 
 ## Release + post-push
 
-Push to `main` → `.github/workflows/release.yml`: `mathieudutour/github-tag-action` computes semver (`default_bump: patch`), tags + cuts Release, `bump-tap` pushes Formula to `coilysiren/homebrew-tap`. No bump commit; Cargo.toml pinned `0.0.0-dev`; version from `build.rs` (prefers `$REPO_RECALL_VERSION`, falls back to `git describe --tags`). Secret: `HOMEBREW_TAP_TOKEN`. Formula source of truth: `Formula/repo-recall.rb` here.
+Push to `main` → `.github/workflows/release.yml`: tag-action tags + cuts Release, `bump-formula` rewrites `Formula/repo-recall.rb` url+tag+revision via Contents API with skip-CI marker. No external tap. Cargo.toml pinned `0.0.0-dev`; version from `build.rs` (`$REPO_RECALL_VERSION` or `git describe --tags`). Install: `brew tap coilysiren/repo-recall https://github.com/coilysiren/repo-recall && brew install coilysiren/repo-recall/repo-recall`. Never write the literal skip-CI token in a commit body.
 
-Post-push: verify CI at +300s (`coily ops gh run list --repo coilysiren/repo-recall --limit 1`); `brew outdated` → `brew upgrade`; `coily ssh systemctl start repo-recall-update.service`; verify `repo-recall-update.service` + `repo-recall.service`. Skip for docs-only.
+Post-push: verify CI at +300s; `brew outdated` → `brew upgrade`; `coily ssh systemctl start repo-recall-update.service`. Skip for docs-only.
 
 ## See also
 
