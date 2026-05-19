@@ -60,3 +60,10 @@ catalog:
     - recall-web
     - recall-mcp
   dependsOn: []
+  deploy:
+    dev: local
+    staging:
+      mac: brew-service
+      windows: scoop-service
+    prod:
+      kai-server: k3s
