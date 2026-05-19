@@ -3,9 +3,7 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^static/tailwind\.css$
       - id: end-of-file-fixer
-        exclude: ^static/tailwind\.css$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict
@@ -19,15 +17,6 @@ repos:
         args: ["--all", "--"]
       - id: clippy
         args: ["--all-targets", "--all-features", "--", "-D", "warnings"]
-
-  - repo: local
-    hooks:
-      - id: tailwindcss
-        name: tailwindcss (compile static/tailwind.css)
-        entry: tailwindcss -i static/tailwind.input.css -o static/tailwind.css --minify
-        language: system
-        files: ^(static/tailwind\.input\.css|src/.*\.rs|static/.*\.js)$
-        pass_filenames: false
 
   - repo: https://github.com/trufflesecurity/trufflehog
     rev: v3.82.13
