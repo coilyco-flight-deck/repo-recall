@@ -149,8 +149,12 @@ jobs:
               tailscale ssh deploy@kai-server \
                 "sudo k3s ctr -n k8s.io images import -"
           done
-          tailscale ssh deploy@kai-server "kubectl -n repo-recall set image deploy/repo-recall \
+          # `sudo k3s kubectl` because k3s ships its own kubectl and the
+          # deploy user has NOPASSWD on /usr/local/bin/k3s but no
+          # kubeconfig of its own. Same shape as the `sudo k3s ctr`
+          # import above.
+          tailscale ssh deploy@kai-server "sudo k3s kubectl -n repo-recall set image deploy/repo-recall \
             api=coilysiren/repo-recall-api:${SHORT} \
             web=coilysiren/repo-recall-web:${SHORT}"
           tailscale ssh deploy@kai-server \
-            "kubectl -n repo-recall rollout status deploy/repo-recall --timeout=2m"
+            "sudo k3s kubectl -n repo-recall rollout status deploy/repo-recall --timeout=2m"
