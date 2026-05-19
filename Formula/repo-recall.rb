@@ -1,7 +1,7 @@
 class RepoRecall < Formula
   desc "Local dev dashboard that indexes Claude Code session history against your repos"
   homepage "https://github.com/coilysiren/repo-recall"
-  url "ssh://git@github.com/coilysiren/repo-recall.git", tag: "v0.30.3", revision: "c6b2f48928729a350a0f8d0309d2fc85b4857850"
+  url "ssh://git@github.com/coilysiren/repo-recall.git", tag: "v0.31.0", revision: "76e7757e3acc8e101733c543280d67fe6aebce60"
   license "MIT"
   head "https://github.com/coilysiren/repo-recall.git", branch: "main"
 
