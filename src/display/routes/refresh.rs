@@ -186,38 +186,6 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let gh_ref_matches = ingest_gh_refs(state.clone()).await;
     let _ = gh_ref_matches;
 
-    // Labeled-issue pass (#92, #114). Pulls open structural-ask issues
-    // from every GitHub-hosted repo so the recall-dispatch planner can
-    // tell which structural questions Kai has already opened. Same
-    // best-effort posture as `ingest_ci_status`: failures stay silent.
-    //
-    // Gated against `state.labeled_ingest_interval_secs` (default 3600s)
-    // so the GraphQL secondary-rate-limit budget stays inside what
-    // AGENTS.md promises. The outer refresh loop ticks every
-    // `interval_secs` (default 150s); without this gate the GraphQL call
-    // would fire 24x more often than the documented hourly cadence.
-    let should_run_labeled = {
-        let mut last = state.last_labeled_ingest.lock().await;
-        let now = Utc::now();
-        let due = match *last {
-            None => true,
-            Some(prev) => (now - prev).num_seconds() as u64 >= state.labeled_ingest_interval_secs,
-        };
-        if due {
-            *last = Some(now);
-        }
-        due
-    };
-    let _labeled_n = if should_run_labeled {
-        ingest_labeled_issues(state.clone()).await
-    } else {
-        tracing::debug!(
-            "labeled-issue ingest gated (next run in <={}s)",
-            state.labeled_ingest_interval_secs
-        );
-        0
-    };
-
     *state.last_scan.lock().await = Some(Utc::now());
     state
         .scan_version
@@ -701,76 +669,6 @@ struct RefreshStats {
     links: usize,
     commits: usize,
     skipped: usize,
-}
-
-/// Labels we care about ingesting for the recall-dispatch substrate.
-/// `(label, state)` tuples become aliased searches inside a single
-/// GraphQL request. Add new entries when new labels join the dispatch
-/// convention.
-const LABEL_INGEST_TARGETS: &[crate::ingest::github::LabelTarget] = &[
-    ("structural-ask", "open"),
-    ("autonomous-block", "open"),
-    ("repo-dispatch", "open"),
-    ("repo-dispatch", "closed"),
-];
-
-/// Pull labeled issues for every GitHub-hosted repo on disk via a single
-/// GraphQL request (one aliased `search` per target). This is the sole
-/// sanctioned GraphQL call site in the codebase — see AGENTS.md "No
-/// GraphQL" exception and Source 6 of #155. Best-effort: a missing,
-/// unauthenticated, or rate-limited `gh` returns 0 without breaking the
-/// refresh.
-///
-/// Cadence is hourly in steady-state, gated at the call site in
-/// `run_refresh` against `AppState.labeled_ingest_interval_secs`
-/// (sourced from `refresh.per_source.github_remote_labeled`, default
-/// 3600s). The full per-source substrate (#146) is still TODO; this is
-/// the surgical mitigation for the labeled-issue site only.
-async fn ingest_labeled_issues(state: AppState) -> usize {
-    use crate::ingest::github::RemoteFetchState;
-    if !matches!(&*state.viewer.lock().await, RemoteFetchState::Ok(_)) {
-        return 0;
-    }
-    let cache_db = state.cache_db.clone();
-    let slugs = match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(i64, String)>> {
-        let remotes = cache_db.iter_repo_ids_and_remotes()?;
-        Ok(remotes
-            .into_iter()
-            .filter_map(|(id, url)| git::log::github_owner_repo(&url).map(|s| (id, s)))
-            .collect())
-    })
-    .await
-    {
-        Ok(Ok(v)) => v,
-        _ => return 0,
-    };
-    if slugs.is_empty() {
-        return 0;
-    }
-
-    let results = tokio::task::spawn_blocking(move || {
-        crate::ingest::github::fetch_labeled_issues_graphql(&slugs, LABEL_INGEST_TARGETS)
-    })
-    .await
-    .unwrap_or_default();
-
-    let cache_db = state.cache_db.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-        cache_db.write_batch(|w| {
-            let mut n = 0usize;
-            for (repo_id, label, issues) in results {
-                for issue in &issues {
-                    w.upsert_labeled_issue(repo_id, &label, issue)?;
-                    n += 1;
-                }
-            }
-            Ok(n)
-        })
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .unwrap_or(0)
 }
 
 /// Walk every JSONL shard under `~/.coily/audit/` (or the path resolved

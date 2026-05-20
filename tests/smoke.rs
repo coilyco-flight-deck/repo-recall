@@ -44,9 +44,6 @@ async fn boot_with(
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
-        labeled_ingest_interval_secs: 3600,
-        last_labeled_ingest: Arc::new(Mutex::new(None)),
-        stale_ask_threshold_secs: 7 * 86_400,
         remote_backoff_until: Arc::new(Mutex::new(None)),
         remote_backoff_secs: Arc::new(Mutex::new(0)),
         last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -148,19 +145,6 @@ async fn action_required_endpoint_returns_json() {
     assert!(body.get("repos").is_some(), "missing repos array");
     assert!(body.get("scan_version").is_some());
     assert!(body.get("generated_at").is_some());
-}
-
-#[tokio::test]
-async fn autonomy_metrics_endpoint_returns_zero_rollup_in_empty_workspace() {
-    let (base, _h) = boot().await;
-    let res = reqwest::get(format!("{base}/api/autonomy/metrics"))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 200);
-    let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(body["overall"]["total"], 0);
-    assert_eq!(body["overall_success_rate"], 0.0);
-    assert!(body["per_repo"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

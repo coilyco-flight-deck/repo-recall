@@ -116,9 +116,6 @@ async fn main() -> miette::Result<()> {
 
     let refresh_interval_secs: u64 = cfg.refresh.interval_secs;
     let remote_target_limit: usize = cfg.ingest.github.remote_target_limit;
-    let labeled_ingest_interval_secs: u64 =
-        cfg.refresh.per_source.github_remote_labeled.unwrap_or(3600);
-    let stale_ask_threshold_secs: i64 = i64::from(cfg.signals.stale_ask_days) * 86_400;
 
     let state = AppState {
         cache_db,
@@ -133,9 +130,6 @@ async fn main() -> miette::Result<()> {
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
-        labeled_ingest_interval_secs,
-        last_labeled_ingest: Arc::new(Mutex::new(None)),
-        stale_ask_threshold_secs,
         remote_backoff_until: Arc::new(Mutex::new(None)),
         remote_backoff_secs: Arc::new(Mutex::new(0)),
         last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),

@@ -4,20 +4,16 @@
 //! - `/repos/X/issues?state=open`    -> open issues, with PR rows filtered (Source 3)
 //! - `gh run list --json …`          -> recent CI runs incl. job names (Source 4)
 //!
-//! Stays on REST. Per AGENTS.md "No GraphQL" except where #155 Source 6
-//! explicitly carves out a sanctioned site (labeled-issue ingest), and
-//! that's a separate module.
+//! Stays on REST. No GraphQL.
 
 pub mod ci_runs;
 pub mod client;
 pub mod fetch_state;
 pub mod issues;
-pub mod labeled;
 pub mod pulls;
 
 pub use ci_runs::{parse_job_names_json, parse_runs_json, CiRunRecordInput};
 pub use client::{build_client, AuthedUser, FixturesClient, GithubClient, OctocrabClient};
 pub use fetch_state::{classify_gh_failure, classify_gh_stderr, RemoteFetchState};
 pub use issues::{parse_issues_json, IssueRecordInput};
-pub use labeled::{fetch_labeled_issues_graphql, LabelTarget};
 pub use pulls::{parse_prs_json, PrRecordInput};

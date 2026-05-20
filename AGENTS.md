@@ -31,7 +31,7 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 - **Activity score**: `Σ ln(1 + xᵢ / Mᵢ)` where `Mᵢ` is corpus max. Action-required hard-sorts above.
 - **`is_action_required` is curated**: failing CI, dirty tree, in-progress git op, detached HEAD. Ahead/behind + stash are informational.
 - **Remote pass runs second.** Main refresh is local + blocking in one `spawn_blocking`. Remote uses tokio tasks + bounded semaphore (8). Failures swallowed at `debug!`.
-- **No GraphQL, one exception.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath). Exception: `src/ingest/github/labeled.rs` collapses 4N REST per refresh to one aliased-search at `refresh.per_source.github_remote_labeled` (3600s).
+- **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath).
 - **Git log shelled out.** `git log --all --no-merges` subprocess, NUL-separated. No libgit2.
 - **Two-artifact shape.** Rust binary serves JSON + MCP. `web/` is a Vite SPA built to `web/dist/` and served by Caddy via `Dockerfile.web` + `deploy/Caddyfile`. Vite dev proxies `/api`, `/openapi.json`, `/mcp` to the Rust process. `make watch-all` runs both.
 - **Refresh signal is `GET /api/scan-version`** - monotonic counter bumped at end of refresh. ETag keys on the same counter.

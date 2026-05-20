@@ -1,6 +1,6 @@
 //! MCP App server. Tools expose repo-recall's data layer to MCP hosts.
 //!
-//! Nine tools:
+//! Seven tools:
 //!
 //! - `recall_dashboard` — repo list + action-required + counts.
 //! - `recall_repo` — single repo detail.
@@ -8,8 +8,6 @@
 //! - `recall_search` — unified search.
 //! - `recall_action_required` — thin orchestrator slice.
 //! - `recall_ticket_history` — sessions + commits touching one issue.
-//! - `recall_autonomy_metrics` — AFK success rate from closed tracking issues.
-//! - `recall_open_structural_asks` — list open structural-ask-labeled issues.
 //! - `recall_refresh` — trigger a rescan.
 
 use std::sync::atomic::Ordering;
@@ -99,32 +97,6 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
-    let autonomy_metrics = {
-        let state = state.clone();
-        TypedTool::new("recall_autonomy_metrics", move |args, extra| {
-            let s = state.clone();
-            Box::pin(tools::autonomy_metrics(s, args, extra))
-        })
-        .with_description(
-            "AFK success rate aggregated from closed repo-dispatch tracking issues. \
-             Classifies closures into success / abandon / block by joining against \
-             commit issue-refs. Returns overall + per-repo rates with sample sizes.",
-        )
-    };
-
-    let open_structural_asks = {
-        let state = state.clone();
-        TypedTool::new("recall_open_structural_asks", move |args, extra| {
-            let s = state.clone();
-            Box::pin(tools::open_structural_asks(s, args, extra))
-        })
-        .with_description(
-            "List currently open structural-ask-labeled GitHub issues across the \
-             indexed workspace. Read this before drafting a new ask so the planner \
-             can refuse to re-ask a question already on the list.",
-        )
-    };
-
     let refresh_tool = {
         let state = state.clone();
         TypedTool::new("recall_refresh", move |args, extra| {
@@ -147,8 +119,6 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_search", search)
         .tool("recall_action_required", action_required)
         .tool("recall_ticket_history", ticket_history)
-        .tool("recall_autonomy_metrics", autonomy_metrics)
-        .tool("recall_open_structural_asks", open_structural_asks)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;

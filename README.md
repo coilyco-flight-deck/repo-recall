@@ -22,12 +22,10 @@ Local dev: `make watch-all` runs cargo-watch on the Rust side and the Vite dev s
 
 ## JSON endpoints
 
-- `GET /` - full dashboard projection: repos ranked by composite activity score, recent sessions, recent commits, action-required signals, banner counts, autonomy rollup, structural asks.
+- `GET /` - full dashboard projection: repos ranked by composite activity score, recent sessions, recent commits, action-required signals, banner counts.
 - `GET /api/action-required` - thin action-required list. `id = "<repo_id>:<signal>"`.
 - `GET /api/scan-version` - single-integer poll target.
 - `POST /api/refresh` - sync refresh.
-- `GET /api/autonomy/metrics` - per-repo autonomy / agent-readiness rollup.
-- `GET /api/structural-asks` - open structural-ask issues across the workspace.
 - `GET /api/repos/{repo_id}/tickets/{issue_number}/history` - per-issue session + commit join.
 - `GET /openapi.json` - hand-maintained OpenAPI 3.1 description of the surface.
 
@@ -48,7 +46,7 @@ repo-recall runs an MCP server in the same process. For Claude Desktop:
 }
 ```
 
-Tools: `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_ticket_history`, `recall_autonomy_metrics`, `recall_open_structural_asks`, `recall_refresh`.
+Tools: `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_ticket_history`, `recall_refresh`.
 
 ## Point an agent at it
 

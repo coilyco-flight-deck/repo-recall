@@ -10,7 +10,7 @@ Joins three primary sources into one queryable surface, all on the same host:
 
 - **Claude Code sessions** parsed from `~/.claude/projects/**/*.jsonl`. Metadata, 200-char summaries, malformed lines skipped.
 - **git** via `git log --all --no-merges` and working-tree status. Untracked + modified counts, stash, branch, ahead/behind, in-progress op, detached HEAD.
-- **GitHub** via `gh` REST: CI status, open and draft PRs, issues, review queue, deploy workflow status. No GraphQL (one curated exception for the labeled-issue search).
+- **GitHub** via `gh` REST: CI status, open and draft PRs, issues, review queue, deploy workflow status. No GraphQL.
 
 Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repos.match_type` is the extension point.
 
@@ -22,10 +22,6 @@ Curated set of signals that float to the top of any ranking: failing CI, dirty t
 
 Composite activity score `Σ ln(1 + xᵢ / Mᵢ)` across commits in last 30 days, session count, authors, and churn, normalized against corpus maxes. Action-required hard-sorts above the score. Vendored repos and `.repo-recall-ignore`-flagged repos suppress signals.
 
-## Autonomy rollup
-
-Per-repo AFK success-rate at `GET /api/autonomy/metrics`. Classifies closed `repo-dispatch`-labeled tracking issues into success / abandon / block by joining against commit issue-refs. Returns overall plus per-repo rates with sample sizes. Labeled-issue ingest across repos surfaces `structural-ask` and `repo-dispatch` labels for the rollup and the dashboard.
-
 ## Issue-ref index
 
 Scans sessions and commits for `owner/repo#N` references and pasted GitHub URLs. Maintains `issue_refs` indexed by `(repo, issue)` and `(source_kind, source_id)`. Powers per-issue history at `GET /api/repos/{repo_id}/tickets/{issue_number}/history`.
@@ -36,7 +32,7 @@ Every JSON response carries `ETag: "<scan_version>"` where `scan_version` is the
 
 ## MCP co-server
 
-MCP server runs in the same process as the HTTP server via pmcp 2.6 stdio plus a streamable-HTTP bridge at `/mcp/*`. Tools mirror the HTTP surface: dashboard, repo, session, search, action-required, ticket-history, autonomy-metrics, open-structural-asks, refresh.
+MCP server runs in the same process as the HTTP server via pmcp 2.6 stdio plus a streamable-HTTP bridge at `/mcp/*`. Tools mirror the HTTP surface: dashboard, repo, session, search, action-required, ticket-history, refresh.
 
 ## Cache + indexes
 

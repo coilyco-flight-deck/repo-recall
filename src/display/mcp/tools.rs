@@ -318,31 +318,6 @@ pub async fn ticket_history(
 }
 
 // -----------------------------------------------------------------------------
-// recall_autonomy_metrics
-// -----------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct AutonomyMetricsArgs {}
-
-/// Aggregate AFK success rate from closed `repo-dispatch` tracking
-/// issues, joined against `ISSUE_REFS` to detect commit-backed closes.
-/// Returns overall + per-repo rates plus the bucketed counts. Empty
-/// `per_repo` is the expected normal state until dispatches start
-/// landing (#92, #116).
-pub async fn autonomy_metrics(
-    state: AppState,
-    _args: AutonomyMetricsArgs,
-    _extra: RequestHandlerExtra,
-) -> pmcp::Result<Value> {
-    let cache = state.cache_db.clone();
-    let metrics = tokio::task::spawn_blocking(move || cache.autonomy_metrics())
-        .await
-        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
-    serde_json::to_value(metrics).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
-}
-
-// -----------------------------------------------------------------------------
 // recall_refresh
 // -----------------------------------------------------------------------------
 
@@ -367,32 +342,4 @@ pub async fn refresh(
         "ran": after > before,
         "last_scan": last_scan,
     }))
-}
-
-// -----------------------------------------------------------------------------
-// recall_open_structural_asks
-// -----------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct OpenStructuralAsksArgs {}
-
-/// List currently open `structural-ask`-labeled GitHub issues across the
-/// indexed workspace (#92 phase 5, #105). The planner reads this before
-/// drafting a new ask so it can refuse to re-ask a question already on
-/// the list.
-pub async fn open_structural_asks(
-    state: AppState,
-    _args: OpenStructuralAsksArgs,
-    _extra: RequestHandlerExtra,
-) -> pmcp::Result<Value> {
-    let cache = state.cache_db.clone();
-    let asks = tokio::task::spawn_blocking(move || {
-        cache.labeled_issues_by_state("structural-ask", "open")
-    })
-    .await
-    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-    .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
-    let n = asks.len();
-    serde_json::to_value(json!({ "count": n, "asks": asks }))
-        .map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
 }

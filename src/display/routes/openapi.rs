@@ -20,7 +20,7 @@ pub async fn spec() -> impl IntoResponse {
             "/": {
                 "get": {
                     "summary": "Dashboard JSON view",
-                    "description": "Returns the full dashboard projection: repos, recent sessions, recent commits, action-required signals, banner counts, autonomy rollup, structural asks. Carries an `ETag` keyed on the monotonic scan version; pass `If-None-Match` to short-circuit unchanged scans.",
+                    "description": "Returns the full dashboard projection: repos, recent sessions, recent commits, action-required signals, banner counts. Carries an `ETag` keyed on the monotonic scan version; pass `If-None-Match` to short-circuit unchanged scans.",
                     "responses": {
                         "200": {"description": "Dashboard payload", "content": {"application/json": {}}},
                         "304": {"description": "Not Modified, ETag matched"}
@@ -56,19 +56,6 @@ pub async fn spec() -> impl IntoResponse {
                     "summary": "Synchronous refresh",
                     "description": "Awaits the scan and returns the new scan_version.",
                     "responses": {"200": {"description": "Refresh complete", "content": {"application/json": {}}}}
-                }
-            },
-            "/api/autonomy/metrics": {
-                "get": {
-                    "summary": "Autonomy rollup",
-                    "description": "Per-repo autonomy / agent-readiness metrics.",
-                    "responses": {"200": {"description": "Autonomy metrics", "content": {"application/json": {}}}}
-                }
-            },
-            "/api/structural-asks": {
-                "get": {
-                    "summary": "Open structural-ask issues across the workspace",
-                    "responses": {"200": {"description": "Structural-ask list", "content": {"application/json": {}}}}
                 }
             },
             "/api/repos/{repo_id}/tickets/{issue_number}/history": {

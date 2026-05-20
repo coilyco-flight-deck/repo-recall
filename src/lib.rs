@@ -47,21 +47,6 @@ pub struct AppState {
     /// `search_idx` virtual table on every refresh. Reader still flows
     /// through SQLite until the redb migration's step 3 flips it.
     pub search_index: search::SearchIndex,
-    /// Minimum seconds between labeled-issue GraphQL ingest passes. Sourced
-    /// from `refresh.per_source.github_remote_labeled` (default 3600s). The
-    /// labeled-issue ingest is the only sanctioned GraphQL call site, and
-    /// the secondary rate limit is shared - gate it explicitly here so
-    /// `interval_secs` can stay aggressive without burning the budget.
-    pub labeled_ingest_interval_secs: u64,
-    /// Last time `ingest_labeled_issues` actually ran (vs being gated).
-    /// In-memory; resets on process start, which is fine - the first refresh
-    /// after boot should always pull fresh labeled state.
-    pub last_labeled_ingest: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
-    /// Cutoff (in seconds) past which an open structural-context ask
-    /// becomes a `stale_ask` action-required signal. Sourced from
-    /// `signals.stale_ask_days` (default 7 days) at startup. Replaces an
-    /// earlier env-only path that bypassed `Config` entirely.
-    pub stale_ask_threshold_secs: i64,
     /// When set, the remote-state pass is skipped until this instant.
     /// Populated when a refresh pass observes a `RateLimited` from any
     /// gh fetcher: the next pass takes the larger of the parsed

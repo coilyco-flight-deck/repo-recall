@@ -33,8 +33,6 @@ pub struct DashboardJson {
     pub uncommitted_groups: Vec<db::UncommittedGroup>,
     pub ci_failures: Vec<db::CiFailure>,
     pub action_required: Vec<ActionRequiredItem>,
-    pub autonomy: db::AutonomyMetrics,
-    pub structural_asks: Vec<db::LabeledIssueRow>,
     pub banner: BannerCounts,
     pub counts: DashboardCounts,
     pub gh_health: &'static str,
@@ -99,14 +97,6 @@ pub async fn index(
         let recent_commits = cache.recent_commits(15, af.as_deref())?;
         let uncommitted_groups = cache.uncommitted_by_repo(6, 4)?;
         let ci_failures = cache.failing_ci_repos()?;
-        let autonomy = cache.autonomy_metrics().unwrap_or(db::AutonomyMetrics {
-            overall: db::DispatchBucket::default(),
-            overall_success_rate: 0.0,
-            per_repo: Vec::new(),
-        });
-        let asks = cache
-            .labeled_issues_by_state("structural-ask", "open")
-            .unwrap_or_default();
         Ok((
             repos_n,
             sessions_n,
@@ -118,8 +108,6 @@ pub async fn index(
             recent_commits,
             uncommitted_groups,
             ci_failures,
-            autonomy,
-            asks,
         ))
     })
     .await
@@ -136,8 +124,6 @@ pub async fn index(
         recent_commits,
         uncommitted_groups,
         ci_failures,
-        autonomy,
-        structural_asks,
     ) = match data {
         Ok(d) => d,
         Err(e) => {
@@ -216,8 +202,6 @@ pub async fn index(
         uncommitted_groups,
         ci_failures,
         action_required: action_items,
-        autonomy,
-        structural_asks,
         banner: BannerCounts {
             ci_failing: ci_failing_count,
             dirty_repos: dirty_count,
