@@ -127,13 +127,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull both just-pushed images, retag them with a short-sha-only
-      # local ref the k3s containerd can see (the registry prefix would
-      # be redundant after import), then save + stream them over
-      # tailscale ssh into kai-server. `set image` updates both
-      # containers in the same Pod template, and the rollout-status
-      # check times out at 2m which is generous for a Recreate strategy
-      # on a single-replica deployment.
+      # Pull both just-pushed images, then save + stream them over
+      # tailscale ssh into kai-server's containerd. Keep the GHCR ref
+      # end-to-end so kubelet's IfNotPresent lookup matches the ref
+      # containerd stored on import; an earlier version retagged
+      # locally and broke the lookup, which fell through to a
+      # docker.io pull that 404s (repo-recall#219).
+      #
+      # `set image` updates both containers in the same Pod template
+      # to the same SHA-pinned GHCR ref. rollout-status timeout is 5m
+      # because a Recreate roll on the WSL-hosted k3s node can spend
+      # 1-2m on ImagePull-then-start for an 85 MB api + 24 MB web,
+      # even with the sideload already done (kubelet still has to
+      # confirm + start containers, and the api warms up its index).
       - name: Sideload to kai-server + roll
         env:
           SHA: ${{ github.sha }}
@@ -141,11 +147,9 @@ jobs:
           set -euo pipefail
           SHORT="${SHA:0:7}"
           for name in repo-recall-api repo-recall-web; do
-            remote="ghcr.io/coilysiren/${name}:sha-${SHORT}"
-            local="coilysiren/${name}:${SHORT}"
-            docker pull "$remote"
-            docker tag "$remote" "$local"
-            docker save "$local" | \
+            ref="ghcr.io/coilysiren/${name}:sha-${SHORT}"
+            docker pull "$ref"
+            docker save "$ref" | \
               tailscale ssh deploy@kai-server \
                 "sudo k3s ctr -n k8s.io images import -"
           done
@@ -154,7 +158,7 @@ jobs:
           # kubeconfig of its own. Same shape as the `sudo k3s ctr`
           # import above.
           tailscale ssh deploy@kai-server "sudo k3s kubectl -n repo-recall set image deploy/repo-recall \
-            api=coilysiren/repo-recall-api:${SHORT} \
-            web=coilysiren/repo-recall-web:${SHORT}"
+            api=ghcr.io/coilysiren/repo-recall-api:sha-$SHORT \
+            web=ghcr.io/coilysiren/repo-recall-web:sha-$SHORT"
           tailscale ssh deploy@kai-server \
-            "sudo k3s kubectl -n repo-recall rollout status deploy/repo-recall --timeout=2m"
+            "sudo k3s kubectl -n repo-recall rollout status deploy/repo-recall --timeout=5m"
