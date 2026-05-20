@@ -796,8 +796,8 @@ pub struct SpawnArgs {
     /// `owner/repo#N` of the prompt to spawn. Must be one of the issue_refs
     /// from a prompt rendered in `emit_plan`.
     pub r#ref: String,
-    /// If true, runs `coily dispatch --dry-run <ref>` so you can preview the
-    /// resolved prompt + repo path without actually exec'ing claude.
+    /// If true, runs `coily dispatch headless --dry-run <ref>` so you can preview
+    /// the resolved prompt + repo path without actually exec'ing claude.
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -831,7 +831,10 @@ pub async fn spawn(
     }
 
     let mut cmd = tokio::process::Command::new("coily");
-    cmd.arg("dispatch");
+    // recall_dispatch_spawn fires the headless subverb explicitly. AFK
+    // queue work bills against Kai's subscription. Interactive dispatch is
+    // a manual operator path, not driven by this MCP. See coilysiren/coily#270.
+    cmd.arg("dispatch").arg("headless");
     if args.dry_run {
         cmd.arg("--dry-run");
     }
@@ -893,7 +896,7 @@ pub async fn spawn(
 }
 
 pub const SPAWN_DESCRIPTION: &str = "\
-Fire `coily dispatch <ref>` for one approved prompt. Detaches the child so \
+Fire `coily dispatch headless <ref>` for one approved prompt. Detaches the child so \
 the new Claude session is independent. Only valid in the `spawn` phase. \
 Pass `dry_run: true` to preview the resolved prompt and repo path \
 without exec'ing claude. \
@@ -1015,7 +1018,7 @@ through scoring with substrate-grounded autonomy_confidence priors. Then \
 `recall_dispatch_emit_plan` renders per-repo prompt bodies for Kai to approve. \
 Then `recall_dispatch_emit_commit` writes the dispatch artifacts via the \
 existing `recall_record_dispatch` writer. Then `recall_dispatch_spawn` fires \
-`coily dispatch` for each approved prompt, one at a time, with Kai's go/no-go \
+`coily dispatch headless` for each approved prompt, one at a time, with Kai's go/no-go \
 between each one.
 
 Args: pass `tickets` as a list of `{ ref, title? }` where ref is \
