@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/autonomy/metrics", get(api::autonomy_metrics))
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
+        .route("/api/sessions", get(api::sessions))
         .fallback(not_found_json)
         .with_state(state);
     match mcp_router {

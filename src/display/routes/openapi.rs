@@ -34,6 +34,16 @@ pub async fn spec() -> impl IntoResponse {
                     "responses": {"200": {"description": "List of action-required items", "content": {"application/json": {}}}}
                 }
             },
+            "/api/sessions": {
+                "get": {
+                    "summary": "All sessions",
+                    "description": "Every session in the cache (no recency cap) as `Vec<SessionWithRepos>`. Consumer-shaped for the session-lattice puller. Honors `If-None-Match` against the `scan_version` ETag.",
+                    "responses": {
+                        "200": {"description": "All sessions", "content": {"application/json": {}}},
+                        "304": {"description": "Not Modified, ETag matched"}
+                    }
+                }
+            },
             "/api/scan-version": {
                 "get": {
                     "summary": "Cheapest 'did anything change' check",

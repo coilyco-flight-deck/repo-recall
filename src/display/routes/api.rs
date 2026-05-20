@@ -120,6 +120,30 @@ pub async fn scan_version(State(state): State<AppState>, headers: HeaderMap) -> 
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SessionsResponse {
+    pub sessions: Vec<crate::db::SessionWithRepos>,
+    pub generated_at: i64,
+    pub scan_version: u64,
+}
+
+/// `GET /api/sessions` — every session in the cache as `Vec<SessionWithRepos>`,
+/// unbounded by recency. ETag keyed on `scan_version`.
+///
+/// Consumer: coilysiren/session-lattice puller (coilysiren/repo-recall#220).
+pub async fn sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let cache = state.cache_db.clone();
+    let sessions = tokio::task::spawn_blocking(move || cache.list_sessions().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    let body = SessionsResponse {
+        sessions,
+        generated_at: chrono::Utc::now().timestamp(),
+        scan_version: state.scan_version.load(Ordering::Acquire),
+    };
+    json_with_etag(&headers, body.scan_version, &body)
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RefreshSyncResponse {
     pub scan_version: u64,
     pub last_scan: Option<i64>,

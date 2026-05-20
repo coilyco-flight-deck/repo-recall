@@ -769,6 +769,28 @@ impl CacheDb {
         Ok(out)
     }
 
+    pub fn list_sessions(&self) -> Result<Vec<SessionWithRepos>> {
+        let read = self.db.begin_read()?;
+        let by_ts = read.open_table(SESSIONS_BY_STARTED_AT)?;
+        let sessions_t = read.open_table(SESSIONS)?;
+        let mut out: Vec<Session> = Vec::new();
+        for row in by_ts.iter()?.rev() {
+            let (k, _) = row?;
+            let (_ts, sid) = k.value();
+            let Some(g) = sessions_t.get(sid)? else {
+                continue;
+            };
+            let s: Session = serde_json::from_slice(g.value())?;
+            out.push(s);
+        }
+        let mut with_repos = Vec::with_capacity(out.len());
+        for s in out {
+            let repos = self.repos_for_session(s.id)?;
+            with_repos.push(SessionWithRepos { session: s, repos });
+        }
+        Ok(with_repos)
+    }
+
     pub fn recent_sessions(&self, limit: i64) -> Result<Vec<SessionWithRepos>> {
         let read = self.db.begin_read()?;
         let by_ts = read.open_table(SESSIONS_BY_STARTED_AT)?;
