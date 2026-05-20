@@ -149,7 +149,6 @@ const META_NEXT_UNCOMMITTED: &str = "next_uncommitted_id";
 const META_NEXT_ACTIVE_REPO: &str = "next_active_repo_id";
 const META_NEXT_AUDIT_EVENT: &str = "next_audit_event_id";
 const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
-const META_NEXT_DISPATCH: &str = "next_dispatch_id";
 const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
 const META_NEXT_PR_RECORD: &str = "next_pr_record_id";
 const META_NEXT_ISSUE_RECORD: &str = "next_issue_record_id";
@@ -2025,44 +2024,6 @@ impl CacheWriter<'_> {
             ),
             (),
         )?;
-        Ok(u64_to_id(id))
-    }
-
-    /// Insert one parsed dispatch row into the cache. Each `(repo_id,
-    /// file_path)` pair must be unique — the caller controls this by
-    /// scanning a single directory per repo. Returns the assigned id.
-    pub fn insert_dispatch(
-        &self,
-        repo_id: i64,
-        rec: &crate::ingest::docs::repo_dispatch::DispatchRecord,
-    ) -> Result<i64> {
-        let id = next_id(self.txn, META_NEXT_DISPATCH)?;
-        let row = DispatchRow {
-            id: u64_to_id(id),
-            repo_id,
-            file_path: rec.file_path.clone(),
-            slug: rec.slug.clone(),
-            issue_refs: rec.issue_refs.clone(),
-            score: rec.score,
-            autonomy_confidence: rec.autonomy_confidence,
-            autonomy_confidence_basis: rec.autonomy_confidence_basis.clone(),
-            prompt_hash: rec.prompt_hash.clone(),
-            dispatched_at: rec.dispatched_at,
-            tracking_issue: rec.tracking_issue.clone(),
-        };
-        let bytes = serde_json::to_vec(&row)?;
-        self.txn
-            .open_table(DISPATCHES)?
-            .insert(id, bytes.as_slice())?;
-        // Negate dispatched_at so a forward scan returns newest-first;
-        // rows without a timestamp use i64::MAX so they sort last.
-        let sort_key = match rec.dispatched_at {
-            Some(t) => -t,
-            None => i64::MAX,
-        };
-        self.txn
-            .open_table(DISPATCHES_BY_REPO)?
-            .insert((id_to_u64(repo_id), sort_key, id), ())?;
         Ok(u64_to_id(id))
     }
 

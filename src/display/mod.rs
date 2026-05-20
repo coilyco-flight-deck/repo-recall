@@ -4,6 +4,5 @@
 //! grid. Business logic lives in `process`, not here. See issue #92 for
 //! the design.
 
-pub mod dispatch_artifacts;
 pub mod mcp;
 pub mod routes;

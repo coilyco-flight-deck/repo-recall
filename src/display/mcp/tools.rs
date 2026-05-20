@@ -260,15 +260,10 @@ pub async fn action_required(
     _extra: RequestHandlerExtra,
 ) -> pmcp::Result<Value> {
     let cache = state.cache_db.clone();
-    let stale_after = state.stale_ask_threshold_secs;
-    let (repos, dispatch_sigs) = tokio::task::spawn_blocking(move || {
-        (
-            cache.list_repos_with_counts().unwrap_or_default(),
-            cache.dispatch_signals(stale_after).unwrap_or_default(),
-        )
-    })
-    .await
-    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?;
+    let repos =
+        tokio::task::spawn_blocking(move || cache.list_repos_with_counts().unwrap_or_default())
+            .await
+            .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?;
 
     let mut items = Vec::new();
     for r in &repos {
@@ -280,20 +275,6 @@ pub async fn action_required(
                 repo_path: r.path.clone(),
                 signal: sig.signal,
                 detail: sig.detail,
-            });
-        }
-    }
-    let repo_lookup: std::collections::HashMap<i64, &db::Repo> =
-        repos.iter().map(|r| (r.id, r)).collect();
-    for s in &dispatch_sigs {
-        if let Some(r) = repo_lookup.get(&s.repo_id) {
-            items.push(ActionRequiredEntry {
-                id: format!("{}:{}", s.repo_id, s.signal),
-                repo_id: s.repo_id,
-                repo_name: r.name.clone(),
-                repo_path: r.path.clone(),
-                signal: s.signal,
-                detail: s.detail.clone(),
             });
         }
     }
@@ -334,74 +315,6 @@ pub async fn ticket_history(
             .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?;
 
     serde_json::to_value(history).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
-}
-
-// -----------------------------------------------------------------------------
-// recall_record_dispatch
-// -----------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RecordDispatchArgs {
-    /// Repo ID from `recall_dashboard`.
-    pub repo_id: i64,
-    /// `["owner/repo#N", ...]` cited tickets.
-    pub issue_refs: Vec<String>,
-    pub score: Option<i64>,
-    pub autonomy_confidence: Option<i64>,
-    pub autonomy_confidence_basis: Option<String>,
-    /// `"owner/repo#M"` for the thin tracking issue, if one exists.
-    pub tracking_issue: Option<String>,
-    /// The verbatim prompt body.
-    pub prompt: String,
-    /// Optional override for the dispatch slug.
-    pub slug: Option<String>,
-}
-
-/// Emit a new dispatch artifact (#92, #107). Writes a write-once
-/// markdown file inside the repo at `docs/repo-dispatch/<slug>.md`
-/// and mirrors it to `~/.repo-recall/dispatch/<repo>/<slug>.md` for
-/// pollable consumption.
-pub async fn record_dispatch(
-    state: AppState,
-    args: RecordDispatchArgs,
-    _extra: RequestHandlerExtra,
-) -> pmcp::Result<Value> {
-    let cache = state.cache_db.clone();
-    let repo_id = args.repo_id;
-    let repo = tokio::task::spawn_blocking(move || cache.get_repo(repo_id))
-        .await
-        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-        .map_err(|e| pmcp::Error::internal(format!("db error: {e}")))?
-        .ok_or_else(|| pmcp::Error::not_found(format!("repo {repo_id} not found")))?;
-    let req = crate::display::dispatch_artifacts::EmitDispatchRequest {
-        issue_refs: args.issue_refs,
-        score: args.score,
-        autonomy_confidence: args.autonomy_confidence,
-        autonomy_confidence_basis: args.autonomy_confidence_basis,
-        tracking_issue: args.tracking_issue,
-        prompt: args.prompt,
-        slug: args.slug,
-    };
-    let repo_path = std::path::PathBuf::from(&repo.path);
-    let repo_name = repo.name.clone();
-    let resp = tokio::task::spawn_blocking(move || {
-        crate::display::dispatch_artifacts::emit_dispatch(&repo_path, &repo_name, &req)
-    })
-    .await
-    .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-    .map_err(|e| match e {
-        crate::display::dispatch_artifacts::EmitError::AlreadyExists(p) => {
-            pmcp::Error::validation(format!("dispatch already exists: {p}"))
-        }
-        crate::display::dispatch_artifacts::EmitError::NoIssueRefs
-        | crate::display::dispatch_artifacts::EmitError::InvalidRef(_) => {
-            pmcp::Error::validation(format!("invalid dispatch request: {e}"))
-        }
-        crate::display::dispatch_artifacts::EmitError::Io(_) => {
-            pmcp::Error::internal(format!("emit io: {e}"))
-        }
-    })?;
-    serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
 }
 
 // -----------------------------------------------------------------------------
@@ -482,107 +395,4 @@ pub async fn open_structural_asks(
     let n = asks.len();
     serde_json::to_value(json!({ "count": n, "asks": asks }))
         .map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
-}
-
-// -----------------------------------------------------------------------------
-// recall_emit_structural_ask
-// -----------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct EmitStructuralAskArgs {
-    pub title: String,
-    pub ask_text: String,
-    /// `["owner/repo#N", ...]` — tickets that would be unblocked.
-    pub lifts: Vec<String>,
-    pub slug: Option<String>,
-}
-
-/// Draft a new structural-context ask (#92 phase 5, #105). Writes a
-/// write-once markdown file under `~/.repo-recall/structural-asks/`
-/// for Kai to review and post as a `structural-ask`-labeled issue.
-/// Free text is scrubbed via `process::sanitize` before write.
-pub async fn emit_structural_ask(
-    _state: AppState,
-    args: EmitStructuralAskArgs,
-    _extra: RequestHandlerExtra,
-) -> pmcp::Result<Value> {
-    use crate::process::structural_asks::{
-        emit_structural_ask as emit, EmitError, EmitStructuralAskRequest,
-    };
-    let req = EmitStructuralAskRequest {
-        title: args.title,
-        ask_text: args.ask_text,
-        lifts: args.lifts,
-        slug: args.slug,
-    };
-    let resp = tokio::task::spawn_blocking(move || emit(&req))
-        .await
-        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-        .map_err(|e| match e {
-            EmitError::AlreadyExists(p) => {
-                pmcp::Error::validation(format!("structural ask already drafted: {p}"))
-            }
-            EmitError::EmptyTitle
-            | EmitError::EmptyAskText
-            | EmitError::NoLifts
-            | EmitError::InvalidRef(_) => {
-                pmcp::Error::validation(format!("invalid structural ask: {e}"))
-            }
-            EmitError::Io(_) => pmcp::Error::internal(format!("emit io: {e}")),
-        })?;
-    serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
-}
-
-// -----------------------------------------------------------------------------
-// recall_emit_agents_drift_proposal
-// -----------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct EmitAgentsDriftArgs {
-    pub repo_slug: String,
-    pub title: String,
-    pub proposed_rule: String,
-    /// `["owner/repo#N", ...]` — closed dispatches whose convergence
-    /// motivates the rule.
-    pub supporting_dispatches: Vec<String>,
-    pub slug: Option<String>,
-}
-
-/// Draft an AGENTS.md drift proposal (#92 phase 5+, #106). Writes a
-/// write-once markdown file under
-/// `~/.repo-recall/agents-drift/<repo>/<slug>.md` for Kai to review
-/// and post as a PR against `<repo>/AGENTS.md`. Free text is scrubbed
-/// via `process::sanitize` before write.
-pub async fn emit_agents_drift_proposal(
-    _state: AppState,
-    args: EmitAgentsDriftArgs,
-    _extra: RequestHandlerExtra,
-) -> pmcp::Result<Value> {
-    use crate::process::agents_drift::{
-        emit_drift_proposal as emit, EmitDriftProposalRequest, EmitError,
-    };
-    let req = EmitDriftProposalRequest {
-        repo_slug: args.repo_slug,
-        title: args.title,
-        proposed_rule: args.proposed_rule,
-        supporting_dispatches: args.supporting_dispatches,
-        slug: args.slug,
-    };
-    let resp = tokio::task::spawn_blocking(move || emit(&req))
-        .await
-        .map_err(|e| pmcp::Error::internal(format!("join error: {e}")))?
-        .map_err(|e| match e {
-            EmitError::AlreadyExists(p) => {
-                pmcp::Error::validation(format!("agents-drift proposal already drafted: {p}"))
-            }
-            EmitError::EmptyRepoSlug
-            | EmitError::EmptyTitle
-            | EmitError::EmptyRule
-            | EmitError::NoSupportingDispatches
-            | EmitError::InvalidRef(_) => {
-                pmcp::Error::validation(format!("invalid agents-drift proposal: {e}"))
-            }
-            EmitError::Io(_) => pmcp::Error::internal(format!("emit io: {e}")),
-        })?;
-    serde_json::to_value(resp).map_err(|e| pmcp::Error::internal(format!("serialize: {e}")))
 }

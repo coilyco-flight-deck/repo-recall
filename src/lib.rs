@@ -47,9 +47,6 @@ pub struct AppState {
     /// `search_idx` virtual table on every refresh. Reader still flows
     /// through SQLite until the redb migration's step 3 flips it.
     pub search_index: search::SearchIndex,
-    /// In-memory store of in-flight autonomous-dispatch sessions. See
-    /// `display::mcp::dispatch`. Dropped on restart by design.
-    pub dispatch_sessions: display::mcp::dispatch::DispatchSessions,
     /// Minimum seconds between labeled-issue GraphQL ingest passes. Sourced
     /// from `refresh.per_source.github_remote_labeled` (default 3600s). The
     /// labeled-issue ingest is the only sanctioned GraphQL call site, and

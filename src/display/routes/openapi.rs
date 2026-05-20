@@ -71,10 +71,6 @@ pub async fn spec() -> impl IntoResponse {
                     "responses": {"200": {"description": "Structural-ask list", "content": {"application/json": {}}}}
                 }
             },
-            "/api/repos/{repo_id}/dispatches": {
-                "get": {"summary": "List dispatches for a repo", "responses": {"200": {"description": "Dispatch list", "content": {"application/json": {}}}}},
-                "post": {"summary": "Emit a dispatch artifact for a repo", "responses": {"200": {"description": "Dispatch result", "content": {"application/json": {}}}}}
-            },
             "/api/repos/{repo_id}/tickets/{issue_number}/history": {
                 "get": {
                     "summary": "Ticket history for a repo issue",

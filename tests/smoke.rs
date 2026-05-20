@@ -44,7 +44,6 @@ async fn boot_with(
         my_git_email: Arc::new(Mutex::new(None)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
-        dispatch_sessions: repo_recall::display::mcp::dispatch::new_store(),
         labeled_ingest_interval_secs: 3600,
         last_labeled_ingest: Arc::new(Mutex::new(None)),
         stale_ask_threshold_secs: 7 * 86_400,

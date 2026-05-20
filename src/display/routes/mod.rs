@@ -28,10 +28,6 @@ pub fn router(state: AppState) -> Router {
             "/api/repos/{repo_id}/tickets/{issue_number}/history",
             get(api::ticket_history),
         )
-        .route(
-            "/api/repos/{repo_id}/dispatches",
-            get(api::repo_dispatches).post(api::emit_dispatch),
-        )
         .route("/api/structural-asks", get(api::structural_asks))
         .route("/api/autonomy/metrics", get(api::autonomy_metrics))
         .route("/api/refresh", post(api::refresh_sync))

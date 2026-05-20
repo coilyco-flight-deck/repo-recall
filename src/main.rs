@@ -133,7 +133,6 @@ async fn main() -> miette::Result<()> {
         my_git_email: Arc::new(Mutex::new(my_git_email)),
         scan_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         search_index,
-        dispatch_sessions: repo_recall::display::mcp::dispatch::new_store(),
         labeled_ingest_interval_secs,
         last_labeled_ingest: Arc::new(Mutex::new(None)),
         stale_ask_threshold_secs,

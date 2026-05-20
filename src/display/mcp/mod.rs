@@ -8,8 +8,8 @@
 //! - `recall_search` — unified search.
 //! - `recall_action_required` — thin orchestrator slice.
 //! - `recall_ticket_history` — sessions + commits touching one issue.
-//! - `recall_autonomy_metrics` — AFK success rate from dispatch ledger.
-//! - `recall_record_dispatch` — emit a new write-once dispatch artifact.
+//! - `recall_autonomy_metrics` — AFK success rate from closed tracking issues.
+//! - `recall_open_structural_asks` — list open structural-ask-labeled issues.
 //! - `recall_refresh` — trigger a rescan.
 
 use std::sync::atomic::Ordering;
@@ -22,7 +22,6 @@ use tokio::sync::Mutex;
 
 use crate::AppState;
 
-pub mod dispatch;
 mod tools;
 
 /// Build the MCP `Server` (tools) without binding any transport. Shared by
@@ -113,20 +112,6 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         )
     };
 
-    let record_dispatch = {
-        let state = state.clone();
-        TypedTool::new("recall_record_dispatch", move |args, extra| {
-            let s = state.clone();
-            Box::pin(tools::record_dispatch(s, args, extra))
-        })
-        .with_description(
-            "Emit a new write-once dispatch artifact. Writes both the in-repo \
-             docs/repo-dispatch/<slug>.md (canonical, gets committed by the caller) \
-             and ~/.repo-recall/dispatch/<repo>/<slug>.md (pollable mirror for \
-             sub-agent runners). Refuses to overwrite an existing slug.",
-        )
-    };
-
     let open_structural_asks = {
         let state = state.clone();
         TypedTool::new("recall_open_structural_asks", move |args, extra| {
@@ -138,107 +123,6 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
              indexed workspace. Read this before drafting a new ask so the planner \
              can refuse to re-ask a question already on the list.",
         )
-    };
-
-    let emit_structural_ask = {
-        let state = state.clone();
-        TypedTool::new("recall_emit_structural_ask", move |args, extra| {
-            let s = state.clone();
-            Box::pin(tools::emit_structural_ask(s, args, extra))
-        })
-        .with_description(
-            "Draft a structural-context ask. Writes a write-once markdown file \
-             under ~/.repo-recall/structural-asks/<slug>.md for review and \
-             posting as a structural-ask-labeled issue. Free text is sanitized \
-             before write. Refuses to overwrite an existing slug.",
-        )
-    };
-
-    let emit_agents_drift = {
-        let state = state.clone();
-        TypedTool::new("recall_emit_agents_drift_proposal", move |args, extra| {
-            let s = state.clone();
-            Box::pin(tools::emit_agents_drift_proposal(s, args, extra))
-        })
-        .with_description(
-            "Draft an AGENTS.md drift proposal. Writes a write-once markdown file \
-             under ~/.repo-recall/agents-drift/<repo>/<slug>.md proposing a new \
-             rule for the repo's AGENTS.md, with the supporting dispatches inline. \
-             Free text is sanitized before write. Refuses to overwrite an existing \
-             slug.",
-        )
-    };
-
-    let dispatch_begin = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_begin", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::begin(s, args, extra))
-        })
-        .with_description(dispatch::BEGIN_DESCRIPTION)
-    };
-
-    let dispatch_triage = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_triage", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::triage(s, args, extra))
-        })
-        .with_description(dispatch::TRIAGE_DESCRIPTION)
-    };
-
-    let dispatch_score_next = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_score_next", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::score_next(s, args, extra))
-        })
-        .with_description(dispatch::SCORE_NEXT_DESCRIPTION)
-    };
-
-    let dispatch_score_set = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_score_set", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::score_set(s, args, extra))
-        })
-        .with_description(dispatch::SCORE_SET_DESCRIPTION)
-    };
-
-    let dispatch_emit_plan = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_emit_plan", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::emit_plan(s, args, extra))
-        })
-        .with_description(dispatch::EMIT_PLAN_DESCRIPTION)
-    };
-
-    let dispatch_emit_commit = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_emit_commit", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::emit_commit(s, args, extra))
-        })
-        .with_description(dispatch::EMIT_COMMIT_DESCRIPTION)
-    };
-
-    let dispatch_spawn = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_spawn", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::spawn(s, args, extra))
-        })
-        .with_description(dispatch::SPAWN_DESCRIPTION)
-    };
-
-    let dispatch_done = {
-        let state = state.clone();
-        TypedTool::new("recall_dispatch_done", move |args, extra| {
-            let s = state.clone();
-            Box::pin(dispatch::done(s, args, extra))
-        })
-        .with_description(dispatch::DONE_DESCRIPTION)
     };
 
     let refresh_tool = {
@@ -264,18 +148,7 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         .tool("recall_action_required", action_required)
         .tool("recall_ticket_history", ticket_history)
         .tool("recall_autonomy_metrics", autonomy_metrics)
-        .tool("recall_record_dispatch", record_dispatch)
         .tool("recall_open_structural_asks", open_structural_asks)
-        .tool("recall_emit_structural_ask", emit_structural_ask)
-        .tool("recall_emit_agents_drift_proposal", emit_agents_drift)
-        .tool("recall_dispatch_begin", dispatch_begin)
-        .tool("recall_dispatch_triage", dispatch_triage)
-        .tool("recall_dispatch_score_next", dispatch_score_next)
-        .tool("recall_dispatch_score_set", dispatch_score_set)
-        .tool("recall_dispatch_emit_plan", dispatch_emit_plan)
-        .tool("recall_dispatch_emit_commit", dispatch_emit_commit)
-        .tool("recall_dispatch_spawn", dispatch_spawn)
-        .tool("recall_dispatch_done", dispatch_done)
         .tool("recall_refresh", refresh_tool)
         .build()
         .map_err(|e| anyhow::anyhow!("Server::build failed: {e:?}"))?;

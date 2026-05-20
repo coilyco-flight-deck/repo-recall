@@ -16,15 +16,15 @@ Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repo
 
 ## Action-required surfacing
 
-Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale. Plus dispatch signals: `autonomous_block`, `stale_ask` (default 7-day threshold). Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
+Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale. Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
 
 ## Activity ranking
 
 Composite activity score `Σ ln(1 + xᵢ / Mᵢ)` across commits in last 30 days, session count, authors, and churn, normalized against corpus maxes. Action-required hard-sorts above the score. Vendored repos and `.repo-recall-ignore`-flagged repos suppress signals.
 
-## Dispatch substrate
+## Autonomy rollup
 
-Planning surface for recall-dispatch (AFK planner). Per-doc ingest per repo (README, AGENTS, FEATURES, AUTONOMY) plus the `docs/repo-dispatch/` frontmatter contract. Labeled-issue ingest across repos for `structural-ask`, `autonomous-block`, `repo-dispatch`. Write-once dispatch emitter at `POST /api/repos/{id}/dispatches`. Per-repo autonomy rollup at `GET /api/autonomy/metrics` derives successes / abandons / blocks / open from closed dispatch tracking issues.
+Per-repo AFK success-rate at `GET /api/autonomy/metrics`. Classifies closed `repo-dispatch`-labeled tracking issues into success / abandon / block by joining against commit issue-refs. Returns overall plus per-repo rates with sample sizes. Labeled-issue ingest across repos surfaces `structural-ask` and `repo-dispatch` labels for the rollup and the dashboard.
 
 ## Issue-ref index
 
@@ -36,7 +36,7 @@ Every JSON response carries `ETag: "<scan_version>"` where `scan_version` is the
 
 ## MCP co-server
 
-MCP server runs in the same process as the HTTP server via pmcp 2.6 stdio plus a streamable-HTTP bridge at `/mcp/*`. Tools mirror the HTTP surface: dashboard, repo, session, search, action-required, ticket-history, autonomy-metrics, record-dispatch, refresh.
+MCP server runs in the same process as the HTTP server via pmcp 2.6 stdio plus a streamable-HTTP bridge at `/mcp/*`. Tools mirror the HTTP surface: dashboard, repo, session, search, action-required, ticket-history, autonomy-metrics, open-structural-asks, refresh.
 
 ## Cache + indexes
 

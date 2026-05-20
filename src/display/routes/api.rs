@@ -51,14 +51,10 @@ pub struct ActionRequiredResponse {
 /// polling client gets `304` between scans.
 pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cache = state.cache_db.clone();
-    let stale_after = state.stale_ask_threshold_secs;
-    let (repos, dispatch_sigs) = tokio::task::spawn_blocking(move || {
-        let repos = cache.list_repos_with_counts().unwrap_or_default();
-        let sigs = cache.dispatch_signals(stale_after).unwrap_or_default();
-        (repos, sigs)
-    })
-    .await
-    .unwrap_or_default();
+    let repos =
+        tokio::task::spawn_blocking(move || cache.list_repos_with_counts().unwrap_or_default())
+            .await
+            .unwrap_or_default();
 
     let mut items = Vec::new();
     for r in &repos {
@@ -71,23 +67,6 @@ pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) 
                 remote_url: r.remote_url.clone(),
                 signal: sig.signal,
                 detail: sig.detail,
-            });
-        }
-    }
-    // Append dispatch-substrate signals (#92, #115). Look up repo
-    // identity per signal so the JSON envelope stays self-contained.
-    let repo_lookup: std::collections::HashMap<i64, &crate::db::Repo> =
-        repos.iter().map(|r| (r.id, r)).collect();
-    for s in &dispatch_sigs {
-        if let Some(r) = repo_lookup.get(&s.repo_id) {
-            items.push(ActionRequiredItem {
-                id: format!("{}:{}", s.repo_id, s.signal),
-                repo_id: s.repo_id,
-                repo_name: r.name.clone(),
-                repo_path: r.path.clone(),
-                remote_url: r.remote_url.clone(),
-                signal: s.signal,
-                detail: s.detail.clone(),
             });
         }
     }
@@ -177,48 +156,6 @@ pub async fn refresh_sync(State(state): State<AppState>) -> Response {
 // Signal derivation lives in `crate::signals` so both the HTTP and MCP
 // surfaces (`routes::api`, `mcp::tools`) call into one helper.
 
-/// `POST /api/repos/{id}/dispatches` - emit a new dispatch artifact
-/// (#92, #107). Body shape is `EmitDispatchRequest`. Writes the
-/// write-once file in-repo at `docs/repo-dispatch/<slug>.md` and
-/// mirrors to `~/.repo-recall/dispatch/<repo>/<slug>.md` for the
-/// pollable consumer surface. Returns 409 if the slug already exists,
-/// 422 on invalid input.
-pub async fn emit_dispatch(
-    State(state): State<AppState>,
-    Path(repo_id): Path<i64>,
-    axum::Json(req): axum::Json<crate::display::dispatch_artifacts::EmitDispatchRequest>,
-) -> Response {
-    let cache = state.cache_db.clone();
-    let repo = match tokio::task::spawn_blocking(move || cache.get_repo(repo_id)).await {
-        Ok(Ok(Some(r))) => r,
-        Ok(Ok(None)) => return axum::http::StatusCode::NOT_FOUND.into_response(),
-        _ => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let repo_path = std::path::PathBuf::from(&repo.path);
-    let repo_name = repo.name.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        crate::display::dispatch_artifacts::emit_dispatch(&repo_path, &repo_name, &req)
-    })
-    .await;
-    use crate::display::dispatch_artifacts::EmitError;
-    match result {
-        Ok(Ok(resp)) => axum::Json(resp).into_response(),
-        Ok(Err(EmitError::AlreadyExists(p))) => {
-            (axum::http::StatusCode::CONFLICT, p).into_response()
-        }
-        Ok(Err(EmitError::NoIssueRefs)) | Ok(Err(EmitError::InvalidRef(_))) => (
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid dispatch request",
-        )
-            .into_response(),
-        Ok(Err(EmitError::Io(e))) => {
-            tracing::warn!("emit_dispatch io: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
 /// `GET /api/autonomy/metrics` - AFK success-rate rollup from closed
 /// repo-dispatch tracking issues (#92, #116). ETag on `scan_version`.
 pub async fn autonomy_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -256,31 +193,6 @@ pub async fn structural_asks(State(state): State<AppState>, headers: HeaderMap) 
             "label": "structural-ask",
             "state": "open",
             "asks": rows,
-            "scan_version": v,
-        }),
-    )
-}
-
-/// `GET /api/repos/{id}/dispatches` - parsed dispatch records from this
-/// repo's `docs/repo-dispatch/` directory, newest-first (#92, #113).
-/// JSON-only, ETag on `scan_version`.
-pub async fn repo_dispatches(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(repo_id): Path<i64>,
-) -> Response {
-    let cache = state.cache_db.clone();
-    let rows = match tokio::task::spawn_blocking(move || cache.dispatches_for_repo(repo_id)).await {
-        Ok(Ok(r)) => r,
-        _ => Vec::new(),
-    };
-    let v = state.scan_version.load(Ordering::Acquire);
-    json_with_etag(
-        &headers,
-        v,
-        &serde_json::json!({
-            "repo_id": repo_id,
-            "dispatches": rows,
             "scan_version": v,
         }),
     )
