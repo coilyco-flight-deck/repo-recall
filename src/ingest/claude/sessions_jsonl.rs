@@ -6,6 +6,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+use crate::process::sanitize::{scrub, SanitizeSource};
+
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
     pub session_uuid: String,
@@ -246,7 +248,10 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
             if let Some(lp) = raw.last_prompt.as_deref() {
                 let trimmed = lp.trim();
                 if !trimmed.is_empty() {
-                    last_prompt = Some(truncate(trimmed, 200));
+                    // Scrub before persistence: the last prompt is a prompt
+                    // input and can carry tokens, keys, or vault paths (#243).
+                    let scrubbed = scrub(trimmed, SanitizeSource::SessionText);
+                    last_prompt = Some(truncate(&scrubbed, 200));
                 }
             }
         }
@@ -753,7 +758,7 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
 fn walk_content(v: &serde_json::Value, turn: &mut Turn) {
     match v {
         serde_json::Value::String(s) if !s.trim().is_empty() => {
-            turn.texts.push(s.clone());
+            turn.texts.push(scrub(s, SanitizeSource::SessionText));
         }
         serde_json::Value::Array(arr) => {
             for block in arr {
@@ -764,12 +769,15 @@ fn walk_content(v: &serde_json::Value, turn: &mut Turn) {
                 match ty {
                     "text" => {
                         if let Some(t) = obj.get("text").and_then(|x| x.as_str()) {
-                            turn.texts.push(t.to_string());
+                            // Prompt input / model output: scrub at ingest
+                            // before persistence or indexing (#243).
+                            turn.texts.push(scrub(t, SanitizeSource::SessionText));
                         }
                     }
                     "thinking" => {
                         if let Some(t) = obj.get("thinking").and_then(|x| x.as_str()) {
-                            turn.thinking.push(t.to_string());
+                            // Thinking steps get the identical scrub (#243).
+                            turn.thinking.push(scrub(t, SanitizeSource::SessionText));
                         }
                     }
                     "tool_use" => {
@@ -811,5 +819,59 @@ fn walk_content(v: &serde_json::Value, turn: &mut Turn) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_turn() -> Turn {
+        Turn {
+            role: TurnRole::Assistant,
+            timestamp: None,
+            texts: Vec::new(),
+            tool_uses: Vec::new(),
+            tool_results: Vec::new(),
+            thinking: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn walk_content_scrubs_text_blocks() {
+        let v = serde_json::json!([
+            {"type": "text", "text": "deploy with ghp_AAAABBBBCCCCDDDDEEEEFFFF now"},
+        ]);
+        let mut turn = empty_turn();
+        walk_content(&v, &mut turn);
+        assert_eq!(turn.texts.len(), 1);
+        assert!(!turn.texts[0].contains("ghp_AAAA"), "{:?}", turn.texts);
+        assert!(turn.texts[0].contains("[REDACTED:github-token]"));
+    }
+
+    #[test]
+    fn walk_content_scrubs_thinking_blocks() {
+        let v = serde_json::json!([
+            {"type": "thinking", "thinking": "the key is sk-ant-api03-secret123"},
+        ]);
+        let mut turn = empty_turn();
+        walk_content(&v, &mut turn);
+        assert_eq!(turn.thinking.len(), 1);
+        assert!(
+            !turn.thinking[0].contains("sk-ant-api03"),
+            "{:?}",
+            turn.thinking
+        );
+        assert!(turn.thinking[0].contains("[REDACTED:anthropic-key]"));
+    }
+
+    #[test]
+    fn walk_content_scrubs_string_content() {
+        let v = serde_json::json!("ssh into kai-server please");
+        let mut turn = empty_turn();
+        walk_content(&v, &mut turn);
+        assert_eq!(turn.texts.len(), 1);
+        assert!(!turn.texts[0].contains("kai-server"), "{:?}", turn.texts);
+        assert!(turn.texts[0].contains("[REDACTED:internal-host]"));
     }
 }
