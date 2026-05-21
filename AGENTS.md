@@ -29,7 +29,7 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 - **Data sources stay separate.** sessions + session_repos + commits reference `repos.id` but don't unify. Cross-source views are query-time.
 - **Activity categories**: `Historical`, `LocalState`, `RemoteState`. Drives refresh placement and render.
 - **Activity score**: `Σ ln(1 + xᵢ / Mᵢ)` where `Mᵢ` is corpus max. Action-required hard-sorts above.
-- **`is_action_required` is curated**: failing CI, dirty tree, in-progress git op, detached HEAD. Ahead/behind + stash are informational.
+- **`is_action_required` is curated**: dirty tree, in-progress git op, detached HEAD. Ahead/behind + stash are informational.
 - **Remote pass runs second.** Main refresh is local + blocking in one `spawn_blocking`. Remote uses tokio tasks + bounded semaphore (8). Failures swallowed at `debug!`.
 - **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath).
 - **Git log shelled out.** `git log --all --no-merges` subprocess, NUL-separated. No libgit2.
@@ -40,7 +40,7 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 
 ## Privacy
 
-Metadata + 200-char summary only, not transcripts. Loopback by default; `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache to `$TMPDIR`. Outbound limited to `gh run list`.
+Metadata + 200-char summary only, not transcripts. Loopback by default; `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache to `$TMPDIR`. Outbound limited to the GitHub REST API for PR + issue counts.
 
 ## Release + post-push
 

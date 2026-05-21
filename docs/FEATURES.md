@@ -10,13 +10,13 @@ Joins three primary sources into one queryable surface, all on the same host:
 
 - **Claude Code sessions** parsed from `~/.claude/projects/**/*.jsonl`. Metadata, 200-char summaries, malformed lines skipped.
 - **git** via `git log --all --no-merges` and working-tree status. Untracked + modified counts, stash, branch, ahead/behind, in-progress op, detached HEAD.
-- **GitHub** via `gh` REST: CI status, open and draft PRs, issues, review queue, deploy workflow status. No GraphQL.
+- **GitHub** via `gh` REST: open and draft PRs, issues, review queue. No GraphQL.
 
 Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repos.match_type` is the extension point.
 
 ## Action-required surfacing
 
-Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale. Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
+Curated set of signals that float to the top of any ranking: dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues. Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
 
 ## Activity ranking
 
@@ -44,7 +44,7 @@ Background refresh on a configurable interval (default 150s, set 0 to disable). 
 
 ## Privacy posture
 
-Local-only by construction. Loopback bind only. Cache lives in `$TMPDIR`. Stores metadata plus 200-char summaries; never transcripts. Outbound limited to `gh run list` for CI status, reusing the local `gh` auth.
+Local-only by construction. Loopback bind only. Cache lives in `$TMPDIR`. Stores metadata plus 200-char summaries; never transcripts. Outbound limited to the GitHub REST API for PR and issue counts, reusing the local `gh` auth.
 
 ## Distribution
 

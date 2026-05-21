@@ -8,7 +8,6 @@ export type Repo = {
   untracked_files: number;
   modified_files: number;
   authors_30d: number;
-  ci_status: string | null;
   commits_ahead: number;
   commits_behind: number;
   stash_count: number;
@@ -22,9 +21,6 @@ export type Repo = {
   prs_mine_no_reviewer: number;
   my_draft_prs: number;
   issues_assigned_to_me: number;
-  deploy_workflow: string | null;
-  deploy_status: string | null;
-  deploy_last_success_ts: number | null;
   remote_url: string | null;
   default_branch: string | null;
   action_required: boolean;

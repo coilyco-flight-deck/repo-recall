@@ -29,8 +29,6 @@ capture() {
 # Note: coily blocks `&` in argv, so query params are split into -F flags.
 capture issues_open      "/repos/$REPO/issues" -F state=open -F per_page=2
 capture pulls_all        "/repos/$REPO/pulls" -F state=all -F per_page=2
-capture actions_runs     "/repos/$REPO/actions/runs" -F per_page=2
-capture actions_runs_branch "/repos/$REPO/actions/runs" -F branch=main -F per_page=1
 capture user             "/user"
 capture user_repos       "/user/repos" -F per_page=2 -F type=owner
 

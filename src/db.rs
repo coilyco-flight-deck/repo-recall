@@ -134,13 +134,6 @@ const ISSUE_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("issue_r
 const ISSUE_RECORDS_BY_REPO_NUMBER: TableDefinition<(u64, i64), u64> =
     TableDefinition::new("issue_records_by_repo_number");
 
-// Recent CI run records from `gh run list --json …`. Source 4 of #155.
-// Keyed by (repo_id, run_id) since the same run can show up on multiple
-// scans before it completes.
-const CI_RUN_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("ci_run_records");
-const CI_RUN_RECORDS_BY_REPO_RUN: TableDefinition<(u64, i64), u64> =
-    TableDefinition::new("ci_run_records_by_repo_run");
-
 const META_NEXT_REPO: &str = "next_repo_id";
 const META_NEXT_SESSION: &str = "next_session_id";
 const META_NEXT_COMMIT: &str = "next_commit_id";
@@ -152,7 +145,6 @@ const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
 const META_NEXT_PR_RECORD: &str = "next_pr_record_id";
 const META_NEXT_ISSUE_RECORD: &str = "next_issue_record_id";
-const META_NEXT_CI_RUN_RECORD: &str = "next_ci_run_record_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
@@ -199,7 +191,6 @@ pub struct Repo {
     pub untracked_files: i64,
     pub modified_files: i64,
     pub authors_30d: i64,
-    pub ci_status: Option<String>,
     pub commits_ahead: i64,
     pub commits_behind: i64,
     pub stash_count: i64,
@@ -213,9 +204,6 @@ pub struct Repo {
     pub prs_mine_no_reviewer: i64,
     pub my_draft_prs: i64,
     pub issues_assigned_to_me: i64,
-    pub deploy_workflow: Option<String>,
-    pub deploy_status: Option<String>,
-    pub deploy_last_success_ts: Option<i64>,
     pub remote_url: Option<String>,
     pub default_branch: Option<String>,
 }
@@ -332,15 +320,6 @@ pub struct UncommittedGroup {
     pub sample: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct CiFailure {
-    pub repo_id: i64,
-    pub repo_name: String,
-    pub repo_path: String,
-    pub remote_url: Option<String>,
-    pub default_branch: Option<String>,
-}
-
 /// One open pull request from `gh api /repos/X/pulls?state=open`.
 /// Source 2 of #155. Body capped + scrubbed before storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,31 +371,6 @@ pub struct IssueRecord {
     /// GitHub and may gain keys; persist as JSON so we don't need a
     /// schema migration when it changes.
     pub reactions_json: String,
-}
-
-/// One CI run from `gh run list --json …`. Source 4 of #155. `jobs` is
-/// the deduplicated list of job names (we parse the full `jobs[]` field
-/// but only retain names — steps + status + conclusion are bulky and can
-/// be surfaced on demand later).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CiRunRecord {
-    pub id: i64,
-    pub repo_id: i64,
-    pub run_id: i64,
-    pub name: String,
-    pub display_title: String,
-    pub head_sha: String,
-    pub head_branch: String,
-    pub run_number: i64,
-    pub event: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub run_started_at: Option<i64>,
-    pub html_url: String,
-    pub run_attempt: i64,
-    pub status: String,
-    pub conclusion: Option<String>,
-    pub jobs: Vec<String>,
 }
 
 /// A reference from a session or commit to a GitHub issue or PR in a
@@ -989,23 +943,6 @@ impl CacheDb {
         });
         groups.truncate(max_repos.max(0) as usize);
         Ok(groups)
-    }
-
-    pub fn failing_ci_repos(&self) -> Result<Vec<CiFailure>> {
-        let mut out: Vec<CiFailure> = Vec::new();
-        for r in self.list_repos_with_counts()? {
-            if r.ci_status.as_deref() == Some("failure") {
-                out.push(CiFailure {
-                    repo_id: r.id,
-                    repo_name: r.name,
-                    repo_path: r.path,
-                    remote_url: r.remote_url,
-                    default_branch: r.default_branch,
-                });
-            }
-        }
-        out.sort_by_key(|r| r.repo_name.to_lowercase());
-        Ok(out)
     }
 
     pub fn counts(&self) -> Result<(i64, i64, i64, i64)> {
@@ -1583,24 +1520,6 @@ impl CacheDb {
         Ok(out)
     }
 
-    /// CI runs for one repo, sorted newest-first by `created_at`.
-    pub fn ci_runs_for_repo(&self, repo_id: i64) -> Result<Vec<CiRunRecord>> {
-        let read = self.db.begin_read()?;
-        let by_key = read.open_table(CI_RUN_RECORDS_BY_REPO_RUN)?;
-        let runs_t = read.open_table(CI_RUN_RECORDS)?;
-        let start = (id_to_u64(repo_id), i64::MIN);
-        let end = (id_to_u64(repo_id), i64::MAX);
-        let mut out = Vec::new();
-        for row in by_key.range(start..=end)? {
-            let (_k, v) = row?;
-            if let Some(g) = runs_t.get(v.value())? {
-                out.push(serde_json::from_slice(g.value())?);
-            }
-        }
-        out.sort_by_key(|r: &CiRunRecord| std::cmp::Reverse(r.created_at));
-        Ok(out)
-    }
-
     /// Return all dispatch records for a repo, newest-first by
     /// `dispatched_at`. Empty when the repo has no `docs/repo-dispatch/`
     /// or all files failed to parse.
@@ -1682,10 +1601,7 @@ impl CacheDb {
     /// Subset of repos eligible for remote-state queries: those with a
     /// known origin URL and default branch. Sorted by most-recent commit
     /// timestamp DESC so the optional cap keeps the active workspace.
-    pub fn remote_targets(
-        &self,
-        target_limit: usize,
-    ) -> Result<Vec<(i64, String, String, String)>> {
+    pub fn remote_targets(&self, target_limit: usize) -> Result<Vec<(i64, String)>> {
         let read = self.db.begin_read()?;
         let mut latest_per_repo: HashMap<u64, i64> = HashMap::new();
         for row in read.open_table(COMMITS_BY_REPO_TS)?.iter()? {
@@ -1696,25 +1612,25 @@ impl CacheDb {
                 *entry = ts;
             }
         }
-        let mut all: Vec<(i64, String, String, String, i64)> = Vec::new();
+        let mut all: Vec<(i64, String, i64)> = Vec::new();
         for row in read.open_table(REPOS)?.iter()? {
             let (_k, v) = row?;
             let r: Repo = serde_json::from_slice(v.value())?;
-            let (Some(url), Some(branch)) = (r.remote_url, r.default_branch) else {
+            let Some(url) = r.remote_url else {
                 continue;
             };
             let latest = *latest_per_repo.get(&id_to_u64(r.id)).unwrap_or(&i64::MIN);
-            all.push((r.id, url, branch, r.path, latest));
+            all.push((r.id, url, latest));
         }
-        all.sort_by_key(|r| std::cmp::Reverse(r.4));
-        let trimmed: Vec<(i64, String, String, String)> = all
+        all.sort_by_key(|r| std::cmp::Reverse(r.2));
+        let trimmed: Vec<(i64, String)> = all
             .into_iter()
             .take(if target_limit == 0 {
                 usize::MAX
             } else {
                 target_limit
             })
-            .map(|(id, url, branch, path, _)| (id, url, branch, path))
+            .map(|(id, url, _)| (id, url))
             .collect();
         Ok(trimmed)
     }
@@ -1765,8 +1681,6 @@ impl CacheWriter<'_> {
         clear_table::<(u64, i64), u64>(self.txn, PR_RECORDS_BY_REPO_NUMBER)?;
         clear_table::<u64, &[u8]>(self.txn, ISSUE_RECORDS)?;
         clear_table::<(u64, i64), u64>(self.txn, ISSUE_RECORDS_BY_REPO_NUMBER)?;
-        clear_table::<u64, &[u8]>(self.txn, CI_RUN_RECORDS)?;
-        clear_table::<(u64, i64), u64>(self.txn, CI_RUN_RECORDS_BY_REPO_RUN)?;
         Ok(())
     }
 
@@ -1795,7 +1709,6 @@ impl CacheWriter<'_> {
             untracked_files: 0,
             modified_files: 0,
             authors_30d: 0,
-            ci_status: None,
             commits_ahead: 0,
             commits_behind: 0,
             stash_count: 0,
@@ -1809,9 +1722,6 @@ impl CacheWriter<'_> {
             prs_mine_no_reviewer: 0,
             my_draft_prs: 0,
             issues_assigned_to_me: 0,
-            deploy_workflow: None,
-            deploy_status: None,
-            deploy_last_success_ts: None,
             remote_url: remote_url.map(str::to_string),
             default_branch: default_branch.map(str::to_string),
         };
@@ -2159,45 +2069,6 @@ impl CacheWriter<'_> {
         Ok(u64_to_id(id))
     }
 
-    /// Upsert one CI run record. Idempotent on (repo_id, run_id).
-    pub fn upsert_ci_run_record(
-        &self,
-        repo_id: i64,
-        rec: &crate::ingest::github::CiRunRecordInput,
-    ) -> Result<i64> {
-        let mut by_key = self.txn.open_table(CI_RUN_RECORDS_BY_REPO_RUN)?;
-        let key = (id_to_u64(repo_id), rec.run_id);
-        if let Some(g) = by_key.get(key)? {
-            return Ok(u64_to_id(g.value()));
-        }
-        let id = next_id(self.txn, META_NEXT_CI_RUN_RECORD)?;
-        let row = CiRunRecord {
-            id: u64_to_id(id),
-            repo_id,
-            run_id: rec.run_id,
-            name: rec.name.clone(),
-            display_title: rec.display_title.clone(),
-            head_sha: rec.head_sha.clone(),
-            head_branch: rec.head_branch.clone(),
-            run_number: rec.run_number,
-            event: rec.event.clone(),
-            created_at: rec.created_at,
-            updated_at: rec.updated_at,
-            run_started_at: rec.run_started_at,
-            html_url: rec.html_url.clone(),
-            run_attempt: rec.run_attempt,
-            status: rec.status.clone(),
-            conclusion: rec.conclusion.clone(),
-            jobs: rec.jobs.clone(),
-        };
-        let bytes = serde_json::to_vec(&row)?;
-        self.txn
-            .open_table(CI_RUN_RECORDS)?
-            .insert(id, bytes.as_slice())?;
-        by_key.insert(key, id)?;
-        Ok(u64_to_id(id))
-    }
-
     pub fn insert_file_change(
         &self,
         repo_id: i64,
@@ -2276,7 +2147,6 @@ impl CacheWriter<'_> {
     pub fn update_repo_remote_state(
         &self,
         repo_id: i64,
-        ci_status: Option<String>,
         open_prs: i64,
         draft_prs: i64,
         prs_awaiting_my_review: i64,
@@ -2285,14 +2155,8 @@ impl CacheWriter<'_> {
         my_draft_prs: i64,
         open_issues: Option<i64>,
         issues_assigned_to_me: Option<i64>,
-        deploy_workflow: Option<String>,
-        deploy_status: Option<String>,
-        deploy_last_success_ts: Option<i64>,
     ) -> Result<()> {
         self.mutate_repo(repo_id, |r| {
-            if ci_status.is_some() {
-                r.ci_status = ci_status;
-            }
             r.open_prs = open_prs;
             r.draft_prs = draft_prs;
             r.prs_awaiting_my_review = prs_awaiting_my_review;
@@ -2304,15 +2168,6 @@ impl CacheWriter<'_> {
             }
             if let Some(v) = issues_assigned_to_me {
                 r.issues_assigned_to_me = v;
-            }
-            if deploy_workflow.is_some() {
-                r.deploy_workflow = deploy_workflow;
-            }
-            if deploy_status.is_some() {
-                r.deploy_status = deploy_status;
-            }
-            if let Some(v) = deploy_last_success_ts {
-                r.deploy_last_success_ts = Some(v);
             }
         })
     }

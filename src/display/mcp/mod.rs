@@ -79,8 +79,7 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
         })
         .with_description(
             "Thin orchestrator slice: only the repos with at least one action-required signal \
-             (failing CI, dirty tree, in-progress git op, detached HEAD, awaiting review, \
-             assigned issue, deploy failing/stale).",
+             (dirty tree, in-progress git op, detached HEAD, awaiting review, assigned issue).",
         )
     };
 

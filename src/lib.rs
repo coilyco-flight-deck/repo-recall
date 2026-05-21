@@ -82,13 +82,10 @@ pub struct AppState {
 /// freshness pill (issue #169 follow-up).
 #[derive(Clone)]
 pub struct CachedRemoteState {
-    pub ci: Option<String>,
     pub prs: Option<ingest::git::log::PrCounts>,
     pub issues: Option<ingest::git::log::IssueCounts>,
-    pub deploy: Option<(String, ingest::git::log::DeployHealth)>,
     pub pr_records: Vec<ingest::github::PrRecordInput>,
     pub issue_records: Vec<ingest::github::IssueRecordInput>,
-    pub ci_runs: Vec<ingest::github::CiRunRecordInput>,
     pub captured_at: chrono::DateTime<chrono::Utc>,
 }
 

@@ -55,10 +55,10 @@ pub type AttrFn = fn(&Repo) -> i64;
 /// - **LocalState** — what the working tree looks like *right now* on disk
 ///   (untracked, modified, maybe branch divergence later). Also cheap; also
 ///   changes between refreshes.
-/// - **RemoteState** — what a remote service currently thinks: CI / CD
-///   status, open PRs, review requests. Requires a network call (via `gh`
-///   or the GitHub REST API), so these attributes are refreshed with a
-///   tolerance for latency + failure.
+/// - **RemoteState** — what a remote service currently thinks: open PRs,
+///   review requests, assigned issues. Requires a network call (via the
+///   GitHub REST API), so these attributes are refreshed with a tolerance
+///   for latency + failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     Historical,
@@ -113,14 +113,6 @@ pub const ATTRS: &[Attr] = &[
     },
     // --- RemoteState: requires a network call --------------------------
     Attr {
-        // Binary: 1 if the latest default-branch CI run failed. Failing CI
-        // is a strong "needs attention" signal — we want it to pull repos
-        // up the activity ranking even if nothing else is moving.
-        key: "ci_failing",
-        category: Category::RemoteState,
-        get: |r| i64::from(r.ci_status.as_deref() == Some("failure")),
-    },
-    Attr {
         key: "prs_awaiting_my_review",
         category: Category::RemoteState,
         get: |r| r.prs_awaiting_my_review,
@@ -131,20 +123,6 @@ pub const ATTRS: &[Attr] = &[
         key: "issues_assigned_to_me",
         category: Category::RemoteState,
         get: |r| r.issues_assigned_to_me,
-    },
-    Attr {
-        // Binary: 1 if the deploy workflow's last run on the default branch
-        // failed. Mirrors `ci_failing`.
-        key: "deploy_failing",
-        category: Category::RemoteState,
-        get: |r| i64::from(is_deploy_failing(r)),
-    },
-    Attr {
-        // Binary: 1 if the deploy workflow had a green run before going quiet
-        // and the most recent green run is more than 7 days old.
-        key: "deploy_stale",
-        category: Category::RemoteState,
-        get: |r| i64::from(is_deploy_stale(r)),
     },
     Attr {
         // Not included in action-required (open PRs are informational), but
@@ -211,13 +189,7 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 /// the ones that ought to pull attention. Add a check here when a new
 /// attribute carries the same "needs doing" weight.
 ///
-/// Threshold for the `deploy_stale` signal: if the deploy workflow had a
-/// successful run before going quiet *and* the most recent green run is
-/// older than this, the deploy path itself probably rotted.
-pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
-
 /// Current triggers:
-/// - Failing default-branch CI
 /// - Dirty working tree (untracked + modified)
 /// - In-progress git operation (rebase / merge / cherry-pick / revert / bisect)
 /// - Detached HEAD
@@ -226,14 +198,11 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - My open PR with no reviewer requested (you are the blocker)
 /// - My non-draft PR open (test it, ask for review)
 /// - Issue assigned to me
-/// - Deploy workflow's last run failed
-/// - Deploy workflow has been silent for > 7d since its last green run
 pub fn is_action_required(r: &Repo) -> bool {
     if is_vendored(r) {
         return false;
     }
-    r.ci_status.as_deref() == Some("failure")
-        || (r.untracked_files + r.modified_files) > 0
+    (r.untracked_files + r.modified_files) > 0
         || r.in_progress_op.is_some()
         || r.head_ref.as_deref() == Some("detached")
         || r.prs_awaiting_my_review > 0
@@ -241,8 +210,6 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.prs_mine_awaiting_review > 0
         || r.prs_mine_no_reviewer > 0
         || r.issues_assigned_to_me > 0
-        || is_deploy_failing(r)
-        || is_deploy_stale(r)
 }
 
 /// Vendored / external repo: a third-party tree cloned for reading, not for
@@ -259,27 +226,6 @@ pub fn is_vendored(r: &Repo) -> bool {
     std::path::Path::new(&r.path)
         .join(".repo-recall-ignore")
         .exists()
-}
-
-/// Last run of the deploy workflow on the default branch failed.
-pub fn is_deploy_failing(r: &Repo) -> bool {
-    r.deploy_status.as_deref() == Some("failure")
-}
-
-/// Deploy workflow has gone quiet: there *was* a successful run, but the
-/// most recent green run is older than [`DEPLOY_STALE_SECS`]. Repos that
-/// have never deployed successfully don't count as "stale" - they're
-/// "never-deployed", a different (and not-this-signal) thing.
-pub fn is_deploy_stale(r: &Repo) -> bool {
-    let Some(last_success) = r.deploy_last_success_ts else {
-        return false;
-    };
-    // Already-failing supersedes stale - one signal at a time per repo.
-    if is_deploy_failing(r) {
-        return false;
-    }
-    let now = chrono::Utc::now().timestamp();
-    now - last_success > DEPLOY_STALE_SECS
 }
 
 /// In-place sort. First by action-required (true before false), then by
@@ -320,7 +266,6 @@ mod tests {
             untracked_files: 0,
             modified_files: 0,
             authors_30d: 0,
-            ci_status: None,
             commits_ahead: 0,
             commits_behind: 0,
             stash_count: 0,
@@ -334,9 +279,6 @@ mod tests {
             prs_mine_no_reviewer: 0,
             my_draft_prs: 0,
             issues_assigned_to_me: 0,
-            deploy_workflow: None,
-            deploy_status: None,
-            deploy_last_success_ts: None,
             remote_url: None,
             default_branch: None,
         }
@@ -440,20 +382,18 @@ mod tests {
 
     #[test]
     fn action_required_hard_sorts_to_top() {
-        // A quiet repo with failing CI should outrank a very active repo
-        // whose tree is clean and CI is green.
+        // A quiet repo mid-rebase should outrank a very active repo whose
+        // tree is clean and has nothing waiting.
         let mut noisy_clean = repo(1, "noisy-clean", 20, 500);
         noisy_clean.authors_30d = 15;
-        noisy_clean.ci_status = Some("success".into());
 
         let mut dormant_broken = repo(2, "dormant-broken", 0, 0);
-        dormant_broken.ci_status = Some("failure".into());
+        dormant_broken.in_progress_op = Some("rebase".into());
 
         let mut quiet_dirty = repo(3, "quiet-dirty", 0, 0);
         quiet_dirty.modified_files = 3;
 
-        let mut quiet_clean = repo(4, "quiet-clean", 0, 0);
-        quiet_clean.ci_status = Some("success".into());
+        let quiet_clean = repo(4, "quiet-clean", 0, 0);
 
         let mut repos = vec![
             noisy_clean.clone(),
@@ -463,11 +403,14 @@ mod tests {
         ];
         sort(&mut repos);
 
-        // Both action-required repos come first (alpha within the bucket).
+        // Both action-required repos come first. Within the bucket, the
+        // dirty repo carries a non-zero activity score (uncommitted files
+        // are an activity dimension) so it sorts above the score-zero
+        // mid-rebase repo.
         assert!(is_action_required(&repos[0]));
         assert!(is_action_required(&repos[1]));
-        assert_eq!(repos[0].name, "dormant-broken");
-        assert_eq!(repos[1].name, "quiet-dirty");
+        assert_eq!(repos[0].name, "quiet-dirty");
+        assert_eq!(repos[1].name, "dormant-broken");
         // Then the highest-activity repo, then the dormant-but-clean one.
         assert_eq!(repos[2].name, "noisy-clean");
         assert_eq!(repos[3].name, "quiet-clean");

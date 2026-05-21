@@ -48,7 +48,7 @@ refresh:
 
 ingest:
   github:
-    remote_target_limit: 25      # REPO_RECALL_REMOTE_TARGET_LIMIT. PRs/issues/CI fan-out cap.
+    remote_target_limit: 25      # REPO_RECALL_REMOTE_TARGET_LIMIT. PRs/issues fan-out cap.
     per_page: 100                # gh API page size (max 100).
     concurrency: 8               # in-flight gh subprocesses.
   git:
@@ -65,7 +65,6 @@ ingest:
 signals:
   stale_ask_days: 7              # REPO_RECALL_STALE_ASK_DAYS. open structural-ask older than this.
   blocked_window_days: 7         # autonomous-block recency window.
-  deploy_stale_days: 7           # deploy considered stale after this many days.
 
 dashboard:
   cards_per_row:
@@ -86,11 +85,11 @@ card:
       # Repo name + path + click-through to detail page.
       - id: heading
         enabled: true
-      # Action-required alerts: failing CI, dirty tree, in-progress git op, detached HEAD.
+      # Action-required alerts: dirty tree, in-progress git op, detached HEAD.
       - id: banner
         enabled: true
         cap_rows: 5
-      # Informational status pills: ahead/behind, stash count, deploy state, open PRs/issues.
+      # Informational status pills: ahead/behind, stash count, open PRs/issues.
       - id: health
         enabled: true
       # Recent commits with author + timestamp, capped at the window below.

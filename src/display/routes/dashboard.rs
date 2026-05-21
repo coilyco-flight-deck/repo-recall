@@ -31,7 +31,6 @@ pub struct DashboardJson {
     pub recent_sessions: Vec<db::SessionWithRepos>,
     pub recent_commits: Vec<db::CommitWithRepo>,
     pub uncommitted_groups: Vec<db::UncommittedGroup>,
-    pub ci_failures: Vec<db::CiFailure>,
     pub action_required: Vec<ActionRequiredItem>,
     pub banner: BannerCounts,
     pub counts: DashboardCounts,
@@ -54,14 +53,11 @@ pub struct RepoJson {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BannerCounts {
-    pub ci_failing: usize,
     pub dirty_repos: usize,
     pub in_progress_ops: usize,
     pub detached_heads: usize,
     pub review_requested: i64,
     pub issue_assigned: i64,
-    pub deploy_failing: usize,
-    pub deploy_stale: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,7 +92,6 @@ pub async fn index(
         let recent_sessions = cache.recent_sessions(15)?;
         let recent_commits = cache.recent_commits(15, af.as_deref())?;
         let uncommitted_groups = cache.uncommitted_by_repo(6, 4)?;
-        let ci_failures = cache.failing_ci_repos()?;
         Ok((
             repos_n,
             sessions_n,
@@ -107,7 +102,6 @@ pub async fn index(
             recent_sessions,
             recent_commits,
             uncommitted_groups,
-            ci_failures,
         ))
     })
     .await
@@ -123,7 +117,6 @@ pub async fn index(
         recent_sessions,
         recent_commits,
         uncommitted_groups,
-        ci_failures,
     ) = match data {
         Ok(d) => d,
         Err(e) => {
@@ -138,10 +131,6 @@ pub async fn index(
 
     // Banner counters: skip vendored repos. Their signals are noise, not
     // action items.
-    let ci_failing_count = repos
-        .iter()
-        .filter(|r| !activity::is_vendored(r) && r.ci_status.as_deref() == Some("failure"))
-        .count();
     let dirty_count = repos
         .iter()
         .filter(|r| !activity::is_vendored(r) && (r.untracked_files + r.modified_files) > 0)
@@ -156,14 +145,6 @@ pub async fn index(
         .count();
     let review_requested_count: i64 = repos.iter().map(|r| r.prs_awaiting_my_review).sum();
     let issue_assigned_count: i64 = repos.iter().map(|r| r.issues_assigned_to_me).sum();
-    let deploy_failing_count = repos
-        .iter()
-        .filter(|r| activity::is_deploy_failing(r))
-        .count();
-    let deploy_stale_count = repos
-        .iter()
-        .filter(|r| activity::is_deploy_stale(r))
-        .count();
 
     let norms = activity::normalisers(&repos);
     let repo_json: Vec<RepoJson> = repos
@@ -200,17 +181,13 @@ pub async fn index(
         recent_sessions,
         recent_commits,
         uncommitted_groups,
-        ci_failures,
         action_required: action_items,
         banner: BannerCounts {
-            ci_failing: ci_failing_count,
             dirty_repos: dirty_count,
             in_progress_ops: in_progress_count,
             detached_heads: detached_count,
             review_requested: review_requested_count,
             issue_assigned: issue_assigned_count,
-            deploy_failing: deploy_failing_count,
-            deploy_stale: deploy_stale_count,
         },
         counts: DashboardCounts {
             repos: repos_n,

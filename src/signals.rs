@@ -15,18 +15,12 @@ pub struct DerivedSignal {
 
 /// Map a `Repo` row's individual fields onto the curated set of signals
 /// that drive `is_action_required`. One repo can produce multiple items
-/// (e.g. failing CI *and* a dirty tree) — the orchestrator can act on
-/// each independently.
+/// (e.g. a dirty tree *and* a detached HEAD) — the orchestrator can act
+/// on each independently.
 pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
     let mut out = Vec::new();
     if activity::is_vendored(r) {
         return out;
-    }
-    if r.ci_status.as_deref() == Some("failure") {
-        out.push(DerivedSignal {
-            signal: "ci_failing",
-            detail: "default-branch CI failed".into(),
-        });
     }
     let dirty = r.untracked_files + r.modified_files;
     if dirty > 0 {
@@ -98,23 +92,6 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
         out.push(DerivedSignal {
             signal: "issue_assigned",
             detail: format!("{n} issue{} assigned to you", if n == 1 { "" } else { "s" },),
-        });
-    }
-    if activity::is_deploy_failing(r) {
-        let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
-        out.push(DerivedSignal {
-            signal: "deploy_failing",
-            detail: format!("last `{wf}` run on the default branch failed"),
-        });
-    } else if activity::is_deploy_stale(r) {
-        let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
-        let days = r
-            .deploy_last_success_ts
-            .map(|ts| (chrono::Utc::now().timestamp() - ts) / 86_400)
-            .unwrap_or(0);
-        out.push(DerivedSignal {
-            signal: "deploy_stale",
-            detail: format!("`{wf}` last green {days}d ago"),
         });
     }
     let _ = activity::is_action_required;

@@ -142,28 +142,27 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     })
     .await?;
 
-    let stats =
-        match result {
-            Ok(s) => {
-                tracing::info!(
-                "refresh: {} repos, {} sessions, {} links, {} commits ({} skipped). checking CI…",
+    let stats = match result {
+        Ok(s) => {
+            tracing::info!(
+                "refresh: {} repos, {} sessions, {} links, {} commits ({} skipped). checking remote state…",
                 s.repos, s.sessions, s.links, s.commits, s.skipped,
             );
-                s
-            }
-            Err(e) => {
-                tracing::warn!("refresh error: {e}");
-                return Ok(());
-            }
-        };
+            s
+        }
+        Err(e) => {
+            tracing::warn!("refresh error: {e}");
+            return Ok(());
+        }
+    };
 
-    // Second pass: CI/CD status + PR + issue counts. Separate from the main
-    // blocking refresh so we can run `gh` subprocesses concurrently (tokio
-    // spawn + spawn_blocking) rather than serializing N×network-latency
-    // into the scan time. Runs after the main refresh has already surfaced
-    // its counts, so the UI updates as soon as the offline data is ready
-    // and the remote stuff fills in later.
-    let ci_updated = ingest_ci_status(state.clone()).await;
+    // Second pass: PR + issue counts. Separate from the main blocking
+    // refresh so we can run the GitHub fetches concurrently rather than
+    // serializing N×network-latency into the scan time. Runs after the
+    // main refresh has already surfaced its counts, so the UI updates as
+    // soon as the offline data is ready and the remote stuff fills in
+    // later.
+    let remote_updated = ingest_remote_state(state.clone()).await;
 
     // 2.5: snapshot the user's "active" GitHub repos (regardless of whether
     // they're cloned into this scan tree). Populates the dashboard's
@@ -196,7 +195,7 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         stats.sessions,
         stats.links,
         stats.commits,
-        ci_updated,
+        remote_updated,
         content_matches,
         stats.skipped,
     );
@@ -291,11 +290,11 @@ async fn ingest_gh_refs(state: AppState) -> usize {
     .unwrap_or(0)
 }
 
-/// Parallel `gh run list` across every repo with a GitHub remote + known
-/// default branch. Returns how many rows we successfully updated. Each
-/// subprocess runs in its own `spawn_blocking` so network latency overlaps;
-/// a bounded `JoinSet` caps in-flight `gh` calls to avoid fork-bombing.
-async fn ingest_ci_status(state: AppState) -> usize {
+/// Parallel PR + issue fetch across every repo with a GitHub remote.
+/// Returns how many rows we successfully updated. Each repo's fetches run
+/// concurrently so network latency overlaps; a bounded semaphore caps
+/// in-flight GitHub calls.
+async fn ingest_remote_state(state: AppState) -> usize {
     // Skip the entire remote pass while we're inside a rate-limit
     // cooldown window. Set by a prior pass that observed a
     // `RateLimited` from any gh fetcher; cleared automatically when
@@ -331,60 +330,40 @@ async fn ingest_ci_status(state: AppState) -> usize {
 
     let target_limit = state.remote_target_limit;
     let cache_db = state.cache_db.clone();
-    let targets = match tokio::task::spawn_blocking(
-        move || -> anyhow::Result<Vec<(i64, String, String, String)>> {
+    let targets =
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(i64, String)>> {
             cache_db.remote_targets(target_limit)
-        },
-    )
-    .await
-    {
-        Ok(Ok(v)) => v,
-        _ => return 0,
-    };
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            _ => return 0,
+        };
 
     // Filter to repos we actually know how to query (GitHub-hosted only).
-    // Sniff the deploy workflow on disk up front so the gh subprocess block
-    // can fan out without re-touching the filesystem.
     let jobs: Vec<_> = targets
         .into_iter()
-        .filter_map(|(id, url, branch, path)| {
-            git::log::github_owner_repo(&url).map(|slug| {
-                let deploy_wf = git::log::find_deploy_workflow(std::path::Path::new(&path));
-                (id, slug, branch, deploy_wf)
-            })
-        })
+        .filter_map(|(id, url)| git::log::github_owner_repo(&url).map(|slug| (id, slug)))
         .collect();
     let total = jobs.len();
     if total == 0 {
         return 0;
     }
 
-    // Bounded concurrency: 8 concurrent `gh` processes is plenty without
-    // hammering the rate limit or fork-bombing the laptop.
+    // Bounded concurrency: 8 concurrent GitHub fetch sets is plenty
+    // without hammering the rate limit.
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
     let mut set = tokio::task::JoinSet::new();
-    for (id, slug, branch, deploy_wf) in jobs {
+    for (id, slug) in jobs {
         let sem = semaphore.clone();
         let login = my_login.clone();
         let github_client = state.github_client.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
-            // #176: issues now flow through the GithubClient trait
+            // #176: issues + PRs flow through the GithubClient trait
             // (octocrab in prod, FixturesClient in `make watch-fixtures`).
-            // Run async outside the spawn_blocking that hosts the still-
-            // subprocess pulls/ci/deploy calls. Steps 3-5 of #173 pull
-            // those out the same way.
             let issue_state = github_client.fetch_open_issues(&slug).await;
             let pr_state = github_client.fetch_open_prs(&slug).await;
-            let ci_state = github_client.fetch_recent_runs(&slug, 20).await;
-            let ci_status_state = github_client.fetch_ci_status(&slug, &branch).await;
-            let deploy_state = match deploy_wf.as_ref() {
-                Some(wf) => Some((
-                    wf.clone(),
-                    github_client.fetch_deploy_health(&slug, wf, &branch).await,
-                )),
-                None => None,
-            };
             let slug_for_blocking = slug.clone();
             tokio::task::spawn_blocking(move || {
                 let slug = slug_for_blocking;
@@ -393,15 +372,12 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     None => (None, None),
                 };
                 use crate::ingest::github::RemoteFetchState;
-                let ci = ci_status_state.into_option().flatten();
-                let deploy = deploy_state.and_then(|(wf, st)| st.into_option().map(|h| (wf, h)));
 
                 let mut rate_limited = false;
                 let mut max_retry_after_secs: Option<u64> = None;
                 for st in [
                     pr_state.clone().discard_payload(),
                     issue_state.clone().discard_payload(),
-                    ci_state.clone().discard_payload(),
                 ] {
                     if let RemoteFetchState::RateLimited { retry_after_secs } = st {
                         rate_limited = true;
@@ -414,16 +390,12 @@ async fn ingest_ci_status(state: AppState) -> usize {
 
                 let pr_records = pr_state.into_option().unwrap_or_default();
                 let issue_records = issue_state.into_option().unwrap_or_default();
-                let ci_runs = ci_state.into_option().unwrap_or_default();
                 RemoteSnapshot {
                     id,
-                    ci,
                     prs,
                     issues,
-                    deploy,
                     pr_records,
                     issue_records,
-                    ci_runs,
                     rate_limited,
                     max_retry_after_secs,
                 }
@@ -461,13 +433,8 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 let prs = snap.prs.unwrap_or_default();
                 let issues_total: Option<i64> = snap.issues.map(|i| i.open);
                 let issues_assigned: Option<i64> = snap.issues.map(|i| i.assigned_to_me);
-                let (deploy_wf, deploy_status, deploy_last_success) = match snap.deploy {
-                    Some((wf, h)) => (Some(wf), h.status, h.last_success_ts),
-                    None => (None, None, None),
-                };
                 w.update_repo_remote_state(
                     snap.id,
-                    snap.ci,
                     prs.open,
                     prs.draft,
                     prs.awaiting_my_review,
@@ -476,18 +443,12 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     prs.my_draft,
                     issues_total,
                     issues_assigned,
-                    deploy_wf,
-                    deploy_status,
-                    deploy_last_success,
                 )?;
                 for pr in &snap.pr_records {
                     w.upsert_pr_record(snap.id, pr)?;
                 }
                 for issue in &snap.issue_records {
                     w.upsert_issue_record(snap.id, issue)?;
-                }
-                for run in &snap.ci_runs {
-                    w.upsert_ci_run_record(snap.id, run)?;
                 }
                 n += 1;
             }
@@ -561,23 +522,17 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
     let mut refreshed = 0usize;
 
     for snap in results.iter_mut() {
-        let snapshot_is_blank = snap.ci.is_none()
-            && snap.prs.is_none()
+        let snapshot_is_blank = snap.prs.is_none()
             && snap.issues.is_none()
-            && snap.deploy.is_none()
             && snap.pr_records.is_empty()
-            && snap.issue_records.is_empty()
-            && snap.ci_runs.is_empty();
+            && snap.issue_records.is_empty();
 
         if snap.rate_limited || snapshot_is_blank {
             if let Some(prior) = shadow.get(&snap.id) {
-                snap.ci.clone_from(&prior.ci);
                 snap.prs.clone_from(&prior.prs);
                 snap.issues.clone_from(&prior.issues);
-                snap.deploy.clone_from(&prior.deploy);
                 snap.pr_records.clone_from(&prior.pr_records);
                 snap.issue_records.clone_from(&prior.issue_records);
-                snap.ci_runs.clone_from(&prior.ci_runs);
                 substituted += 1;
             }
             continue;
@@ -586,13 +541,10 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
         shadow.insert(
             snap.id,
             crate::CachedRemoteState {
-                ci: snap.ci.clone(),
                 prs: snap.prs.clone(),
                 issues: snap.issues,
-                deploy: snap.deploy.clone(),
                 pr_records: snap.pr_records.clone(),
                 issue_records: snap.issue_records.clone(),
-                ci_runs: snap.ci_runs.clone(),
                 captured_at: now,
             },
         );
@@ -646,13 +598,10 @@ async fn update_remote_backoff(state: &AppState, results: &[RemoteSnapshot]) {
 
 struct RemoteSnapshot {
     id: i64,
-    ci: Option<String>,
     prs: Option<git::log::PrCounts>,
     issues: Option<git::log::IssueCounts>,
-    deploy: Option<(String, git::log::DeployHealth)>,
     pr_records: Vec<crate::ingest::github::PrRecordInput>,
     issue_records: Vec<crate::ingest::github::IssueRecordInput>,
-    ci_runs: Vec<crate::ingest::github::CiRunRecordInput>,
     /// True if any of this snapshot's gh fetchers reported
     /// `RemoteFetchState::RateLimited`. Aggregated across the pass to
     /// drive `AppState::remote_backoff_*`.

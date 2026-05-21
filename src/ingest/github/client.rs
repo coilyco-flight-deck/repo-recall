@@ -24,11 +24,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use octocrab::Octocrab;
 
-use super::ci_runs::{parse_job_names_json, parse_runs_json, CiRunRecordInput};
 use super::fetch_state::RemoteFetchState;
 use super::issues::{parse_issues_json, IssueRecordInput};
 use super::pulls::{parse_prs_json, PrRecordInput};
-use crate::ingest::git::log::{ActiveRepo, DeployHealth};
+use crate::ingest::git::log::ActiveRepo;
 
 /// Authenticated user as exposed to repo-recall. Trimmed shape: only
 /// the fields the dashboard / refresh path actually reads. Octocrab's
@@ -57,37 +56,6 @@ pub trait GithubClient: Send + Sync {
     /// open pull requests for one repo. Replaces
     /// `crate::ingest::github::pulls::fetch_open_prs`.
     async fn fetch_open_prs(&self, owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>>;
-
-    /// `GET /repos/{owner}/{repo}/actions/runs?per_page=N` plus a
-    /// per-run `GET /repos/{owner}/{repo}/actions/runs/<id>/jobs` for
-    /// deduped job names. Replaces the gh-subprocess `fetch_recent_runs`
-    /// + `fetch_job_names` pair (also closes the AGENTS.md "no
-    /// `gh run list`" violation in this module).
-    async fn fetch_recent_runs(
-        &self,
-        owner_repo: &str,
-        limit: usize,
-    ) -> RemoteFetchState<Vec<CiRunRecordInput>>;
-
-    /// `GET /repos/{owner}/{repo}/actions/runs?branch=B&per_page=1` -
-    /// most recent run on a branch, normalized to a small status
-    /// vocabulary. Replaces `crate::ingest::git::log::ci_status` and
-    /// closes the AGENTS.md "no `gh run list`" violation there.
-    async fn fetch_ci_status(
-        &self,
-        owner_repo: &str,
-        branch: &str,
-    ) -> RemoteFetchState<Option<String>>;
-
-    /// `GET /repos/{owner}/{repo}/actions/workflows/{wf}/runs?branch=B&per_page=30`
-    /// plus a `last_success_ts` derived from the same response.
-    /// Replaces `crate::ingest::git::log::fetch_deploy_health`.
-    async fn fetch_deploy_health(
-        &self,
-        owner_repo: &str,
-        workflow: &str,
-        branch: &str,
-    ) -> RemoteFetchState<DeployHealth>;
 
     /// `GET /user/repos?sort=pushed&type=owner&per_page=N` - viewer's
     /// recently-pushed repos. Replaces
@@ -201,72 +169,6 @@ impl GithubClient for OctocrabClient {
         RemoteFetchState::Ok(parse_prs_json(&value))
     }
 
-    async fn fetch_recent_runs(
-        &self,
-        owner_repo: &str,
-        limit: usize,
-    ) -> RemoteFetchState<Vec<CiRunRecordInput>> {
-        if self.unconfigured {
-            return RemoteFetchState::Unconfigured;
-        }
-        let path = format!("/repos/{owner_repo}/actions/runs?per_page={limit}");
-        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
-            Ok(v) => v,
-            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
-        };
-        let mut runs = parse_runs_json(&value);
-        // Per-run job names. Sequential to keep the per-(repo, run)
-        // budget tractable - jobs are bounded by `limit` (default 20).
-        // A single per-run failure leaves jobs empty rather than
-        // failing the whole list.
-        for run in runs.iter_mut() {
-            let jobs_path = format!("/repos/{owner_repo}/actions/runs/{}/jobs", run.run_id);
-            if let Ok(v) = self
-                .inner
-                .get::<serde_json::Value, _, _>(&jobs_path, None::<&()>)
-                .await
-            {
-                run.jobs = parse_job_names_json(&v);
-            }
-        }
-        RemoteFetchState::Ok(runs)
-    }
-
-    async fn fetch_ci_status(
-        &self,
-        owner_repo: &str,
-        branch: &str,
-    ) -> RemoteFetchState<Option<String>> {
-        if self.unconfigured {
-            return RemoteFetchState::Unconfigured;
-        }
-        let path = format!("/repos/{owner_repo}/actions/runs?branch={branch}&per_page=1");
-        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
-            Ok(v) => v,
-            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
-        };
-        RemoteFetchState::Ok(parse_ci_status_json(&value))
-    }
-
-    async fn fetch_deploy_health(
-        &self,
-        owner_repo: &str,
-        workflow: &str,
-        branch: &str,
-    ) -> RemoteFetchState<DeployHealth> {
-        if self.unconfigured {
-            return RemoteFetchState::Unconfigured;
-        }
-        let path = format!(
-            "/repos/{owner_repo}/actions/workflows/{workflow}/runs?branch={branch}&per_page=30"
-        );
-        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
-            Ok(v) => v,
-            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
-        };
-        RemoteFetchState::Ok(parse_deploy_health_json(&value))
-    }
-
     async fn fetch_active_repos(&self, limit: usize) -> RemoteFetchState<Vec<ActiveRepo>> {
         if self.unconfigured {
             return RemoteFetchState::Unconfigured;
@@ -277,64 +179,6 @@ impl GithubClient for OctocrabClient {
             Err(e) => return super::fetch_state::classify_octocrab_error(&e),
         };
         RemoteFetchState::Ok(parse_active_repos_json(&value))
-    }
-}
-
-/// Normalize a single REST workflow-run object's `(status, conclusion)`
-/// into the small status vocabulary the dashboard renders. Used by both
-/// `fetch_ci_status` and `fetch_deploy_health`.
-fn normalize_run_status(status: &str, conclusion: &str) -> Option<&'static str> {
-    match (status, conclusion) {
-        ("completed", "success") => Some("success"),
-        ("completed", "failure" | "startup_failure" | "timed_out") => Some("failure"),
-        ("completed", _) => Some("success"), // cancelled / skipped / neutral: not urgent
-        ("in_progress", _) => Some("running"),
-        ("queued" | "pending" | "requested" | "waiting", _) => Some("pending"),
-        _ => None,
-    }
-}
-
-/// Pure parser. Reads the most-recent `workflow_runs[0]` from the REST
-/// `GET /repos/X/actions/runs?branch=B&per_page=1` response and
-/// returns the normalized status string.
-fn parse_ci_status_json(value: &serde_json::Value) -> Option<String> {
-    let runs = value.get("workflow_runs").and_then(|v| v.as_array())?;
-    let run = runs.first()?;
-    let status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
-    normalize_run_status(status, conclusion).map(str::to_string)
-}
-
-/// Pure parser. Builds a `DeployHealth` from the REST workflow-runs
-/// response (latest run's status + most-recent successful run's
-/// `created_at`).
-fn parse_deploy_health_json(value: &serde_json::Value) -> DeployHealth {
-    let Some(arr) = value.get("workflow_runs").and_then(|v| v.as_array()) else {
-        return DeployHealth::default();
-    };
-    if arr.is_empty() {
-        return DeployHealth::default();
-    }
-    let first = &arr[0];
-    let first_status = first.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let first_conclusion = first
-        .get("conclusion")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let status = normalize_run_status(first_status, first_conclusion).map(str::to_string);
-    let last_success_ts = arr.iter().find_map(|r| {
-        let conclusion = r.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
-        if conclusion != "success" {
-            return None;
-        }
-        let created = r.get("created_at").and_then(|v| v.as_str())?;
-        chrono::DateTime::parse_from_rfc3339(created)
-            .ok()
-            .map(|dt| dt.timestamp())
-    });
-    DeployHealth {
-        status,
-        last_success_ts,
     }
 }
 
@@ -472,81 +316,6 @@ impl GithubClient for FixturesClient {
             Err(e) => return RemoteFetchState::Error(format!("pulls_all.http body: {e}")),
         };
         RemoteFetchState::Ok(parse_prs_json(&value))
-    }
-
-    async fn fetch_recent_runs(
-        &self,
-        _owner_repo: &str,
-        _limit: usize,
-    ) -> RemoteFetchState<Vec<CiRunRecordInput>> {
-        let parsed = match self.read_fixture("actions_runs.http") {
-            Ok(p) => p,
-            Err(e) => return RemoteFetchState::Error(e),
-        };
-        if let Some(state) =
-            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
-        {
-            return state;
-        }
-        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
-            Ok(v) => v,
-            Err(e) => return RemoteFetchState::Error(format!("actions_runs.http body: {e}")),
-        };
-        // Job names left empty - no captured-real-server fixture for
-        // the per-run /jobs endpoint, and the dashboard tolerates an
-        // empty `jobs` vec (it just hides the per-job pills).
-        RemoteFetchState::Ok(parse_runs_json(&value))
-    }
-
-    async fn fetch_ci_status(
-        &self,
-        _owner_repo: &str,
-        _branch: &str,
-    ) -> RemoteFetchState<Option<String>> {
-        let parsed = match self.read_fixture("actions_runs_branch.http") {
-            Ok(p) => p,
-            Err(e) => return RemoteFetchState::Error(e),
-        };
-        if let Some(state) =
-            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
-        {
-            return state;
-        }
-        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
-            Ok(v) => v,
-            Err(e) => {
-                return RemoteFetchState::Error(format!("actions_runs_branch.http body: {e}"))
-            }
-        };
-        RemoteFetchState::Ok(parse_ci_status_json(&value))
-    }
-
-    async fn fetch_deploy_health(
-        &self,
-        _owner_repo: &str,
-        _workflow: &str,
-        _branch: &str,
-    ) -> RemoteFetchState<DeployHealth> {
-        // No captured-real-server fixture for the workflow-runs
-        // endpoint today; the branch-scoped runs fixture has the
-        // same shape so reuse it. Status normalization + last-success
-        // derivation are identical.
-        let parsed = match self.read_fixture("actions_runs_branch.http") {
-            Ok(p) => p,
-            Err(e) => return RemoteFetchState::Error(e),
-        };
-        if let Some(state) =
-            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
-        {
-            return state;
-        }
-        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
-            Ok(v) => v,
-            Err(e) => {
-                return RemoteFetchState::Error(format!("actions_runs_branch.http body: {e}"))
-            }
-        };
-        RemoteFetchState::Ok(parse_deploy_health_json(&value))
     }
 
     async fn fetch_active_repos(&self, _limit: usize) -> RemoteFetchState<Vec<ActiveRepo>> {

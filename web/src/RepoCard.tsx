@@ -76,10 +76,7 @@ export function RepoCard({ repo, expanded, faded, onToggle, recentCommits, recen
       )}
 
       <Row label="health">
-        <span className={repo.ci_status === "failure" ? "text-rose-700 font-medium" : ""}>
-          ci: {repo.ci_status ?? "—"}
-        </span>
-        <span className="ml-3">
+        <span>
           dirty: {repo.untracked_files + repo.modified_files}
         </span>
         {repo.in_progress_op && <span className="ml-3 text-amber-700">op: {repo.in_progress_op}</span>}

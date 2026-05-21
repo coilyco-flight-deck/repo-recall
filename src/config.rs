@@ -221,7 +221,6 @@ impl Default for IngestCliGuard {
 pub struct Signals {
     pub stale_ask_days: u32,
     pub blocked_window_days: u32,
-    pub deploy_stale_days: u32,
 }
 
 impl Default for Signals {
@@ -229,7 +228,6 @@ impl Default for Signals {
         Self {
             stale_ask_days: 7,
             blocked_window_days: 7,
-            deploy_stale_days: 7,
         }
     }
 }

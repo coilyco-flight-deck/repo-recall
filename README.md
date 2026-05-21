@@ -2,14 +2,14 @@
 
 > *"What's the current state of every repo and agent burst on this machine, right now?"*
 
-repo-recall is a local hydration layer that joins **git** (commits, churn, working tree), **gh** (CI, PRs, issues), and **[Claude Code](https://claude.com/claude-code) sessions** (`~/.claude/projects/`) into a single queryable surface served as JSON and over MCP out of the same process.
+repo-recall is a local hydration layer that joins **git** (commits, churn, working tree), **gh** (PRs, issues), and **[Claude Code](https://claude.com/claude-code) sessions** (`~/.claude/projects/`) into a single queryable surface served as JSON and over MCP out of the same process.
 
 Two questions, one HTTP call or one MCP tool call:
 
 - **Which sessions touched this repo?** ask the dashboard for a repo, get every session with it as `cwd`.
 - **Which repos did this session touch?** ask for a session, get every repo it crossed.
 
-Local-only. Binds `127.0.0.1`, cache lives in `$TMPDIR`. Outbound limited to `gh run list` for CI status.
+Local-only. Binds `127.0.0.1`, cache lives in `$TMPDIR`. Outbound limited to the GitHub REST API for PR and issue counts.
 
 ## Surface
 
@@ -50,7 +50,7 @@ Tools: `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `re
 
 ## Point an agent at it
 
-Hand the URL or MCP entry to a coding agent. Starter prompts: "work through every repo flagged as action-required", "find dirty trees and commit or discard", "fix failing CI on default branch".
+Hand the URL or MCP entry to a coding agent. Starter prompts: "work through every repo flagged as action-required", "find dirty trees and commit or discard", "list repos with PRs awaiting my review".
 
 ## Quick start
 
@@ -83,7 +83,7 @@ Drop empty `.repo-recall-ignore` at the root of a repo cloned for reading. Suppr
 
 - Stores metadata + 200-char summary only.
 - Loopback only. Never `0.0.0.0` on shared boxes.
-- Outbound calls: `gh run list` for CI (reuses `gh` auth, no tokens stored).
+- Outbound calls: GitHub REST for PR + issue counts (reuses `gh` auth, no tokens stored).
 
 ## See also
 

@@ -545,48 +545,6 @@ fn unstaged_diff_is_empty(repo_path: &Path) -> bool {
     status.success()
 }
 
-/// Locate the repo's deploy workflow on disk. We sniff
-/// `.github/workflows/*.{yml,yaml}` for a basename containing "deploy"
-/// (case-insensitive), first match wins. Returns the *filename* (not the
-/// full path) since `gh run list --workflow=<file>` accepts either the
-/// filename or the workflow name. None when nothing matches; the deploy
-/// signals stay silent in that case (not every repo deploys).
-///
-/// Deliberate divergence from the original repo-recall#7 sketch: we don't
-/// read a `.repo-recall/config.yaml` override here. Repo-recall is "no
-/// config file" by convention (see AGENTS.md). If the filename sniff
-/// misses a real deploy workflow, the fix is renaming the workflow file
-/// or extending this sniffer, not introducing a config surface.
-pub fn find_deploy_workflow(repo_path: &Path) -> Option<String> {
-    let dir = repo_path.join(".github").join("workflows");
-    let entries = std::fs::read_dir(&dir).ok()?;
-    let mut matches: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            let lower = name.to_lowercase();
-            if (lower.ends_with(".yml") || lower.ends_with(".yaml")) && lower.contains("deploy") {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
-    matches.sort();
-    matches.into_iter().next()
-}
-
-/// Latest-deploy health for a repo. `status` is the *last* run's outcome,
-/// `last_success_ts` is the unix-seconds timestamp of the most recent
-/// successful run (None when there's never been a green run). Together
-/// they distinguish "broken right now" from "rotted, last green is old"
-/// from "never deployed."
-#[derive(Debug, Clone, Default)]
-pub struct DeployHealth {
-    pub status: Option<String>,
-    pub last_success_ts: Option<i64>,
-}
-
 /// Aggregated open-PR counts for one repo. Derived client-side from a
 /// single `gh pr list --json` call so we only pay one subprocess per repo
 /// for the PR view.
