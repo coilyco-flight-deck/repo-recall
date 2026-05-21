@@ -10,7 +10,12 @@ use crate::process::activity;
 
 pub struct DerivedSignal {
     pub signal: &'static str,
+    /// Chatty, JSON-facing description. Carries counts, op names, branch
+    /// text - whatever a machine consumer wants spelled out.
     pub detail: String,
+    /// Pre-capped one-liner for the human `watch curl` render. Never wraps,
+    /// flat, greppable. Rendered as `<repo>: <terse>` (see #233).
+    pub terse: String,
 }
 
 /// Map a `Repo` row's individual fields onto the curated set of signals
@@ -23,9 +28,11 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
         return out;
     }
     if r.ci_status.as_deref() == Some("failure") {
+        let branch = r.default_branch.as_deref().unwrap_or("default branch");
         out.push(DerivedSignal {
             signal: "ci_failing",
             detail: "default-branch CI failed".into(),
+            terse: format!("CI failing on {branch}"),
         });
     }
     let dirty = r.untracked_files + r.modified_files;
@@ -38,18 +45,24 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
                 r.modified_files,
                 r.untracked_files,
             ),
+            terse: format!(
+                "{dirty} uncommitted file{}",
+                if dirty == 1 { "" } else { "s" }
+            ),
         });
     }
     if let Some(op) = r.in_progress_op.as_deref() {
         out.push(DerivedSignal {
             signal: "in_progress_op",
             detail: format!("{op} in progress"),
+            terse: format!("{op} in progress"),
         });
     }
     if r.head_ref.as_deref() == Some("detached") {
         out.push(DerivedSignal {
             signal: "detached_head",
             detail: "HEAD is detached".into(),
+            terse: "detached HEAD".into(),
         });
     }
     if r.prs_awaiting_my_review > 0 {
@@ -59,6 +72,10 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             detail: format!(
                 "{n} PR{} awaiting your review",
                 if n == 1 { "" } else { "s" },
+            ),
+            terse: format!(
+                "{n} PR{} awaiting your review",
+                if n == 1 { "" } else { "s" }
             ),
         });
     }
@@ -70,6 +87,7 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
                 "{n} draft PR{} of yours - get into a reviewable state",
                 if n == 1 { "" } else { "s" },
             ),
+            terse: format!("{n} draft PR{} to finish", if n == 1 { "" } else { "s" }),
         });
     }
     if r.prs_mine_no_reviewer > 0 {
@@ -81,6 +99,7 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
                 if n == 1 { "" } else { "s" },
                 if n == 1 { "has" } else { "have" },
             ),
+            terse: format!("{n} PR{} need a reviewer", if n == 1 { "" } else { "s" }),
         });
     }
     if r.prs_mine_awaiting_review > 0 {
@@ -91,6 +110,7 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
                 "{n} open PR{} of yours - test it before they review",
                 if n == 1 { "" } else { "s" },
             ),
+            terse: format!("{n} open PR{} to test", if n == 1 { "" } else { "s" }),
         });
     }
     if r.issues_assigned_to_me > 0 {
@@ -98,6 +118,18 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
         out.push(DerivedSignal {
             signal: "issue_assigned",
             detail: format!("{n} issue{} assigned to you", if n == 1 { "" } else { "s" },),
+            terse: format!("{n} issue{} assigned to you", if n == 1 { "" } else { "s" }),
+        });
+    }
+    if r.commits_ahead > 0 {
+        let n = r.commits_ahead;
+        out.push(DerivedSignal {
+            signal: "push",
+            detail: format!(
+                "{n} local commit{} not pushed to the upstream branch",
+                if n == 1 { "" } else { "s" },
+            ),
+            terse: format!("push {n} commit{}", if n == 1 { "" } else { "s" }),
         });
     }
     if activity::is_deploy_failing(r) {
@@ -105,6 +137,7 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
         out.push(DerivedSignal {
             signal: "deploy_failing",
             detail: format!("last `{wf}` run on the default branch failed"),
+            terse: "deploy failing".into(),
         });
     } else if activity::is_deploy_stale(r) {
         let wf = r.deploy_workflow.as_deref().unwrap_or("deploy");
@@ -115,6 +148,7 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
         out.push(DerivedSignal {
             signal: "deploy_stale",
             detail: format!("`{wf}` last green {days}d ago"),
+            terse: format!("deploy stale ({days}d)"),
         });
     }
     let _ = activity::is_action_required;
