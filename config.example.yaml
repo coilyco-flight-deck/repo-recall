@@ -37,7 +37,10 @@ refresh:
   # is a nested block carrying an optional interval_secs; a null or absent
   # interval_secs falls back to refresh.interval_secs above. An entire
   # absent per_source block keeps every source on the global cadence.
-  # Wires the schema for #146; the fan-out refresh task lands with that.
+  # The fan-out scheduler ticks at the smallest resolved interval and runs
+  # each source when its own watermark says its interval has elapsed, so
+  # e.g. `github_remote: 30` polls CI every 30s while `git_log: 300` rescans
+  # commits every 5 minutes. A resolved interval of 0 disables that source.
   per_source:
     git_log:
       interval_secs: null

@@ -100,6 +100,24 @@ impl Default for Refresh {
     }
 }
 
+impl Refresh {
+    /// Resolve the refresh cadence for one ingest source. A per-source
+    /// `interval_secs` override wins; `null` or an unknown source name
+    /// falls back to the global `refresh.interval_secs` (#146).
+    pub fn interval_for(&self, source: &str) -> u64 {
+        let over = match source {
+            "git_log" => self.per_source.git_log.interval_secs,
+            "github_remote" => self.per_source.github_remote.interval_secs,
+            "sessions" => self.per_source.sessions.interval_secs,
+            "docs" => self.per_source.docs.interval_secs,
+            "cli_guard" => self.per_source.cli_guard.interval_secs,
+            "github_remote_labeled" => self.per_source.github_remote_labeled.interval_secs,
+            _ => None,
+        };
+        over.unwrap_or(self.interval_secs)
+    }
+}
+
 /// Per-source refresh overrides, keyed by ingest source name. Each
 /// entry is a nested struct so future per-source knobs land without
 /// another schema break. An absent entry inherits the global
@@ -749,6 +767,30 @@ refresh:
                 .interval_secs,
             Some(3600)
         );
+    }
+
+    #[test]
+    fn interval_for_resolves_per_source_overrides() {
+        let yaml = r#"
+refresh:
+  interval_secs: 150
+  per_source:
+    git_log:
+      interval_secs: 300
+    github_remote:
+      interval_secs: 30
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        // Explicit overrides win.
+        assert_eq!(cfg.refresh.interval_for("git_log"), 300);
+        assert_eq!(cfg.refresh.interval_for("github_remote"), 30);
+        // No override falls back to the global interval.
+        assert_eq!(cfg.refresh.interval_for("sessions"), 150);
+        assert_eq!(cfg.refresh.interval_for("cli_guard"), 150);
+        // The hourly default for the labeled-issue ingest still applies.
+        assert_eq!(cfg.refresh.interval_for("github_remote_labeled"), 3600);
+        // An unknown source name falls back to the global interval.
+        assert_eq!(cfg.refresh.interval_for("nonsense"), 150);
     }
 
     #[test]

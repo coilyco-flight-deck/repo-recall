@@ -21,7 +21,67 @@ pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::ACCEPTED, "refresh started")
 }
 
+/// One ingest source. The fan-out scheduler (#146) gives each its own
+/// cadence and watermark; `run_refresh_for` runs an arbitrary subset in a
+/// single sweep. Discovery (repo upsert + prune) is a prerequisite of
+/// every sweep, not a `Source` — it always runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// `git log` + churn + worktree/local state. Owns the commit tables.
+    GitLog,
+    /// `gh` REST: CI status, PR / issue counts, deploy health, the
+    /// "clone one" active-repo snapshot. Owns the remote-record tables.
+    GithubRemote,
+    /// Claude Code session JSONL: sessions, cwd/content/gh-ref joins,
+    /// the full-text turn index. Owns the session tables.
+    Sessions,
+    /// cli-guard audit log under `~/.coily/audit/`. Owns the audit tables.
+    CliGuard,
+    /// Repo docs (README / AGENTS / FEATURES / file health). No ingest is
+    /// wired yet - the slot exists so the scheduler carries its cadence
+    /// once the ingest lands. See repo-recall#146 follow-up.
+    Docs,
+}
+
+impl Source {
+    /// Every source, in sweep order. Discovery runs before all of them.
+    pub const ALL: [Source; 5] = [
+        Source::GitLog,
+        Source::Sessions,
+        Source::GithubRemote,
+        Source::CliGuard,
+        Source::Docs,
+    ];
+
+    /// Stable name used for the config key and the watermark table key.
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::GitLog => "git_log",
+            Source::GithubRemote => "github_remote",
+            Source::Sessions => "sessions",
+            Source::CliGuard => "cli_guard",
+            Source::Docs => "docs",
+        }
+    }
+}
+
+/// Full-sweep refresh: every source. Used for the initial scan and the
+/// manual `POST /api/refresh` trigger.
 pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
+    run_refresh_for(state, &Source::ALL).await
+}
+
+/// Refresh exactly the sources in `sources`. The fan-out scheduler calls
+/// this each tick with the subset whose interval has elapsed (#146).
+///
+/// Discovery always runs first - the repo table is the join key for every
+/// source. Each requested source then wipes and rebuilds only the tables
+/// it owns, so a `git_log`-only sweep never disturbs session or remote
+/// data. Per-repo aggregates recompute every sweep. The full-text index
+/// rebuilds when `Sessions` is in the set (it is the only source that
+/// re-parses the turn text the index needs). Watermarks for every
+/// requested source advance at the end.
+pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Result<()> {
     // Prevent overlapping refreshes.
     let _guard = match state.refresh_lock.try_lock() {
         Ok(g) => g,
@@ -31,7 +91,19 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         }
     };
 
-    tracing::debug!("starting refresh");
+    let do_git = sources.contains(&Source::GitLog);
+    let do_sessions = sources.contains(&Source::Sessions);
+    let do_remote = sources.contains(&Source::GithubRemote);
+    let do_cli = sources.contains(&Source::CliGuard);
+
+    tracing::debug!(
+        "starting refresh: {}",
+        sources
+            .iter()
+            .map(|s| s.name())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     let cwd = state.cwd.clone();
     let cache_db = state.cache_db.clone();
@@ -54,11 +126,14 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     };
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RefreshStats> {
-        // Phase 1: discovery + repo upserts. One write transaction.
+        // Discovery: always. The repo table is the join key for every
+        // source. `upsert_repo` is idempotent; `prune_repos_not_in` drops
+        // repos that vanished from disk - the cache persists across
+        // refreshes now (#146), so a stale repo no longer falls out by
+        // virtue of a full wipe.
         let discovered = git::discovery::scan(&cwd, scan_depth)?;
         let now = Utc::now().timestamp();
         let repo_id_by_path: Vec<(i64, PathBuf)> = cache_db.write_batch(|w| {
-            w.wipe()?;
             let mut out = Vec::with_capacity(discovered.len());
             for r in &discovered {
                 let remote = git::log::remote_info(&r.path);
@@ -71,152 +146,169 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
                 )?;
                 out.push((id, r.path.clone()));
             }
+            let keep: Vec<i64> = out.iter().map(|(id, _)| *id).collect();
+            w.prune_repos_not_in(&keep)?;
             Ok(out)
         })?;
-        let repos_n = repo_id_by_path.len();
+        let mut stats = RefreshStats {
+            repos: repo_id_by_path.len(),
+            ..RefreshStats::default()
+        };
 
-        // Phase 2: sessions. Same wipe semantics as before — every record
-        // in the cache lands inside the same refresh sweep.
-        let projects_dirs = sessions::default_projects_dirs();
-        if projects_dirs.is_empty() {
-            // No Claude projects dir — still try commits before bailing.
-            let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
-            cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
-            return Ok(RefreshStats {
-                repos: repos_n,
-                sessions: 0,
-                links: 0,
-                commits: commits_n,
-                skipped: 0,
-            });
-        }
-        let files = sessions::list_session_files(&projects_dirs)?;
-
-        let mut inserted = 0usize;
-        let mut skipped = 0usize;
-        let mut links = 0usize;
-        // Full-text turn docs (#229), accumulated as we parse each session
-        // in this pass so phase 5 never re-reads the JSONL off disk.
+        // sessions source: re-parse the session JSONL, rebuild the session
+        // + cwd-join tables. `wipe_sessions` clears only the tables this
+        // source owns, so a sessions-skipping sweep leaves them intact.
         let mut turn_docs: Vec<crate::search::IndexDoc> = Vec::new();
-
-        cache_db.write_batch(|w| {
-            for path in files.iter() {
-                match sessions::parse_session_file(path) {
-                    Ok(Some((rec, turns))) => {
-                        let (session_id, was_new) = w.upsert_session(&rec)?;
-                        if !was_new {
-                            skipped += 1;
-                            continue;
-                        }
-                        inserted += 1;
-                        // Expand turns into one index doc each, but only
-                        // for sessions inside the turn-index window.
-                        if rec.started_at.is_none_or(|t| t >= turn_index_cutoff) {
-                            turn_docs.extend(session_turn_docs(
-                                session_id,
-                                &rec.session_uuid,
-                                &turns,
-                            ));
-                        }
-                        if let Some(cwd_str) = rec.cwd.as_deref() {
-                            if let Some(repo_id) =
-                                join::best_repo_for_cwd(cwd_str, &repo_id_by_path)
-                            {
-                                if w.link_session_repo(session_id, repo_id, "cwd")? {
-                                    links += 1;
+        if do_sessions {
+            let projects_dirs = sessions::default_projects_dirs();
+            let files = if projects_dirs.is_empty() {
+                Vec::new()
+            } else {
+                sessions::list_session_files(&projects_dirs)?
+            };
+            let mut inserted = 0usize;
+            let mut skipped = 0usize;
+            let mut links = 0usize;
+            cache_db.write_batch(|w| {
+                w.wipe_sessions()?;
+                for path in files.iter() {
+                    match sessions::parse_session_file(path) {
+                        Ok(Some((rec, turns))) => {
+                            let (session_id, was_new) = w.upsert_session(&rec)?;
+                            if !was_new {
+                                skipped += 1;
+                                continue;
+                            }
+                            inserted += 1;
+                            // Expand turns into one index doc each, but only
+                            // for sessions inside the turn-index window.
+                            if rec.started_at.is_none_or(|t| t >= turn_index_cutoff) {
+                                turn_docs.extend(session_turn_docs(
+                                    session_id,
+                                    &rec.session_uuid,
+                                    &turns,
+                                ));
+                            }
+                            if let Some(cwd_str) = rec.cwd.as_deref() {
+                                if let Some(repo_id) =
+                                    join::best_repo_for_cwd(cwd_str, &repo_id_by_path)
+                                {
+                                    if w.link_session_repo(session_id, repo_id, "cwd")? {
+                                        links += 1;
+                                    }
                                 }
                             }
                         }
-                    }
-                    Ok(None) => {
-                        skipped += 1;
-                    }
-                    Err(e) => {
-                        tracing::debug!("parse error {}: {}", path.display(), e);
-                        skipped += 1;
+                        Ok(None) => skipped += 1,
+                        Err(e) => {
+                            tracing::debug!("parse error {}: {}", path.display(), e);
+                            skipped += 1;
+                        }
                     }
                 }
-            }
-            Ok(())
-        })?;
-
-        // Phase 3: commits + per-repo state.
-        let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
-
-        // Phase 3.6: cli-guard audit log (#148). Walks every JSONL shard
-        // under `~/.coily/audit/` and groups rows by `commit_scope`. Rows
-        // whose scope didn't match any discovered repo land under
-        // `repo_id = 0` so the unrouted bucket stays queryable.
-        ingest_cli_guard(&cache_db, &repo_id_by_path)?;
-
-        // Phase 4: precompute aggregates the dashboard reads back.
-        cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
-
-        // Phase 5: rebuild the tantivy search index. The redb-resident
-        // docs (repo / session / commit) come from the cache; the
-        // `session_turn` docs (#229) were built in phase 2 from the JSONL
-        // the scan already parsed — see `REPO_RECALL_TURN_INDEX_DAYS`.
-        let mut corpus = cache_db.collect_search_corpus()?;
-        corpus.extend(turn_docs);
-        if let Err(e) = search_index.rebuild(corpus) {
-            tracing::warn!("tantivy rebuild failed (search will serve stale results): {e:?}");
+                Ok(())
+            })?;
+            stats.sessions = inserted;
+            stats.links = links;
+            stats.skipped = skipped;
         }
 
-        Ok(RefreshStats {
-            repos: repos_n,
-            sessions: inserted,
-            links,
-            commits: commits_n,
-            skipped,
-        })
+        // git_log source: commits + churn + worktree/local state. The
+        // wipe + rebuild stay in adjacent transactions so the empty window
+        // is brief; `refresh_lock` already blocks a competing refresh.
+        if do_git {
+            cache_db.write_batch(|w| w.wipe_git_log())?;
+            stats.commits = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
+        }
+
+        // cli_guard source: audit log (#148). Walks every JSONL shard under
+        // `~/.coily/audit/` and groups rows by `commit_scope`. Rows whose
+        // scope matched no discovered repo land under `repo_id = 0`.
+        if do_cli {
+            cache_db.write_batch(|w| w.wipe_cli_guard())?;
+            ingest_cli_guard(&cache_db, &repo_id_by_path)?;
+        }
+
+        // Per-repo aggregates the dashboard reads back. Cheap; recompute
+        // every sweep off whatever the cache currently holds.
+        cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
+
+        // Full-text index. Rebuilt only when the sessions source ran: it is
+        // the one source that re-parses the turn text the index needs, and
+        // `rebuild` replaces the whole index. A `git_log`-only sweep leaves
+        // commit search docs to refresh on the next sessions tick.
+        if do_sessions {
+            let mut corpus = cache_db.collect_search_corpus()?;
+            corpus.extend(turn_docs);
+            if let Err(e) = search_index.rebuild(corpus) {
+                tracing::warn!("tantivy rebuild failed (search will serve stale results): {e:?}");
+            }
+        }
+
+        Ok(stats)
     })
     .await?;
 
-    let stats =
-        match result {
-            Ok(s) => {
-                tracing::info!(
-                "refresh: {} repos, {} sessions, {} links, {} commits ({} skipped). checking CI…",
-                s.repos, s.sessions, s.links, s.commits, s.skipped,
-            );
-                s
-            }
-            Err(e) => {
-                tracing::warn!("refresh error: {e}");
-                return Ok(());
-            }
-        };
+    let stats = match result {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("refresh error: {e}");
+            return Ok(());
+        }
+    };
 
-    // Second pass: CI/CD status + PR + issue counts. Separate from the main
-    // blocking refresh so we can run `gh` subprocesses concurrently (tokio
-    // spawn + spawn_blocking) rather than serializing N×network-latency
-    // into the scan time. Runs after the main refresh has already surfaced
-    // its counts, so the UI updates as soon as the offline data is ready
-    // and the remote stuff fills in later.
-    let ci_updated = ingest_ci_status(state.clone()).await;
+    // github_remote source: CI/CD status, PR + issue counts, then the
+    // "clone one" active-repo snapshot. Runs as its own async tasks so the
+    // `gh` subprocess latency overlaps instead of serialising into the
+    // blocking sweep above. Best-effort - `gh` missing / unauthenticated
+    // leaves the remote tables empty.
+    let ci_updated = if do_remote {
+        let n = ingest_ci_status(state.clone()).await;
+        let _active = ingest_active_repos(state.clone()).await;
+        n
+    } else {
+        0
+    };
 
-    // 2.5: snapshot the user's "active" GitHub repos (regardless of whether
-    // they're cloned into this scan tree). Populates the dashboard's
-    // "clone one" panel. Best-effort — `gh` missing / unauthenticated leaves
-    // the table empty.
-    let _active_repos_n = ingest_active_repos(state.clone()).await;
+    // Content-mention + gh-ref joins belong to the sessions source: both
+    // add `session_repos` rows and depend on the session parse above, so
+    // they run only when the sessions source was in this sweep.
+    //
+    // content-mention: walks every session JSONL for bare-word hits on
+    // known repo names - heavy (N sessions x M repos) and best-effort.
+    // gh-ref: a single string sweep per file for `owner/name#42` and
+    // pasted PR/issue URLs - robust to upstream JSONL schema drift.
+    let content_matches = if do_sessions {
+        let n = ingest_content_mentions(state.clone()).await;
+        let _gh_refs = ingest_gh_refs(state.clone()).await;
+        n
+    } else {
+        0
+    };
 
-    // Third pass: content-mention matching. Walks every session JSONL
-    // looking for bare-word hits on known repo names. Separate because:
-    // (a) it's heavy — N sessions × M repos of string-scanning; (b) it's
-    // best-effort, so overcounting is OK and users see a "fuzzy" admission.
-    let content_matches = ingest_content_mentions(state.clone()).await;
+    // Advance the watermark for every source this sweep covered. The
+    // scheduler measures the next "has my interval elapsed?" check from
+    // completion, so a slow sweep does not immediately re-trigger (#146).
+    let done_at = Utc::now();
+    {
+        let cache_db = state.cache_db.clone();
+        let names: Vec<&'static str> = sources.iter().map(|s| s.name()).collect();
+        let ts = done_at.timestamp();
+        let watermark_write = tokio::task::spawn_blocking(move || {
+            cache_db.write_batch(|w| {
+                for name in names {
+                    w.set_refresh_watermark(name, ts)?;
+                }
+                Ok(())
+            })
+        })
+        .await;
+        if let Ok(Err(e)) = watermark_write {
+            tracing::warn!("refresh watermark write failed: {e:?}");
+        }
+    }
 
-    // Third-and-a-half pass: gh-ref join. Catches sessions started outside
-    // a repo's cwd that nonetheless touched it via `gh` shorthand
-    // (`owner/name#42`) or pasted PR/issue URLs. Cheaper than the
-    // content-mention scan — single string sweep per file, no per-repo
-    // automaton — and the contract is "find a known reference in any text
-    // field," so it's robust to JSONL schema changes upstream.
-    let gh_ref_matches = ingest_gh_refs(state.clone()).await;
-    let _ = gh_ref_matches;
-
-    *state.last_scan.lock().await = Some(Utc::now());
+    *state.last_scan.lock().await = Some(done_at);
     state
         .scan_version
         .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -740,6 +832,7 @@ fn session_turn_docs(
     docs
 }
 
+#[derive(Default)]
 struct RefreshStats {
     repos: usize,
     sessions: usize,

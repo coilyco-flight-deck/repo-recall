@@ -41,6 +41,22 @@ const ACTIVE_REMOTE_REPOS: TableDefinition<u64, &[u8]> =
 // id-allocator counters keyed by entity name ("repo", "session", ...).
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
+// Per-source refresh watermarks (#146): `<source name> -> last_run_unix_ts`.
+// Read by the fan-out scheduler to decide whether a source's interval has
+// elapsed. Never cleared by a per-source wipe — only by the schema-change
+// full wipe — so a source's cadence survives the wipe of its own data.
+const REFRESH_WATERMARKS: TableDefinition<&str, i64> = TableDefinition::new("refresh_watermarks");
+
+/// Cache schema version. Bump whenever a redb table's key/value layout or
+/// the JSON shape of a persisted record changes. A mismatch between this
+/// constant and the value stored in `META` triggers a full wipe at open
+/// time — wipe-on-schema-change replaces the old wipe-on-restart contract
+/// (#146), so cache data now survives a plain process restart.
+pub const SCHEMA_VERSION: u64 = 1;
+
+/// `META` key holding the on-disk schema version.
+const META_SCHEMA_VERSION: &str = "__schema_version";
+
 // Secondary indexes. Composite keys store the natural sort order so a
 // single ranged scan answers the query.
 const REPOS_BY_PATH: TableDefinition<&str, u64> = TableDefinition::new("repos_by_path");
@@ -612,13 +628,47 @@ impl std::fmt::Debug for CacheDb {
 }
 
 impl CacheDb {
-    /// Open the cache file at `<dir>/cache.redb`, deleting any prior file
-    /// first. Wipe-on-restart matches the SQLite-era contract.
+    /// Open the cache file at `<dir>/cache.redb`, reusing a prior file when
+    /// its schema version matches [`SCHEMA_VERSION`]. Wipe-on-schema-change
+    /// (#146) replaces the old wipe-on-restart contract: a plain restart
+    /// keeps the cache, a schema bump wipes it.
+    ///
+    /// Three outcomes:
+    ///   - file absent or unreadable as redb -> recreate from scratch
+    ///   - file opens, version matches -> reuse as-is
+    ///   - file opens, version differs/absent -> full wipe + stamp version
     pub fn open_in_dir(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).with_context(|| format!("create cache dir: {dir:?}"))?;
         let path = dir.join("cache.redb");
-        let _ = std::fs::remove_file(&path);
-        Self::open_at(path)
+
+        // A file that fails to open as redb (corrupt, or written by a build
+        // whose table layout we can no longer parse) is unrecoverable here:
+        // drop it and start clean rather than wedging boot.
+        let this = match Self::open_at(path.clone()) {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::warn!("cache at {path:?} unreadable ({e}); recreating");
+                let _ = std::fs::remove_file(&path);
+                Self::open_at(path)?
+            }
+        };
+
+        let on_disk = this.schema_version()?;
+        if on_disk == Some(SCHEMA_VERSION) {
+            tracing::info!("cache schema v{SCHEMA_VERSION}: reusing existing data");
+        } else {
+            match on_disk {
+                Some(v) => {
+                    tracing::info!("cache schema v{v} != v{SCHEMA_VERSION}: wiping (schema change)")
+                }
+                None => tracing::info!("cache has no schema stamp: wiping (fresh or pre-#146)"),
+            }
+            this.write_batch(|w| {
+                w.wipe()?;
+                w.set_schema_version(SCHEMA_VERSION)
+            })?;
+        }
+        Ok(this)
     }
 
     pub fn open_at(path: PathBuf) -> Result<Self> {
@@ -657,6 +707,13 @@ impl CacheDb {
             let _ = write.open_table(LABELED_ISSUES)?;
             let _ = write.open_table(LABELED_ISSUES_BY_REPO_LABEL_NUMBER)?;
             let _ = write.open_table(LABELED_ISSUES_BY_LABEL_STATE)?;
+            let _ = write.open_table(PR_RECORDS)?;
+            let _ = write.open_table(PR_RECORDS_BY_REPO_NUMBER)?;
+            let _ = write.open_table(ISSUE_RECORDS)?;
+            let _ = write.open_table(ISSUE_RECORDS_BY_REPO_NUMBER)?;
+            let _ = write.open_table(CI_RUN_RECORDS)?;
+            let _ = write.open_table(CI_RUN_RECORDS_BY_REPO_RUN)?;
+            let _ = write.open_table(REFRESH_WATERMARKS)?;
         }
         write.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -677,9 +734,28 @@ impl CacheDb {
         Ok(res)
     }
 
-    /// Truncate every cache table. Called at the start of every refresh.
+    /// Truncate every cache table. Used by the schema-change wipe at open
+    /// time and by a full-sweep refresh; per-source refreshes call the
+    /// scoped `wipe_*` methods on [`CacheWriter`] instead.
     pub fn wipe(&self) -> Result<()> {
         self.write_batch(|w| w.wipe())
+    }
+
+    /// On-disk schema version, or `None` when the cache predates the stamp
+    /// (a pre-#146 file or a brand-new one). Read once at open time.
+    pub fn schema_version(&self) -> Result<Option<u64>> {
+        let read = self.db.begin_read()?;
+        let meta = read.open_table(META)?;
+        Ok(meta.get(META_SCHEMA_VERSION)?.map(|g| g.value()))
+    }
+
+    /// Last-run unix timestamp recorded for `source`, or `None` if the
+    /// source has never completed a refresh in this cache. Drives the
+    /// fan-out scheduler's "has my interval elapsed?" check (#146).
+    pub fn refresh_watermark(&self, source: &str) -> Result<Option<i64>> {
+        let read = self.db.begin_read()?;
+        let table = read.open_table(REFRESH_WATERMARKS)?;
+        Ok(table.get(source)?.map(|g| g.value()))
     }
 
     // -----------------------------------------------------------------
@@ -1777,7 +1853,135 @@ impl CacheWriter<'_> {
         clear_table::<(u64, i64), u64>(self.txn, ISSUE_RECORDS_BY_REPO_NUMBER)?;
         clear_table::<u64, &[u8]>(self.txn, CI_RUN_RECORDS)?;
         clear_table::<(u64, i64), u64>(self.txn, CI_RUN_RECORDS_BY_REPO_RUN)?;
+        clear_table::<&str, i64>(self.txn, REFRESH_WATERMARKS)?;
         Ok(())
+    }
+
+    /// Stamp the on-disk schema version. Called once right after the
+    /// schema-change wipe at open time (#146).
+    pub fn set_schema_version(&self, version: u64) -> Result<()> {
+        self.txn
+            .open_table(META)?
+            .insert(META_SCHEMA_VERSION, version)?;
+        Ok(())
+    }
+
+    /// Record that `source` finished a refresh at `ts` (unix seconds).
+    /// The fan-out scheduler reads this back to gate the next run (#146).
+    pub fn set_refresh_watermark(&self, source: &str, ts: i64) -> Result<()> {
+        self.txn
+            .open_table(REFRESH_WATERMARKS)?
+            .insert(source, ts)?;
+        Ok(())
+    }
+
+    /// Clear the tables owned by the `git_log` source: commits, their
+    /// secondary indexes, file-change churn rows, and the uncommitted-file
+    /// snapshot. Commit-sourced issue refs go too. Per-repo local-state
+    /// columns on the `repos` row are overwritten in place by the rebuild,
+    /// so they need no explicit clear.
+    pub fn wipe_git_log(&self) -> Result<()> {
+        clear_table::<u64, &[u8]>(self.txn, COMMITS)?;
+        clear_table::<(u64, &str), u64>(self.txn, COMMITS_BY_REPO_SHA)?;
+        clear_table::<(u64, i64, u64), &str>(self.txn, COMMITS_BY_REPO_TS)?;
+        clear_table::<(i64, u64), ()>(self.txn, COMMITS_BY_TS)?;
+        clear_table::<u64, &[u8]>(self.txn, FILE_CHANGES)?;
+        clear_table::<(u64, i64, u64), ()>(self.txn, FILE_CHANGES_BY_REPO_TS)?;
+        clear_table::<u64, &[u8]>(self.txn, UNCOMMITTED_FILES)?;
+        clear_table::<(u64, u64), ()>(self.txn, UNCOMMITTED_BY_REPO)?;
+        self.clear_issue_refs_by_source(issue_ref_source::COMMIT)?;
+        Ok(())
+    }
+
+    /// Clear the tables owned by the `sessions` source: sessions, their
+    /// indexes, and every `session_repos` join row (cwd, content-mention,
+    /// and gh-ref links all rebuild from the same pass). Session-sourced
+    /// issue refs go too.
+    pub fn wipe_sessions(&self) -> Result<()> {
+        clear_table::<u64, &[u8]>(self.txn, SESSIONS)?;
+        clear_table::<&str, u64>(self.txn, SESSIONS_BY_UUID)?;
+        clear_table::<(i64, u64), ()>(self.txn, SESSIONS_BY_STARTED_AT)?;
+        clear_table::<(u64, u64, &str), ()>(self.txn, SESSION_REPOS)?;
+        clear_table::<(u64, u64, &str), ()>(self.txn, SESSION_REPOS_BY_REPO)?;
+        self.clear_issue_refs_by_source(issue_ref_source::SESSION)?;
+        Ok(())
+    }
+
+    /// Clear the tables owned by the `github_remote` source: PR / issue /
+    /// CI-run record tables and their indexes. Per-repo remote-state
+    /// columns on the `repos` row are overwritten in place, and the
+    /// `active_remote_repos` snapshot self-clears via
+    /// [`CacheWriter::replace_active_remote_repos`].
+    pub fn wipe_github_remote(&self) -> Result<()> {
+        clear_table::<u64, &[u8]>(self.txn, PR_RECORDS)?;
+        clear_table::<(u64, i64), u64>(self.txn, PR_RECORDS_BY_REPO_NUMBER)?;
+        clear_table::<u64, &[u8]>(self.txn, ISSUE_RECORDS)?;
+        clear_table::<(u64, i64), u64>(self.txn, ISSUE_RECORDS_BY_REPO_NUMBER)?;
+        clear_table::<u64, &[u8]>(self.txn, CI_RUN_RECORDS)?;
+        clear_table::<(u64, i64), u64>(self.txn, CI_RUN_RECORDS_BY_REPO_RUN)?;
+        Ok(())
+    }
+
+    /// Clear the tables owned by the `cli_guard` source: the audit-event
+    /// table plus its two indexes.
+    pub fn wipe_cli_guard(&self) -> Result<()> {
+        clear_table::<u64, &[u8]>(self.txn, AUDIT_EVENTS)?;
+        clear_table::<(u64, i64, u64), ()>(self.txn, AUDIT_EVENTS_BY_REPO_TS)?;
+        clear_table::<&str, u64>(self.txn, AUDIT_EVENTS_BY_NATURAL_KEY)?;
+        Ok(())
+    }
+
+    /// Delete every issue ref whose `source_kind` matches `kind`. Walks the
+    /// main `ISSUE_REFS` table once, collecting matches, then deletes from
+    /// all three tables so a per-source wipe leaves no dangling index rows.
+    fn clear_issue_refs_by_source(&self, kind: &str) -> Result<()> {
+        let mut victims: Vec<(u64, u64, u32, i64)> = Vec::new();
+        {
+            let refs = self.txn.open_table(ISSUE_REFS)?;
+            for row in refs.iter()? {
+                let (k, v) = row?;
+                let r: IssueRef = serde_json::from_slice(v.value())?;
+                if r.source_kind == kind {
+                    victims.push((k.value(), id_to_u64(r.repo_id), r.issue_number, r.source_id));
+                }
+            }
+        }
+        let mut refs = self.txn.open_table(ISSUE_REFS)?;
+        let mut by_repo_issue = self.txn.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
+        let mut by_source = self.txn.open_table(ISSUE_REFS_BY_SOURCE)?;
+        for (id, repo, issue, source_id) in victims {
+            refs.remove(id)?;
+            by_repo_issue.remove((repo, issue, kind, id_to_u64(source_id)))?;
+            by_source.remove((kind, id_to_u64(source_id), repo, issue))?;
+        }
+        Ok(())
+    }
+
+    /// Delete `repos` rows (and their `repos_by_path` index entries) whose
+    /// id is not in `keep`. Called after discovery so a repo removed from
+    /// disk drops out of the cache even though discovery itself only
+    /// upserts. Idempotent: an empty `keep` clears every repo.
+    pub fn prune_repos_not_in(&self, keep: &[i64]) -> Result<usize> {
+        let keep: HashSet<u64> = keep.iter().map(|id| id_to_u64(*id)).collect();
+        let mut victims: Vec<(u64, String)> = Vec::new();
+        {
+            let repos = self.txn.open_table(REPOS)?;
+            for row in repos.iter()? {
+                let (k, v) = row?;
+                if !keep.contains(&k.value()) {
+                    let r: Repo = serde_json::from_slice(v.value())?;
+                    victims.push((k.value(), r.path));
+                }
+            }
+        }
+        let n = victims.len();
+        let mut repos = self.txn.open_table(REPOS)?;
+        let mut by_path = self.txn.open_table(REPOS_BY_PATH)?;
+        for (id, path) in victims {
+            repos.remove(id)?;
+            by_path.remove(path.as_str())?;
+        }
+        Ok(n)
     }
 
     /// Insert a repo or return the existing id if `path` is already
@@ -2497,5 +2701,125 @@ fn order_by_started_at_desc(a: Option<i64>, b: Option<i64>) -> std::cmp::Orderin
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::git::log::CommitRecord;
+
+    fn sample_commit(sha: &str) -> CommitRecord {
+        CommitRecord {
+            sha: sha.into(),
+            author_name: "Kai".into(),
+            author_email: "kai@example.com".into(),
+            timestamp: 1_700_000_000,
+            subject: "do a thing".into(),
+            committer_name: "Kai".into(),
+            committer_email: "kai@example.com".into(),
+            committer_date_iso: "2023-11-14T00:00:00Z".into(),
+            parents: String::new(),
+            refs: String::new(),
+            body: "do a thing".into(),
+        }
+    }
+
+    /// A plain reopen of the same cache dir keeps the data when the schema
+    /// version matches; a version mismatch wipes it (#146).
+    #[test]
+    fn schema_version_gates_wipe_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // First open stamps the current schema version and accepts a repo.
+        {
+            let db = CacheDb::open_in_dir(dir.path()).unwrap();
+            assert_eq!(db.schema_version().unwrap(), Some(SCHEMA_VERSION));
+            db.write_batch(|w| w.upsert_repo("/tmp/a", "a", 0, None, None))
+                .unwrap();
+        }
+        // Reopen with a matching schema: the repo survives (no wipe-on-restart).
+        {
+            let db = CacheDb::open_in_dir(dir.path()).unwrap();
+            assert_eq!(db.list_repos_with_counts().unwrap().len(), 1);
+            // Simulate a schema bump by stamping a stale version on disk.
+            db.write_batch(|w| w.set_schema_version(SCHEMA_VERSION + 99))
+                .unwrap();
+        }
+        // Reopen: the stored version no longer matches, so the cache wipes
+        // and re-stamps the live constant.
+        {
+            let db = CacheDb::open_in_dir(dir.path()).unwrap();
+            assert_eq!(db.schema_version().unwrap(), Some(SCHEMA_VERSION));
+            assert!(db.list_repos_with_counts().unwrap().is_empty());
+        }
+    }
+
+    /// Watermarks round-trip and survive a per-source wipe (#146).
+    #[test]
+    fn refresh_watermark_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_in_dir(dir.path()).unwrap();
+        assert_eq!(db.refresh_watermark("git_log").unwrap(), None);
+
+        db.write_batch(|w| w.set_refresh_watermark("git_log", 1_700_000_000))
+            .unwrap();
+        assert_eq!(
+            db.refresh_watermark("git_log").unwrap(),
+            Some(1_700_000_000)
+        );
+
+        // A per-source wipe must not clear the watermark table.
+        db.write_batch(|w| w.wipe_git_log()).unwrap();
+        assert_eq!(
+            db.refresh_watermark("git_log").unwrap(),
+            Some(1_700_000_000)
+        );
+    }
+
+    /// `prune_repos_not_in` drops repos absent from the keep-list and leaves
+    /// the rest, so discovery can re-upsert without a full wipe (#146).
+    #[test]
+    fn prune_repos_keeps_only_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_in_dir(dir.path()).unwrap();
+        let (a, _b) = db
+            .write_batch(|w| {
+                let a = w.upsert_repo("/tmp/a", "a", 0, None, None)?;
+                let b = w.upsert_repo("/tmp/b", "b", 0, None, None)?;
+                Ok((a, b))
+            })
+            .unwrap();
+
+        let pruned = db.write_batch(|w| w.prune_repos_not_in(&[a])).unwrap();
+        assert_eq!(pruned, 1);
+        let remaining = db.list_repos_with_counts().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].path, "/tmp/a");
+    }
+
+    /// Per-source wipes are isolated: clearing the sessions tables leaves
+    /// commits intact, and clearing git_log leaves the repo row intact (#146).
+    #[test]
+    fn per_source_wipe_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_in_dir(dir.path()).unwrap();
+        let repo = db
+            .write_batch(|w| {
+                let id = w.upsert_repo("/tmp/a", "a", 0, None, None)?;
+                w.upsert_commit(id, &sample_commit("deadbeef"))?;
+                Ok(id)
+            })
+            .unwrap();
+        assert_eq!(db.commits_for_repo(repo, 10).unwrap().len(), 1);
+
+        // Wiping the sessions source must not disturb git_log's commits.
+        db.write_batch(|w| w.wipe_sessions()).unwrap();
+        assert_eq!(db.commits_for_repo(repo, 10).unwrap().len(), 1);
+
+        // Wiping git_log clears commits but leaves the repo row.
+        db.write_batch(|w| w.wipe_git_log()).unwrap();
+        assert!(db.commits_for_repo(repo, 10).unwrap().is_empty());
+        assert_eq!(db.list_repos_with_counts().unwrap().len(), 1);
     }
 }

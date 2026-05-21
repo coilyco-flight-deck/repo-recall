@@ -1,6 +1,6 @@
 # Features
 
-What `repo-recall` does. A local hydration layer over Claude Code session data and the git / GitHub state of every repo within a configurable radius.
+A local hydration layer over Claude Code session data and the git / GitHub state of every repo within a configurable radius.
 
 This doc describes capabilities. The egress surfaces (HTTP JSON + MCP) are summarized in `README.md`; the OpenAPI doc at `GET /openapi.json` is the contract.
 
@@ -36,15 +36,15 @@ MCP server runs in the same process as the HTTP server via pmcp 2.6 stdio plus a
 
 ## Cache + indexes
 
-Two stores, no SQLite. `cache.redb` (KV, wipe-on-restart) plus a tantivy full-text index. Derived from disk on every refresh; no migrations. Single-writer discipline via `cache.write_batch`; reads use redb's MVCC. Per-repo aggregates precomputed at end of refresh.
+Two stores, no SQLite. `cache.redb` (KV) plus a tantivy full-text index. Derived from disk; no migrations. Wipe-on-schema-change: a restart reuses the cache, a `SCHEMA_VERSION` bump wipes it at open. Single-writer via `cache.write_batch`; reads use redb's MVCC. Per-repo aggregates precomputed at end of refresh.
 
 ## Refresh tier
 
-Background refresh on a configurable interval (default 150s, set 0 to disable). Local sources run blocking in one `spawn_blocking`; remote sources use tokio tasks plus a bounded semaphore (8). Remote failures swallow at `debug!` rather than fail the scan. Per-source refresh rates and notify-driven filesystem ingest are tracked separately in #190.
+Per-source fan-out. Each source (`git_log`, `github_remote`, `sessions`, `cli_guard`, `docs`) has its own `refresh.per_source.<source>.interval_secs`, falling back to `refresh.interval_secs` (default 150s, 0 disables). A `last_run_ts` watermark in `REFRESH_WATERMARKS` gates each: the scheduler runs a source when its interval has elapsed, wiping only the tables it owns. Discovery runs first; remote sources use bounded-concurrency tokio tasks, failures swallowed at `debug!`.
 
 ## Full-text session search
 
-`recall_search` indexes full session turn text into tantivy — every prompt input, model output, and thinking step, one document per turn so a hit lands on the exact turn. Turn text is scrubbed at ingest with the same gate as PR/issue bodies: secret-shaped tokens and known-bad terms are redacted before anything is indexed. Turn expansion is bounded to recent sessions via `REPO_RECALL_TURN_INDEX_DAYS` (default 30). On the dashboard, session text renders blurred behind a click-to-reveal — visible only on a deliberate action.
+`recall_search` indexes full session turn text into tantivy — every prompt input, model output, and thinking step, one document per turn so a hit lands on the exact turn. Turn text is scrubbed at ingest with the same gate as PR/issue bodies: secret-shaped tokens and known-bad terms are redacted before anything is indexed. Turn expansion is bounded to recent sessions via `REPO_RECALL_TURN_INDEX_DAYS` (default 30). The dashboard renders session text blurred behind a click-to-reveal.
 
 ## Privacy posture
 
@@ -56,7 +56,7 @@ Homebrew tap (`coilysiren/tap`), `brew services`-managed. Conventional commits d
 
 ## Frontend status
 
-Two-artifact deploy: the Rust binary serves JSON + MCP, and a static React SPA under `web/` is built by Vite and served by Caddy in its own container (same shape as galaxy-gen). The web bundle today is a Hello World stub (#192); the two-state repo-card dashboard from #144 builds on top of the scaffold. Local dev uses `make watch-all` (cargo-watch + Vite dev server with API proxy).
+Two-artifact deploy: the Rust binary serves JSON + MCP; a static React SPA under `web/` is built by Vite and served by Caddy in its own container. The web bundle today is a Hello World stub (#192); the #144 repo-card dashboard builds on the scaffold. Local dev uses `make watch-all`.
 
 ## See also
 

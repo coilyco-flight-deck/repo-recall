@@ -68,8 +68,9 @@ async fn main() -> miette::Result<()> {
     // Default cache directory is per-port so two instances (e.g.
     // launchd-managed on 7777 and a dev binary on 7778) don't share state
     // and wipe each other's tables during their periodic refreshes. Override
-    // with REPO_RECALL_CACHE_DIR. The cache file inside is `cache.redb` and
-    // is recreated on every startup (wipe-on-restart).
+    // with REPO_RECALL_CACHE_DIR. The cache file inside is `cache.redb`; it
+    // persists across restarts and is wiped only on a schema-version change
+    // (#146).
     let cache_dir = cfg
         .paths
         .cache_dir
@@ -147,23 +148,61 @@ async fn main() -> miette::Result<()> {
         });
     }
 
-    if refresh_interval_secs > 0 {
-        tracing::info!("periodic refresh: every {refresh_interval_secs}s");
+    // Per-source refresh fan-out (#146). Each ingest source carries its
+    // own cadence: `refresh.per_source.<source>.interval_secs` overrides
+    // the global `refresh.interval_secs`, and a resolved interval of 0
+    // disables that source. The scheduler ticks at the smallest positive
+    // interval and, each tick, runs exactly the sources whose watermark
+    // says their interval has elapsed.
+    use routes::refresh::Source;
+    let scheduled: Vec<(Source, u64)> = Source::ALL
+        .iter()
+        .filter_map(|s| {
+            let secs = cfg.refresh.interval_for(s.name());
+            (secs > 0).then_some((*s, secs))
+        })
+        .collect();
+    if let Some(base_tick) = scheduled.iter().map(|(_, secs)| *secs).min() {
+        for (s, secs) in &scheduled {
+            tracing::info!("refresh source {}: every {secs}s", s.name());
+        }
         let state = state.clone();
         tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(refresh_interval_secs));
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(base_tick));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await; // skip first immediate tick — initial scan covers it
             loop {
                 ticker.tick().await;
-                if let Err(e) = routes::refresh::run_refresh(state.clone()).await {
+                let now = chrono::Utc::now().timestamp();
+                // A source is due when it has never run, or its interval
+                // has elapsed since its last completion watermark.
+                let due: Vec<Source> = scheduled
+                    .iter()
+                    .filter(
+                        |(s, secs)| match state.cache_db.refresh_watermark(s.name()) {
+                            Ok(Some(last)) => now - last >= *secs as i64,
+                            Ok(None) => true,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "watermark read failed for {}: {e:?}; treating as due",
+                                    s.name()
+                                );
+                                true
+                            }
+                        },
+                    )
+                    .map(|(s, _)| *s)
+                    .collect();
+                if due.is_empty() {
+                    continue;
+                }
+                if let Err(e) = routes::refresh::run_refresh_for(state.clone(), &due).await {
                     tracing::error!("periodic refresh failed: {e:?}");
                 }
             }
         });
     } else {
-        tracing::info!("periodic refresh disabled (REPO_RECALL_REFRESH_INTERVAL_SECS=0)");
+        tracing::info!("periodic refresh disabled (all source intervals resolve to 0)");
     }
 
     // Always start MCP. Tolerate dead-stdin: in the brew-services case, stdin

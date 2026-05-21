@@ -19,7 +19,7 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 
 ## Conventions
 
-- **Two stores, no SQLite.** `cache.redb` (wipe-on-restart) + tantivy index. Derived from disk every refresh; no migrations.
+- **Two stores, no SQLite.** `cache.redb` + tantivy index, derived from disk; no migrations. Wipe-on-schema-change (`db::SCHEMA_VERSION`), not wipe-on-restart. Per-source refresh: each source has its own `refresh.per_source` interval + `REFRESH_WATERMARKS` watermark, runs when due, wipes only the tables it owns (`CacheWriter::wipe_*`).
 - **Discovery is lazy.** No root setting. Walks cwd + `REPO_RECALL_DEPTH` (default 4).
 - **`session_repos.match_type` is the extension point.** MVP writes `'cwd'`. Add rows; don't replace.
 - **Single writer.** `cache.write_batch(|w| { … })` per phase, atomic. `state.refresh_lock` blocks overlap. Reads use MVCC `begin_read()` freely.
