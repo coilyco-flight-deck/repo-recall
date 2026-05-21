@@ -226,8 +226,12 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - My open PR with no reviewer requested (you are the blocker)
 /// - My non-draft PR open (test it, ask for review)
 /// - Issue assigned to me
+/// - Current branch has local commits not pushed to its upstream (`push`)
 /// - Deploy workflow's last run failed
 /// - Deploy workflow has been silent for > 7d since its last green run
+///
+/// `commits_behind` stays informational - it's drift that self-resolves on
+/// the next pull, not a todo (see #233/#234).
 pub fn is_action_required(r: &Repo) -> bool {
     if is_vendored(r) {
         return false;
@@ -241,6 +245,7 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.prs_mine_awaiting_review > 0
         || r.prs_mine_no_reviewer > 0
         || r.issues_assigned_to_me > 0
+        || r.commits_ahead > 0
         || is_deploy_failing(r)
         || is_deploy_stale(r)
 }
@@ -406,6 +411,24 @@ mod tests {
         let mut on_main = repo(3, "on-main", 0, 0);
         on_main.head_ref = Some("main".into());
         assert!(!is_action_required(&on_main));
+    }
+
+    #[test]
+    fn unpushed_commits_trigger_action_required() {
+        let mut clean = repo(1, "clean", 0, 0);
+        clean.head_ref = Some("main".into());
+        assert!(!is_action_required(&clean));
+
+        let mut ahead = repo(2, "ahead", 0, 0);
+        ahead.head_ref = Some("main".into());
+        ahead.commits_ahead = 3;
+        assert!(is_action_required(&ahead));
+
+        // `commits_behind` stays informational - not a todo.
+        let mut behind = repo(3, "behind", 0, 0);
+        behind.head_ref = Some("main".into());
+        behind.commits_behind = 4;
+        assert!(!is_action_required(&behind));
     }
 
     #[test]

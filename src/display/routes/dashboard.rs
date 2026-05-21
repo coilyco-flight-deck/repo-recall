@@ -60,6 +60,7 @@ pub struct BannerCounts {
     pub detached_heads: usize,
     pub review_requested: i64,
     pub issue_assigned: i64,
+    pub push: usize,
     pub deploy_failing: usize,
     pub deploy_stale: usize,
 }
@@ -154,6 +155,10 @@ pub async fn index(
         .iter()
         .filter(|r| !activity::is_vendored(r) && r.head_ref.as_deref() == Some("detached"))
         .count();
+    let push_count = repos
+        .iter()
+        .filter(|r| !activity::is_vendored(r) && r.commits_ahead > 0)
+        .count();
     let review_requested_count: i64 = repos.iter().map(|r| r.prs_awaiting_my_review).sum();
     let issue_assigned_count: i64 = repos.iter().map(|r| r.issues_assigned_to_me).sum();
     let deploy_failing_count = repos
@@ -209,6 +214,7 @@ pub async fn index(
             detached_heads: detached_count,
             review_requested: review_requested_count,
             issue_assigned: issue_assigned_count,
+            push: push_count,
             deploy_failing: deploy_failing_count,
             deploy_stale: deploy_stale_count,
         },
