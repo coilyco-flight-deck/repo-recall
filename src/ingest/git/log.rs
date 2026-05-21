@@ -417,6 +417,100 @@ pub fn local_state(repo_path: &Path) -> LocalState {
     }
 }
 
+/// Local branches that look like unmerged work left sitting: their tip
+/// commit is older than `older_than_secs` and they are not fully merged
+/// into the default branch. The default branch itself is always excluded -
+/// it is the landing target, not pending work. A branch merged into the
+/// default branch but not yet deleted is excluded too: that is cleanup, not
+/// action-required.
+///
+/// Two `git for-each-ref` subprocesses per repo. Returns an empty vec on any
+/// failure, and also when the default branch can't be determined - without it
+/// we can't tell merged from unmerged, so we stay silent rather than guess.
+/// Result is sorted oldest-tip first.
+pub fn stale_branches(repo_path: &Path, older_than_secs: i64) -> Vec<crate::db::StaleBranch> {
+    let Some(path_str) = repo_path.to_str() else {
+        return Vec::new();
+    };
+    let git = |args: &[&str]| -> Option<String> {
+        let mut full = vec!["-C", path_str];
+        full.extend_from_slice(args);
+        let out = Command::new("git").args(full).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+
+    // Default branch: prefer origin/HEAD, fall back to a local main/master.
+    let default = git(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .and_then(|s| {
+            s.trim()
+                .strip_prefix("refs/remotes/origin/")
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            ["main", "master"]
+                .into_iter()
+                .find(|cand| {
+                    git(&[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{cand}"),
+                    ])
+                    .is_some()
+                })
+                .map(str::to_string)
+        });
+    let Some(default) = default else {
+        return Vec::new();
+    };
+
+    // Branches already merged into the default branch - excluded.
+    let merged: std::collections::HashSet<String> = git(&[
+        "for-each-ref",
+        "--merged",
+        &default,
+        "--format=%(refname:short)",
+        "refs/heads",
+    ])
+    .map(|s| s.lines().map(|l| l.trim().to_string()).collect())
+    .unwrap_or_default();
+
+    let now = chrono::Utc::now().timestamp();
+    let Some(listing) = git(&[
+        "for-each-ref",
+        "--format=%(refname:short)%00%(committerdate:unix)",
+        "refs/heads",
+    ]) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for line in listing.lines() {
+        let mut parts = line.splitn(2, '\0');
+        let name = parts.next().unwrap_or("").trim();
+        if name.is_empty() || name == default || merged.contains(name) {
+            continue;
+        }
+        let Some(ts) = parts.next().and_then(|s| s.trim().parse::<i64>().ok()) else {
+            continue;
+        };
+        let age = now - ts;
+        if age > older_than_secs {
+            out.push(crate::db::StaleBranch {
+                name: name.to_string(),
+                tip_age_secs: age,
+            });
+        }
+    }
+    // Oldest tip first - the most-stale branch is the one most worth landing
+    // or deleting.
+    out.sort_by_key(|b| std::cmp::Reverse(b.tip_age_secs));
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
     Untracked,
@@ -822,13 +916,94 @@ fn parse_owner_repo(raw: &str) -> Option<OwnerRepo> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_remote_url, parse_numstat_path};
+    use super::{normalize_remote_url, parse_numstat_path, stale_branches};
 
     #[test]
     fn parse_numstat_path_no_rename() {
         let (from, to) = parse_numstat_path("src/db.rs");
         assert_eq!(from, None);
         assert_eq!(to, "src/db.rs");
+    }
+
+    #[test]
+    fn stale_branches_excludes_default_merged_and_fresh() {
+        use std::process::Command;
+
+        let dir = std::env::temp_dir().join(format!(
+            "repo-recall-stale-branches-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap().to_string();
+
+        // `git -c` flags configure identity inline; `-c date` env on each
+        // commit backdates it so we can drive the staleness threshold.
+        let git = |args: &[&str], committer_date: Option<&str>| {
+            let mut cmd = Command::new("git");
+            cmd.args(["-C", &path]).args(args);
+            if let Some(d) = committer_date {
+                cmd.env("GIT_COMMITTER_DATE", d).env("GIT_AUTHOR_DATE", d);
+            }
+            let out = cmd.output().expect("git invocation");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr),
+            );
+        };
+        let commit = |msg: &str, date: Option<&str>| {
+            std::fs::write(dir.join("f"), msg).unwrap();
+            git(&["add", "-A"], None);
+            git(
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-m",
+                    msg,
+                ],
+                date,
+            );
+        };
+
+        git(&["init", "-b", "main"], None);
+        // 10 days ago, well past the 24h threshold.
+        let old = "2020-01-01T00:00:00Z";
+        commit("base", Some(old));
+
+        // A stale unmerged branch: old tip, not on main.
+        git(&["checkout", "-b", "stale-feature"], None);
+        commit("stale work", Some(old));
+
+        // A merged-but-not-deleted branch: old tip, but folded into main.
+        git(&["checkout", "main"], None);
+        git(&["checkout", "-b", "merged-old"], None);
+        commit("merged work", Some(old));
+        git(&["checkout", "main"], None);
+        git(&["merge", "--no-ff", "merged-old", "-m", "merge"], None);
+
+        // A fresh unmerged branch: tip is now, so not stale.
+        git(&["checkout", "-b", "fresh-feature"], None);
+        commit("fresh work", None);
+
+        git(&["checkout", "main"], None);
+
+        let stale = stale_branches(std::path::Path::new(&path), 24 * 3_600);
+        let names: Vec<&str> = stale.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["stale-feature"],
+            "only the old unmerged branch counts",
+        );
+        assert!(stale[0].tip_age_secs > 24 * 3_600);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

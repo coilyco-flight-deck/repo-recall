@@ -153,6 +153,13 @@ pub const ATTRS: &[Attr] = &[
         category: Category::RemoteState,
         get: |r| r.open_prs,
     },
+    Attr {
+        // Count of stale local branches - unmerged work whose tip commit is
+        // older than `STALE_BRANCH_SECS`. Action-required when > 0.
+        key: "stale_branches",
+        category: Category::LocalState,
+        get: |r| r.stale_branches.len() as i64,
+    },
 ];
 
 /// Per-attribute normaliser across a slice of repos. Uses the **median of
@@ -216,6 +223,11 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 /// older than this, the deploy path itself probably rotted.
 pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 
+/// Threshold for the `stale_branch` signal: a local branch whose tip commit
+/// is older than this, and which is not merged into the default branch, is
+/// treated as unmerged work that needs landing or cleanup (issue #228).
+pub const STALE_BRANCH_SECS: i64 = 24 * 3_600;
+
 /// Current triggers:
 /// - Failing default-branch CI
 /// - Dirty working tree (untracked + modified)
@@ -229,6 +241,7 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - Current branch has local commits not pushed to its upstream (`push`)
 /// - Deploy workflow's last run failed
 /// - Deploy workflow has been silent for > 7d since its last green run
+/// - A local branch carries unmerged commits with a tip older than 24h
 ///
 /// `commits_behind` stays informational - it's drift that self-resolves on
 /// the next pull, not a todo (see #233/#234).
@@ -248,6 +261,7 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.commits_ahead > 0
         || is_deploy_failing(r)
         || is_deploy_stale(r)
+        || !r.stale_branches.is_empty()
 }
 
 /// Vendored / external repo: a third-party tree cloned for reading, not for
@@ -331,6 +345,7 @@ mod tests {
             stash_count: 0,
             head_ref: None,
             in_progress_op: None,
+            stale_branches: Vec::new(),
             open_prs: 0,
             draft_prs: 0,
             open_issues: 0,
@@ -429,6 +444,21 @@ mod tests {
         behind.head_ref = Some("main".into());
         behind.commits_behind = 4;
         assert!(!is_action_required(&behind));
+    }
+
+    #[test]
+    fn stale_branches_trigger_action_required() {
+        let mut clean = repo(1, "clean", 0, 0);
+        clean.head_ref = Some("main".into());
+        assert!(!is_action_required(&clean));
+
+        let mut stale = repo(2, "stale", 0, 0);
+        stale.head_ref = Some("main".into());
+        stale.stale_branches = vec![crate::db::StaleBranch {
+            name: "feature/old".into(),
+            tip_age_secs: 3 * 86_400,
+        }];
+        assert!(is_action_required(&stale));
     }
 
     #[test]

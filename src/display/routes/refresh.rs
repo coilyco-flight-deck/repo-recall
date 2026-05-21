@@ -846,6 +846,8 @@ fn ingest_commits(
             // DB.
             let snap = git::log::worktree_snapshot(repo_path, 50);
             let local = git::log::local_state(repo_path);
+            let stale_branches =
+                git::log::stale_branches(repo_path, crate::process::activity::STALE_BRANCH_SECS);
             w.update_repo_local_state(
                 *repo_id,
                 churn,
@@ -856,6 +858,7 @@ fn ingest_commits(
                 local.stash_count,
                 local.head_ref.as_deref(),
                 local.in_progress_op.as_deref(),
+                stale_branches,
             )?;
             for f in &snap.files {
                 w.insert_uncommitted_file(*repo_id, &f.path, f.kind.as_str())?;

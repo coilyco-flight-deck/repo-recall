@@ -151,6 +151,36 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             terse: format!("deploy stale ({days}d)"),
         });
     }
+    if !r.stale_branches.is_empty() {
+        let n = r.stale_branches.len();
+        let plural = if n == 1 { "" } else { "es" };
+        let list = r
+            .stale_branches
+            .iter()
+            .map(|b| format!("{} ({})", b.name, humanize_age(b.tip_age_secs)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(DerivedSignal {
+            signal: "stale_branch",
+            detail: format!(
+                "{n} stale local branch{plural} - unmerged work with a tip older \
+                 than 24h, land it or delete it: {list}"
+            ),
+            terse: format!("{n} stale branch{plural} to land or delete"),
+        });
+    }
     let _ = activity::is_action_required;
     out
+}
+
+/// Compact age rendering for branch staleness - whole days once past 24h,
+/// hours below that. Stale branches are always >24h old by construction, so
+/// the hours arm only shows for the rare sub-day clock skew.
+fn humanize_age(secs: i64) -> String {
+    let days = secs / 86_400;
+    if days >= 1 {
+        format!("{days}d")
+    } else {
+        format!("{}h", secs / 3_600)
+    }
 }

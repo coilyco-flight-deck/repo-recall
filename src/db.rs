@@ -188,6 +188,17 @@ pub struct SearchHit {
     pub extra: Option<String>,
 }
 
+/// A local branch that looks like unmerged work left sitting - its tip
+/// commit is older than the stale-branch threshold and it is not merged into
+/// the default branch. Drives the `stale_branch` action-required signal
+/// (issue #228).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleBranch {
+    pub name: String,
+    /// Seconds between the refresh time and the branch tip's committer date.
+    pub tip_age_secs: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub id: i64,
@@ -205,6 +216,10 @@ pub struct Repo {
     pub stash_count: i64,
     pub head_ref: Option<String>,
     pub in_progress_op: Option<String>,
+    /// Local branches carrying unmerged commits whose tip is older than the
+    /// stale-branch threshold - unmerged work that needs landing or cleanup.
+    #[serde(default)]
+    pub stale_branches: Vec<StaleBranch>,
     pub open_prs: i64,
     pub draft_prs: i64,
     pub open_issues: i64,
@@ -1796,6 +1811,7 @@ impl CacheWriter<'_> {
             stash_count: 0,
             head_ref: None,
             in_progress_op: None,
+            stale_branches: Vec::new(),
             open_prs: 0,
             draft_prs: 0,
             open_issues: 0,
@@ -2241,6 +2257,7 @@ impl CacheWriter<'_> {
     /// Update a repo's local-state fields. Mirrors the SQLite UPDATE that
     /// runs after the per-repo git scan.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn update_repo_local_state(
         &self,
         repo_id: i64,
@@ -2252,6 +2269,7 @@ impl CacheWriter<'_> {
         stash_count: i64,
         head_ref: Option<&str>,
         in_progress_op: Option<&str>,
+        stale_branches: Vec<StaleBranch>,
     ) -> Result<()> {
         self.mutate_repo(repo_id, |r| {
             r.loc_churn_30d = loc_churn_30d;
@@ -2262,6 +2280,7 @@ impl CacheWriter<'_> {
             r.stash_count = stash_count;
             r.head_ref = head_ref.map(str::to_string);
             r.in_progress_op = in_progress_op.map(str::to_string);
+            r.stale_branches = stale_branches;
         })
     }
 

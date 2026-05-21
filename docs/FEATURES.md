@@ -16,7 +16,7 @@ Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repo
 
 ## Action-required surfacing
 
-Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale. Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
+Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale, stale local branches (unmerged, tip older than 24h). Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
 
 ## Activity ranking
 
