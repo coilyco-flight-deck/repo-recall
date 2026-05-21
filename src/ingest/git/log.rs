@@ -417,6 +417,107 @@ pub fn local_state(repo_path: &Path) -> LocalState {
     }
 }
 
+/// Local branches that carry unmerged commits older than `cutoff_ts`.
+///
+/// A branch is "stale and unmerged" when its tip commit is older than the
+/// cutoff *and* the branch is not fully merged into the repo's default
+/// branch. Branches already merged (but not yet deleted) are deliberately
+/// excluded - the signal we want is unlanded work left sitting, not stale
+/// cleanup of already-landed branches. See #228.
+///
+/// `cutoff_ts` is a Unix timestamp: a branch whose tip is at or before it
+/// counts as stale. Result is sorted oldest-tip-first so the worst
+/// offender leads any rendered list.
+///
+/// Returns empty when the default branch can't be resolved (a bare clone
+/// with no `origin/HEAD` and no local `main`/`master`) - without a merge
+/// target there's no way to tell unlanded work from landed.
+pub fn stale_branches(repo_path: &Path, cutoff_ts: i64) -> Vec<crate::db::StaleBranch> {
+    let Some(path_str) = repo_path.to_str() else {
+        return Vec::new();
+    };
+    let git = |args: &[&str]| -> Option<String> {
+        let mut full = vec!["-C", path_str];
+        full.extend_from_slice(args);
+        let out = Command::new("git").args(full).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+
+    // Resolve the default branch as both a short name (to exclude it from
+    // the candidate list) and a revision usable as a merge-base target.
+    // Prefer `origin/HEAD` - the remote's notion of the trunk - and fall
+    // back to a local `main` / `master`.
+    let (default_short, default_rev): (String, String) =
+        git(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .and_then(|s| {
+                s.strip_prefix("refs/remotes/origin/")
+                    .map(|short| (short.to_string(), "refs/remotes/origin/HEAD".to_string()))
+            })
+            .or_else(|| {
+                ["main", "master"].into_iter().find_map(|name| {
+                    let r = format!("refs/heads/{name}");
+                    git(&["rev-parse", "--verify", "--quiet", &r]).map(|_| (name.to_string(), r))
+                })
+            })
+            .unwrap_or_default();
+    if default_short.is_empty() {
+        return Vec::new();
+    }
+
+    // One `for-each-ref` lists every local branch with its tip's committer
+    // date as a Unix timestamp - no per-branch subprocess for the age check.
+    let Some(listing) = git(&[
+        "for-each-ref",
+        "--format=%(refname:short)%09%(committerdate:unix)",
+        "refs/heads/",
+    ]) else {
+        return Vec::new();
+    };
+
+    let mut stale: Vec<crate::db::StaleBranch> = Vec::new();
+    for line in listing.lines() {
+        let mut parts = line.split('\t');
+        let Some(name) = parts.next() else { continue };
+        let Some(tip_ts) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+            continue;
+        };
+        if name.is_empty() || name == default_short {
+            continue;
+        }
+        // Recent work - the branch is still warm, not "left sitting".
+        if tip_ts > cutoff_ts {
+            continue;
+        }
+        // Fully merged into the default branch: landed work, not action-
+        // required. `--is-ancestor` exits 0 when the branch tip is an
+        // ancestor of the default branch.
+        let merged = Command::new("git")
+            .args([
+                "-C",
+                path_str,
+                "merge-base",
+                "--is-ancestor",
+                &format!("refs/heads/{name}"),
+                &default_rev,
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if merged {
+            continue;
+        }
+        stale.push(crate::db::StaleBranch {
+            name: name.to_string(),
+            tip_ts,
+        });
+    }
+    stale.sort_by_key(|b| b.tip_ts);
+    stale
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
     Untracked,
@@ -822,7 +923,100 @@ fn parse_owner_repo(raw: &str) -> Option<OwnerRepo> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_remote_url, parse_numstat_path};
+    use super::{normalize_remote_url, parse_numstat_path, stale_branches};
+    use std::process::Command;
+
+    /// Spin up a throwaway git repo for the `stale_branches` tests, run a
+    /// closure against its path, then clean up.
+    fn with_temp_repo(f: impl FnOnce(&std::path::Path)) {
+        let dir = std::env::temp_dir().join(format!(
+            "repo-recall-stale-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        f(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run a git command in `dir`, optionally pinning author + committer
+    /// dates so a commit can be backdated. Panics on failure - test setup
+    /// has no recovery path.
+    fn git(dir: &std::path::Path, date: Option<&str>, args: &[&str]) {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(args);
+        if let Some(d) = date {
+            cmd.env("GIT_AUTHOR_DATE", d).env("GIT_COMMITTER_DATE", d);
+        }
+        let out = cmd.output().expect("git command runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    /// Stage every change and commit it, backdated to `date`.
+    fn commit(dir: &std::path::Path, date: &str, message: &str) {
+        git(dir, None, &["add", "-A"]);
+        git(dir, Some(date), &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn stale_branches_flags_only_unmerged_old_work() {
+        with_temp_repo(|dir| {
+            let now = chrono::Utc::now().timestamp();
+            let old = format!("@{} +0000", now - 5 * 86_400);
+            let recent = format!("@{now} +0000");
+
+            git(dir, None, &["-c", "init.defaultBranch=main", "init"]);
+            git(dir, None, &["config", "user.email", "t@example.com"]);
+            git(dir, None, &["config", "user.name", "Tester"]);
+
+            // main: a recent base commit.
+            std::fs::write(dir.join("README"), "base").unwrap();
+            commit(dir, &recent, "base");
+
+            // stale-unmerged: an old commit never merged back to main.
+            git(dir, None, &["checkout", "-b", "stale-unmerged"]);
+            std::fs::write(dir.join("a.txt"), "old work").unwrap();
+            commit(dir, &old, "old unmerged work");
+
+            // merged-old: an old commit, but landed into main - not action-
+            // required even though the branch ref still exists.
+            git(dir, None, &["checkout", "main"]);
+            git(dir, None, &["checkout", "-b", "merged-old"]);
+            std::fs::write(dir.join("b.txt"), "landed work").unwrap();
+            commit(dir, &old, "old landed work");
+            git(dir, None, &["checkout", "main"]);
+            git(dir, None, &["merge", "--no-ff", "--no-edit", "merged-old"]);
+
+            // recent-work: an unmerged commit, but too fresh to be stale.
+            git(dir, None, &["checkout", "-b", "recent-work"]);
+            std::fs::write(dir.join("c.txt"), "fresh work").unwrap();
+            commit(dir, &recent, "fresh unmerged work");
+            git(dir, None, &["checkout", "main"]);
+
+            let cutoff = now - 24 * 3_600;
+            let stale = stale_branches(dir, cutoff);
+            let names: Vec<&str> = stale.iter().map(|b| b.name.as_str()).collect();
+            assert_eq!(names, vec!["stale-unmerged"], "got {stale:?}");
+            assert!(stale[0].tip_ts <= cutoff);
+        });
+    }
+
+    #[test]
+    fn stale_branches_empty_without_default_branch() {
+        with_temp_repo(|dir| {
+            // A repo with no commits and no resolvable trunk: nothing to
+            // measure unmerged work against, so the result is empty.
+            git(dir, None, &["-c", "init.defaultBranch=trunk", "init"]);
+            assert!(stale_branches(dir, chrono::Utc::now().timestamp()).is_empty());
+        });
+    }
 
     #[test]
     fn parse_numstat_path_no_rename() {

@@ -117,6 +117,28 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
             detail: format!("`{wf}` last green {days}d ago"),
         });
     }
+    if !r.stale_branches.is_empty() {
+        let n = r.stale_branches.len();
+        let now = chrono::Utc::now().timestamp();
+        let named: Vec<String> = r
+            .stale_branches
+            .iter()
+            .take(5)
+            .map(|b| {
+                let age_days = ((now - b.tip_ts) / 86_400).max(0);
+                format!("{} ({age_days}d)", b.name)
+            })
+            .collect();
+        let suffix = if n > named.len() { ", ..." } else { "" };
+        out.push(DerivedSignal {
+            signal: "stale_branches",
+            detail: format!(
+                "{n} local branch{} with unmerged commits >24h old: {}{suffix}",
+                if n == 1 { "" } else { "es" },
+                named.join(", "),
+            ),
+        });
+    }
     let _ = activity::is_action_required;
     out
 }

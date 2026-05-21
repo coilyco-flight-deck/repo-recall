@@ -188,6 +188,17 @@ pub struct SearchHit {
     pub extra: Option<String>,
 }
 
+/// One local branch carrying unmerged commits older than the staleness
+/// threshold - unlanded work left sitting. Stored on the `Repo` record and
+/// surfaced as an action-required pill. See #228.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleBranch {
+    /// Short branch name, e.g. `feature/foo`.
+    pub name: String,
+    /// Unix timestamp of the branch tip (its newest commit).
+    pub tip_ts: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub id: i64,
@@ -218,6 +229,11 @@ pub struct Repo {
     pub deploy_last_success_ts: Option<i64>,
     pub remote_url: Option<String>,
     pub default_branch: Option<String>,
+    /// Local branches with unmerged commits older than 24h - see #228.
+    /// `#[serde(default)]` keeps the record forward-compatible: a cache
+    /// written before this field existed still deserialises.
+    #[serde(default)]
+    pub stale_branches: Vec<StaleBranch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1814,6 +1830,7 @@ impl CacheWriter<'_> {
             deploy_last_success_ts: None,
             remote_url: remote_url.map(str::to_string),
             default_branch: default_branch.map(str::to_string),
+            stale_branches: Vec::new(),
         };
         let _ = discovered_at; // discovery time is not surfaced anywhere
         let bytes = serde_json::to_vec(&repo)?;
@@ -2257,6 +2274,7 @@ impl CacheWriter<'_> {
         stash_count: i64,
         head_ref: Option<&str>,
         in_progress_op: Option<&str>,
+        stale_branches: Vec<StaleBranch>,
     ) -> Result<()> {
         self.mutate_repo(repo_id, |r| {
             r.loc_churn_30d = loc_churn_30d;
@@ -2267,6 +2285,7 @@ impl CacheWriter<'_> {
             r.stash_count = stash_count;
             r.head_ref = head_ref.map(str::to_string);
             r.in_progress_op = in_progress_op.map(str::to_string);
+            r.stale_branches = stale_branches.clone();
         })
     }
 

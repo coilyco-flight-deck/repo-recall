@@ -62,6 +62,7 @@ pub struct BannerCounts {
     pub issue_assigned: i64,
     pub deploy_failing: usize,
     pub deploy_stale: usize,
+    pub stale_branches: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +165,10 @@ pub async fn index(
         .iter()
         .filter(|r| activity::is_deploy_stale(r))
         .count();
+    let stale_branches_count = repos
+        .iter()
+        .filter(|r| !activity::is_vendored(r) && activity::has_stale_branches(r))
+        .count();
 
     let norms = activity::normalisers(&repos);
     let repo_json: Vec<RepoJson> = repos
@@ -211,6 +216,7 @@ pub async fn index(
             issue_assigned: issue_assigned_count,
             deploy_failing: deploy_failing_count,
             deploy_stale: deploy_stale_count,
+            stale_branches: stale_branches_count,
         },
         counts: DashboardCounts {
             repos: repos_n,

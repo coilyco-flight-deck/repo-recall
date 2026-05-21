@@ -9,14 +9,14 @@ This doc describes capabilities. The egress surfaces (HTTP JSON + MCP) are summa
 Joins three primary sources into one queryable surface, all on the same host:
 
 - **Claude Code sessions** parsed from `~/.claude/projects/**/*.jsonl`. Metadata, 200-char summaries, malformed lines skipped.
-- **git** via `git log --all --no-merges` and working-tree status. Untracked + modified counts, stash, branch, ahead/behind, in-progress op, detached HEAD.
+- **git** via `git log --all --no-merges` and working-tree status. Untracked + modified counts, stash, branch, ahead/behind, in-progress op, detached HEAD, stale unmerged local branches.
 - **GitHub** via `gh` REST: CI status, open and draft PRs, issues, review queue, deploy workflow status. No GraphQL.
 
 Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repos.match_type` is the extension point.
 
 ## Action-required surfacing
 
-Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale. Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
+Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale, stale unmerged local branches (a branch with commits older than 24h not merged into the default branch). Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
 
 ## Activity ranking
 
