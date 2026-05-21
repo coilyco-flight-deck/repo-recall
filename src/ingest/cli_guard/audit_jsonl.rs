@@ -207,13 +207,19 @@ mod tests {
     use super::*;
 
     fn fixture(rows: &[&str]) -> PathBuf {
+        // Sequence counter as well as pid + nanos: two tests calling
+        // `fixture()` within the same nanosecond would otherwise land on
+        // the same dir and clobber each other's `scope.jsonl` (#240).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "repo-recall-audit-{}-{}",
+            "repo-recall-audit-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("scope.jsonl");
