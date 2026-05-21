@@ -216,6 +216,12 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 /// older than this, the deploy path itself probably rotted.
 pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 
+/// Threshold for the stale-local-branch signal: a local branch whose tip
+/// commit is older than this, and which isn't merged into the default
+/// branch, is treated as unlanded work that needs landing or cleanup.
+/// Named constant rather than a literal so it stays tunable. See #228.
+pub const STALE_BRANCH_SECS: i64 = 24 * 3_600;
+
 /// Current triggers:
 /// - Failing default-branch CI
 /// - Dirty working tree (untracked + modified)
@@ -228,6 +234,7 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 /// - Issue assigned to me
 /// - Deploy workflow's last run failed
 /// - Deploy workflow has been silent for > 7d since its last green run
+/// - A local branch carries unmerged commits older than 24h
 pub fn is_action_required(r: &Repo) -> bool {
     if is_vendored(r) {
         return false;
@@ -243,6 +250,15 @@ pub fn is_action_required(r: &Repo) -> bool {
         || r.issues_assigned_to_me > 0
         || is_deploy_failing(r)
         || is_deploy_stale(r)
+        || has_stale_branches(r)
+}
+
+/// True when the repo has at least one stale, unmerged local branch. The
+/// detection (age + merged filter) happens at refresh time in
+/// [`crate::ingest::git::log::stale_branches`]; this just reads the result
+/// off the `Repo` record.
+pub fn has_stale_branches(r: &Repo) -> bool {
+    !r.stale_branches.is_empty()
 }
 
 /// Vendored / external repo: a third-party tree cloned for reading, not for
@@ -339,6 +355,7 @@ mod tests {
             deploy_last_success_ts: None,
             remote_url: None,
             default_branch: None,
+            stale_branches: Vec::new(),
         }
     }
 
@@ -429,6 +446,22 @@ mod tests {
         assert!(!is_action_required(&detached));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_branches_trigger_action_required() {
+        let mut clean = repo(1, "clean", 0, 0);
+        clean.head_ref = Some("main".into());
+        assert!(!is_action_required(&clean));
+
+        let mut has_stale = repo(2, "has-stale", 0, 0);
+        has_stale.head_ref = Some("main".into());
+        has_stale.stale_branches = vec![crate::db::StaleBranch {
+            name: "feature/old".into(),
+            tip_ts: 1_700_000_000,
+        }];
+        assert!(has_stale_branches(&has_stale));
+        assert!(is_action_required(&has_stale));
     }
 
     #[test]

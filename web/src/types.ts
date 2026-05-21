@@ -1,3 +1,8 @@
+export type StaleBranch = {
+  name: string;
+  tip_ts: number;
+};
+
 export type Repo = {
   id: number;
   path: string;
@@ -27,6 +32,7 @@ export type Repo = {
   deploy_last_success_ts: number | null;
   remote_url: string | null;
   default_branch: string | null;
+  stale_branches: StaleBranch[];
   action_required: boolean;
   action_signals: string[];
   activity_score: number;
