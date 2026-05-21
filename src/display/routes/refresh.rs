@@ -77,7 +77,8 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 
         // Phase 2: sessions. Same wipe semantics as before — every record
         // in the cache lands inside the same refresh sweep.
-        let Some(projects_dir) = sessions::default_projects_dir() else {
+        let projects_dirs = sessions::default_projects_dirs();
+        if projects_dirs.is_empty() {
             // No Claude projects dir — still try commits before bailing.
             let commits_n = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
             cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
@@ -88,8 +89,8 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
                 commits: commits_n,
                 skipped: 0,
             });
-        };
-        let files = sessions::list_session_files(&projects_dir)?;
+        }
+        let files = sessions::list_session_files(&projects_dirs)?;
 
         let mut inserted = 0usize;
         let mut skipped = 0usize;

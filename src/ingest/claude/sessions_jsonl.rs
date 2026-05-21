@@ -52,41 +52,67 @@ struct ToolStat {
     errors: i64,
 }
 
-/// Returns the directory we'll parse session files from. Honors the
+/// Returns every directory we'll parse session files from. Honors the
 /// `REPO_RECALL_SESSIONS_DIR` env override (point it at a fixture tree for
 /// tests) and otherwise falls back to the canonical Claude Code projects
 /// directory at `~/.claude/projects/`.
-pub fn default_projects_dir() -> Option<PathBuf> {
+///
+/// The env override is a comma-delimited list of directories (#230). Each
+/// entry is checked independently: existing directories are kept, missing
+/// ones emit a `WARN` and are dropped. This lets the same config ship to
+/// every machine - on kai-server `~/projects/coilysiren,/tmp` resolves both
+/// halves, on other machines the `/tmp` sink half is simply absent and
+/// dropped. If the override resolves to zero usable directories the loader
+/// falls back to the default projects dir.
+pub fn default_projects_dirs() -> Vec<PathBuf> {
     if let Some(over) = std::env::var_os("REPO_RECALL_SESSIONS_DIR") {
-        let dir = PathBuf::from(over);
-        if dir.is_dir() {
-            return Some(dir);
+        let raw = over.to_string_lossy();
+        let mut dirs = Vec::new();
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let dir = PathBuf::from(part);
+            if dir.is_dir() {
+                dirs.push(dir);
+            } else {
+                tracing::warn!(
+                    "REPO_RECALL_SESSIONS_DIR entry {:?} is not a directory; skipping",
+                    dir
+                );
+            }
+        }
+        if !dirs.is_empty() {
+            return dirs;
         }
         tracing::warn!(
-            "REPO_RECALL_SESSIONS_DIR set to {:?} but is not a directory; falling back",
-            dir
+            "REPO_RECALL_SESSIONS_DIR={:?} resolved to no usable directories; falling back",
+            raw
         );
     }
-    let home = std::env::var_os("HOME")?;
-    let dir = PathBuf::from(home).join(".claude").join("projects");
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = PathBuf::from(home).join(".claude").join("projects");
+        if dir.is_dir() {
+            return vec![dir];
+        }
     }
+    Vec::new()
 }
 
-/// Enumerate every `.jsonl` file under the Claude projects directory.
-pub fn list_session_files(projects_dir: &Path) -> Result<Vec<PathBuf>> {
+/// Enumerate every `.jsonl` file under each of the given session directories.
+pub fn list_session_files(projects_dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(projects_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let p = entry.path();
-        if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            out.push(p.to_path_buf());
+    for projects_dir in projects_dirs {
+        for entry in walkdir::WalkDir::new(projects_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                out.push(p.to_path_buf());
+            }
         }
     }
     Ok(out)
@@ -863,6 +889,40 @@ mod tests {
             turn.thinking
         );
         assert!(turn.thinking[0].contains("[REDACTED:anthropic-key]"));
+    }
+
+    #[test]
+    fn default_projects_dirs_splits_comma_list_and_drops_missing() {
+        let key = "REPO_RECALL_SESSIONS_DIR";
+        let prev = std::env::var_os(key);
+        let real_a = std::env::temp_dir().join(format!("rr-dirs-a-{}", std::process::id()));
+        let real_b = std::env::temp_dir().join(format!("rr-dirs-b-{}", std::process::id()));
+        std::fs::create_dir_all(&real_a).unwrap();
+        std::fs::create_dir_all(&real_b).unwrap();
+        let fake = std::env::temp_dir().join(format!("rr-dirs-missing-{}", std::process::id()));
+
+        // SAFETY: no other test in this module touches REPO_RECALL_SESSIONS_DIR.
+        unsafe {
+            std::env::set_var(
+                key,
+                format!(
+                    "{}, {} ,{}",
+                    real_a.display(),
+                    fake.display(),
+                    real_b.display()
+                ),
+            );
+        }
+        let dirs = default_projects_dirs();
+        match prev {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        std::fs::remove_dir_all(&real_a).ok();
+        std::fs::remove_dir_all(&real_b).ok();
+
+        // The two real dirs survive, the missing one is dropped.
+        assert_eq!(dirs, vec![real_a, real_b]);
     }
 
     #[test]

@@ -22,7 +22,7 @@ paths:
   cwd: /Users/kai/projects/coilysiren  # REPO_RECALL_CWD. null => process cwd.
   cache_dir: null                      # REPO_RECALL_CACHE_DIR. null => $TMPDIR/repo-recall-<port>.
   index_dir: null                      # REPO_RECALL_INDEX_DIR. null => same dir as cache.
-  sessions_dir: null                   # REPO_RECALL_SESSIONS_DIR. null => ~/.claude/projects.
+  sessions_dir: null                   # REPO_RECALL_SESSIONS_DIR. Comma-delimited list of dirs; missing ones are dropped with a WARN. null => ~/.claude/projects.
   dispatch_root: null                  # REPO_RECALL_DISPATCH_ROOT. null => ~/.repo-recall/dispatch.
   structural_asks_root: null           # REPO_RECALL_STRUCTURAL_ASKS_ROOT.
   agents_drift_root: null              # REPO_RECALL_AGENTS_DRIFT_ROOT.
