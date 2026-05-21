@@ -8,7 +8,6 @@ export type Repo = {
   untracked_files: number;
   modified_files: number;
   authors_30d: number;
-  ci_status: string | null;
   commits_ahead: number;
   commits_behind: number;
   stash_count: number;

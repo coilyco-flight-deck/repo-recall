@@ -10,13 +10,13 @@ Joins three primary sources into one queryable surface, all on the same host:
 
 - **Claude Code sessions** parsed from `~/.claude/projects/**/*.jsonl`. Metadata, 200-char summaries, malformed lines skipped.
 - **git** via `git log --all --no-merges` and working-tree status. Untracked + modified counts, stash, branch, ahead/behind, in-progress op, detached HEAD.
-- **GitHub** via `gh` REST: CI status, open and draft PRs, issues, review queue, deploy workflow status. No GraphQL.
+- **GitHub** via `gh` REST: open and draft PRs, issues, review queue, deploy workflow status. No GraphQL.
 
 Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repos.match_type` is the extension point.
 
 ## Action-required surfacing
 
-Curated set of signals that float to the top of any ranking: failing CI, dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale, stale local branches (unmerged, tip older than 24h). Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
+Curated set of signals that float to the top of any ranking: dirty tree, in-progress git op, detached HEAD, review-requested PRs, drafts and no-reviewer, assigned issues, deploy failing or stale, stale local branches (unmerged, tip older than 24h). Each item is stable across scans by `(repo_id, signal)` so a polling consumer can dedupe.
 
 ## Activity ranking
 
@@ -48,7 +48,7 @@ Per-source fan-out. Each source (`git_log`, `github_remote`, `sessions`, `cli_gu
 
 ## Privacy posture
 
-Local-only by construction. Loopback bind only. Cache lives in `$TMPDIR`. The lean `Session` row stores metadata plus a 200-char summary; full turn text lives in the tantivy index, scrubbed at ingest, never as a `Session` column. Outbound limited to `gh run list` for CI status, reusing the local `gh` auth.
+Local-only by construction. Loopback bind only. Cache lives in `$TMPDIR`. The lean `Session` row stores metadata plus a 200-char summary; full turn text lives in the tantivy index, scrubbed at ingest, never as a `Session` column. Outbound limited to GitHub REST reads for PRs, issues, and deploy status, via the local `gh` auth.
 
 ## Distribution
 

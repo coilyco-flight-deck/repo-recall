@@ -20,20 +20,12 @@ pub struct DerivedSignal {
 
 /// Map a `Repo` row's individual fields onto the curated set of signals
 /// that drive `is_action_required`. One repo can produce multiple items
-/// (e.g. failing CI *and* a dirty tree) — the orchestrator can act on
-/// each independently.
+/// (e.g. a dirty tree and an in-progress git op) — the orchestrator can
+/// act on each independently.
 pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
     let mut out = Vec::new();
     if activity::is_vendored(r) {
         return out;
-    }
-    if r.ci_status.as_deref() == Some("failure") {
-        let branch = r.default_branch.as_deref().unwrap_or("default branch");
-        out.push(DerivedSignal {
-            signal: "ci_failing",
-            detail: "default-branch CI failed".into(),
-            terse: format!("CI failing on {branch}"),
-        });
     }
     let dirty = r.untracked_files + r.modified_files;
     if dirty > 0 {

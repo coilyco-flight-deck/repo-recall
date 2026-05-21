@@ -257,13 +257,13 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
         }
     };
 
-    // github_remote source: CI/CD status, PR + issue counts, then the
+    // github_remote source: PR + issue counts, deploy status, then the
     // "clone one" active-repo snapshot. Runs as its own async tasks so the
-    // `gh` subprocess latency overlaps instead of serialising into the
-    // blocking sweep above. Best-effort - `gh` missing / unauthenticated
-    // leaves the remote tables empty.
-    let ci_updated = if do_remote {
-        let n = ingest_ci_status(state.clone()).await;
+    // network latency overlaps instead of serialising into the blocking
+    // sweep above. Best-effort - `gh` missing / unauthenticated leaves the
+    // remote tables empty.
+    let remote_updated = if do_remote {
+        let n = ingest_remote_state(state.clone()).await;
         let _active = ingest_active_repos(state.clone()).await;
         n
     } else {
@@ -318,7 +318,7 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
         stats.sessions,
         stats.links,
         stats.commits,
-        ci_updated,
+        remote_updated,
         content_matches,
         stats.skipped,
     );
@@ -413,11 +413,11 @@ async fn ingest_gh_refs(state: AppState) -> usize {
     .unwrap_or(0)
 }
 
-/// Parallel `gh run list` across every repo with a GitHub remote + known
-/// default branch. Returns how many rows we successfully updated. Each
-/// subprocess runs in its own `spawn_blocking` so network latency overlaps;
-/// a bounded `JoinSet` caps in-flight `gh` calls to avoid fork-bombing.
-async fn ingest_ci_status(state: AppState) -> usize {
+/// Parallel GitHub REST fetch across every repo with a GitHub remote +
+/// known default branch: open PRs, open issues, deploy workflow health.
+/// Returns how many rows we successfully updated. A bounded `JoinSet`
+/// caps in-flight calls to avoid fork-bombing.
+async fn ingest_remote_state(state: AppState) -> usize {
     // Skip the entire remote pass while we're inside a rate-limit
     // cooldown window. Set by a prior pass that observed a
     // `RateLimited` from any gh fetcher; cleared automatically when
@@ -498,8 +498,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
             // those out the same way.
             let issue_state = github_client.fetch_open_issues(&slug).await;
             let pr_state = github_client.fetch_open_prs(&slug).await;
-            let ci_state = github_client.fetch_recent_runs(&slug, 20).await;
-            let ci_status_state = github_client.fetch_ci_status(&slug, &branch).await;
             let deploy_state = match deploy_wf.as_ref() {
                 Some(wf) => Some((
                     wf.clone(),
@@ -515,7 +513,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
                     None => (None, None),
                 };
                 use crate::ingest::github::RemoteFetchState;
-                let ci = ci_status_state.into_option().flatten();
                 let deploy = deploy_state.and_then(|(wf, st)| st.into_option().map(|h| (wf, h)));
 
                 let mut rate_limited = false;
@@ -523,7 +520,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 for st in [
                     pr_state.clone().discard_payload(),
                     issue_state.clone().discard_payload(),
-                    ci_state.clone().discard_payload(),
                 ] {
                     if let RemoteFetchState::RateLimited { retry_after_secs } = st {
                         rate_limited = true;
@@ -536,16 +532,13 @@ async fn ingest_ci_status(state: AppState) -> usize {
 
                 let pr_records = pr_state.into_option().unwrap_or_default();
                 let issue_records = issue_state.into_option().unwrap_or_default();
-                let ci_runs = ci_state.into_option().unwrap_or_default();
                 RemoteSnapshot {
                     id,
-                    ci,
                     prs,
                     issues,
                     deploy,
                     pr_records,
                     issue_records,
-                    ci_runs,
                     rate_limited,
                     max_retry_after_secs,
                 }
@@ -589,7 +582,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 };
                 w.update_repo_remote_state(
                     snap.id,
-                    snap.ci,
                     prs.open,
                     prs.draft,
                     prs.awaiting_my_review,
@@ -607,9 +599,6 @@ async fn ingest_ci_status(state: AppState) -> usize {
                 }
                 for issue in &snap.issue_records {
                     w.upsert_issue_record(snap.id, issue)?;
-                }
-                for run in &snap.ci_runs {
-                    w.upsert_ci_run_record(snap.id, run)?;
                 }
                 n += 1;
             }
@@ -683,23 +672,19 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
     let mut refreshed = 0usize;
 
     for snap in results.iter_mut() {
-        let snapshot_is_blank = snap.ci.is_none()
-            && snap.prs.is_none()
+        let snapshot_is_blank = snap.prs.is_none()
             && snap.issues.is_none()
             && snap.deploy.is_none()
             && snap.pr_records.is_empty()
-            && snap.issue_records.is_empty()
-            && snap.ci_runs.is_empty();
+            && snap.issue_records.is_empty();
 
         if snap.rate_limited || snapshot_is_blank {
             if let Some(prior) = shadow.get(&snap.id) {
-                snap.ci.clone_from(&prior.ci);
                 snap.prs.clone_from(&prior.prs);
                 snap.issues.clone_from(&prior.issues);
                 snap.deploy.clone_from(&prior.deploy);
                 snap.pr_records.clone_from(&prior.pr_records);
                 snap.issue_records.clone_from(&prior.issue_records);
-                snap.ci_runs.clone_from(&prior.ci_runs);
                 substituted += 1;
             }
             continue;
@@ -708,13 +693,11 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
         shadow.insert(
             snap.id,
             crate::CachedRemoteState {
-                ci: snap.ci.clone(),
                 prs: snap.prs.clone(),
                 issues: snap.issues,
                 deploy: snap.deploy.clone(),
                 pr_records: snap.pr_records.clone(),
                 issue_records: snap.issue_records.clone(),
-                ci_runs: snap.ci_runs.clone(),
                 captured_at: now,
             },
         );
@@ -768,13 +751,11 @@ async fn update_remote_backoff(state: &AppState, results: &[RemoteSnapshot]) {
 
 struct RemoteSnapshot {
     id: i64,
-    ci: Option<String>,
     prs: Option<git::log::PrCounts>,
     issues: Option<git::log::IssueCounts>,
     deploy: Option<(String, git::log::DeployHealth)>,
     pr_records: Vec<crate::ingest::github::PrRecordInput>,
     issue_records: Vec<crate::ingest::github::IssueRecordInput>,
-    ci_runs: Vec<crate::ingest::github::CiRunRecordInput>,
     /// True if any of this snapshot's gh fetchers reported
     /// `RemoteFetchState::RateLimited`. Aggregated across the pass to
     /// drive `AppState::remote_backoff_*`.

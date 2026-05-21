@@ -55,9 +55,9 @@ pub type AttrFn = fn(&Repo) -> i64;
 /// - **LocalState** — what the working tree looks like *right now* on disk
 ///   (untracked, modified, maybe branch divergence later). Also cheap; also
 ///   changes between refreshes.
-/// - **RemoteState** — what a remote service currently thinks: CI / CD
-///   status, open PRs, review requests. Requires a network call (via `gh`
-///   or the GitHub REST API), so these attributes are refreshed with a
+/// - **RemoteState** — what a remote service currently thinks: deploy
+///   status, open PRs, review requests. Requires a network call (via the
+///   GitHub REST API), so these attributes are refreshed with a
 ///   tolerance for latency + failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
@@ -112,14 +112,6 @@ pub const ATTRS: &[Attr] = &[
         get: |r| r.untracked_files + r.modified_files,
     },
     // --- RemoteState: requires a network call --------------------------
-    Attr {
-        // Binary: 1 if the latest default-branch CI run failed. Failing CI
-        // is a strong "needs attention" signal — we want it to pull repos
-        // up the activity ranking even if nothing else is moving.
-        key: "ci_failing",
-        category: Category::RemoteState,
-        get: |r| i64::from(r.ci_status.as_deref() == Some("failure")),
-    },
     Attr {
         key: "prs_awaiting_my_review",
         category: Category::RemoteState,
@@ -229,7 +221,6 @@ pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 pub const STALE_BRANCH_SECS: i64 = 24 * 3_600;
 
 /// Current triggers:
-/// - Failing default-branch CI
 /// - Dirty working tree (untracked + modified)
 /// - In-progress git operation (rebase / merge / cherry-pick / revert / bisect)
 /// - Detached HEAD
@@ -249,8 +240,7 @@ pub fn is_action_required(r: &Repo) -> bool {
     if is_vendored(r) {
         return false;
     }
-    r.ci_status.as_deref() == Some("failure")
-        || (r.untracked_files + r.modified_files) > 0
+    (r.untracked_files + r.modified_files) > 0
         || r.in_progress_op.is_some()
         || r.head_ref.as_deref() == Some("detached")
         || r.prs_awaiting_my_review > 0
@@ -339,7 +329,6 @@ mod tests {
             untracked_files: 0,
             modified_files: 0,
             authors_30d: 0,
-            ci_status: None,
             commits_ahead: 0,
             commits_behind: 0,
             stash_count: 0,
@@ -493,20 +482,19 @@ mod tests {
 
     #[test]
     fn action_required_hard_sorts_to_top() {
-        // A quiet repo with failing CI should outrank a very active repo
-        // whose tree is clean and CI is green.
+        // A quiet repo with a dirty tree should outrank a very active repo
+        // whose tree is clean.
         let mut noisy_clean = repo(1, "noisy-clean", 20, 500);
         noisy_clean.authors_30d = 15;
-        noisy_clean.ci_status = Some("success".into());
 
         let mut dormant_broken = repo(2, "dormant-broken", 0, 0);
-        dormant_broken.ci_status = Some("failure".into());
+        dormant_broken.in_progress_op = Some("rebase".into());
+        dormant_broken.modified_files = 3;
 
         let mut quiet_dirty = repo(3, "quiet-dirty", 0, 0);
         quiet_dirty.modified_files = 3;
 
-        let mut quiet_clean = repo(4, "quiet-clean", 0, 0);
-        quiet_clean.ci_status = Some("success".into());
+        let quiet_clean = repo(4, "quiet-clean", 0, 0);
 
         let mut repos = vec![
             noisy_clean.clone(),
