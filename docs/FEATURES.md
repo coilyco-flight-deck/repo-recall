@@ -42,9 +42,13 @@ Two stores, no SQLite. `cache.redb` (KV, wipe-on-restart) plus a tantivy full-te
 
 Background refresh on a configurable interval (default 150s, set 0 to disable). Local sources run blocking in one `spawn_blocking`; remote sources use tokio tasks plus a bounded semaphore (8). Remote failures swallow at `debug!` rather than fail the scan. Per-source refresh rates and notify-driven filesystem ingest are tracked separately in #190.
 
+## Full-text session search
+
+`recall_search` indexes full session turn text into tantivy — every prompt input, model output, and thinking step, one document per turn so a hit lands on the exact turn. Turn text is scrubbed at ingest with the same gate as PR/issue bodies: secret-shaped tokens and known-bad terms are redacted before anything is indexed. Turn expansion is bounded to recent sessions via `REPO_RECALL_TURN_INDEX_DAYS` (default 30). On the dashboard, session text renders blurred behind a click-to-reveal — visible only on a deliberate action.
+
 ## Privacy posture
 
-Local-only by construction. Loopback bind only. Cache lives in `$TMPDIR`. Stores metadata plus 200-char summaries; never transcripts. Outbound limited to `gh run list` for CI status, reusing the local `gh` auth.
+Local-only by construction. Loopback bind only. Cache lives in `$TMPDIR`. The lean `Session` row stores metadata plus a 200-char summary; full turn text lives in the tantivy index, scrubbed at ingest, never as a `Session` column. Outbound limited to `gh run list` for CI status, reusing the local `gh` auth.
 
 ## Distribution
 

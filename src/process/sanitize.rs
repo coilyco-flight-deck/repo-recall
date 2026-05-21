@@ -32,6 +32,9 @@ pub enum SanitizeSource {
     GithubIssueBody,
     /// Frontmatter free-text fields embedded in any of the above.
     Frontmatter,
+    /// Claude session transcript text — prompt inputs, model outputs, and
+    /// thinking steps — destined for the tantivy turn index (#229).
+    SessionText,
 }
 
 const FIXED_TERMS: &[(&str, &str)] = &[

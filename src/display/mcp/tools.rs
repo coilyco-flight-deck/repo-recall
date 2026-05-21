@@ -210,7 +210,9 @@ pub async fn session(
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchArgs {
-    /// Free-text query. Searches repo names, session summaries, and commit subjects.
+    /// Free-text query. Searches repo names, session summaries, full
+    /// session turn text (prompts, model outputs, thinking steps), and
+    /// commit subjects.
     pub q: String,
     /// Max hits per partition. Default 20.
     #[serde(default)]
@@ -232,11 +234,23 @@ pub async fn search(
         .map_err(|e| pmcp::Error::internal(format!("search: {e}")))?;
     let hits: Vec<db::SearchHit> = hits
         .into_iter()
-        .map(|h| db::SearchHit {
-            kind: h.kind,
-            ref_id: h.ref_id,
-            text: h.text,
-            extra: None,
+        .map(|h| {
+            // A `session_turn` hit carries its turn pointer in `extra` so
+            // a consumer can pivot straight to the prompt / output / step.
+            let extra = h.turn.map(|t| {
+                json!({
+                    "session_uuid": t.session_uuid,
+                    "turn_index": t.turn_index,
+                    "turn_role": t.turn_role,
+                })
+                .to_string()
+            });
+            db::SearchHit {
+                kind: h.kind,
+                ref_id: h.ref_id,
+                text: h.text,
+                extra,
+            }
         })
         .collect();
 

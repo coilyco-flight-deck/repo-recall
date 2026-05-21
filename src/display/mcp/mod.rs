@@ -67,7 +67,8 @@ pub fn build_server(state: AppState) -> anyhow::Result<Server> {
             Box::pin(tools::search(s, args, extra))
         })
         .with_description(
-            "Unified search across repos, sessions, and commits. Returns partitioned hits.",
+            "Unified search across repos, sessions, full session turn text, and commits. \
+             Returns partitioned hits; a `session_turn` hit carries its turn pointer.",
         )
     };
 

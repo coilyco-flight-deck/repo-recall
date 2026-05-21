@@ -39,6 +39,19 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
     let commits_per_repo = state.commits_per_repo;
     let search_index = state.search_index.clone();
     let cutoff_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
+    // Turn-index window (#229). Full session turn text is re-parsed and
+    // re-indexed every refresh, so the window bounds that work to recent
+    // sessions. `REPO_RECALL_TURN_INDEX_DAYS` overrides the 30-day default;
+    // 0 disables the window (index every session's turns).
+    let turn_index_days: i64 = std::env::var("REPO_RECALL_TURN_INDEX_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let turn_index_cutoff = if turn_index_days <= 0 {
+        0
+    } else {
+        chrono::Utc::now().timestamp() - turn_index_days * 86_400
+    };
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RefreshStats> {
         // Phase 1: discovery + repo upserts. One write transaction.
@@ -81,17 +94,29 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         let mut inserted = 0usize;
         let mut skipped = 0usize;
         let mut links = 0usize;
+        // Full-text turn docs (#229), accumulated as we parse each session
+        // in this pass so phase 5 never re-reads the JSONL off disk.
+        let mut turn_docs: Vec<crate::search::IndexDoc> = Vec::new();
 
         cache_db.write_batch(|w| {
             for path in files.iter() {
                 match sessions::parse_session_file(path) {
-                    Ok(Some(rec)) => {
+                    Ok(Some((rec, turns))) => {
                         let (session_id, was_new) = w.upsert_session(&rec)?;
                         if !was_new {
                             skipped += 1;
                             continue;
                         }
                         inserted += 1;
+                        // Expand turns into one index doc each, but only
+                        // for sessions inside the turn-index window.
+                        if rec.started_at.is_none_or(|t| t >= turn_index_cutoff) {
+                            turn_docs.extend(session_turn_docs(
+                                session_id,
+                                &rec.session_uuid,
+                                &turns,
+                            ));
+                        }
                         if let Some(cwd_str) = rec.cwd.as_deref() {
                             if let Some(repo_id) =
                                 join::best_repo_for_cwd(cwd_str, &repo_id_by_path)
@@ -126,8 +151,12 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
         // Phase 4: precompute aggregates the dashboard reads back.
         cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff_30d))?;
 
-        // Phase 5: rebuild the tantivy search index.
-        let corpus = cache_db.collect_search_corpus()?;
+        // Phase 5: rebuild the tantivy search index. The redb-resident
+        // docs (repo / session / commit) come from the cache; the
+        // `session_turn` docs (#229) were built in phase 2 from the JSONL
+        // the scan already parsed — see `REPO_RECALL_TURN_INDEX_DAYS`.
+        let mut corpus = cache_db.collect_search_corpus()?;
+        corpus.extend(turn_docs);
         if let Err(e) = search_index.rebuild(corpus) {
             tracing::warn!("tantivy rebuild failed (search will serve stale results): {e:?}");
         }
@@ -663,6 +692,53 @@ struct RemoteSnapshot {
     max_retry_after_secs: Option<u64>,
 }
 
+/// Expand one session's parsed transcript into `session_turn` index docs
+/// (#229): one doc per turn, carrying the joined prompt / model-output /
+/// thinking text. Each turn's text is scrubbed with the same gate as
+/// PR/issue bodies before it is handed to the index — secrets are
+/// redacted at ingest, before anything is persisted or searchable.
+/// Turns with no prose (tool-only bookkeeping) are dropped.
+fn session_turn_docs(
+    session_id: i64,
+    session_uuid: &str,
+    turns: &[crate::ingest::claude::sessions_jsonl::Turn],
+) -> Vec<crate::search::IndexDoc> {
+    use crate::ingest::claude::sessions_jsonl::TurnRole;
+    use crate::process::sanitize::{scrub, SanitizeSource};
+    use crate::search::{IndexDoc, TurnPointer};
+
+    let mut docs = Vec::new();
+    for (idx, turn) in turns.iter().enumerate() {
+        let mut combined = String::new();
+        for t in turn.texts.iter().chain(turn.thinking.iter()) {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(t);
+        }
+        let combined = combined.trim();
+        if combined.is_empty() {
+            continue;
+        }
+        let role = match turn.role {
+            TurnRole::User => "user",
+            TurnRole::Assistant => "assistant",
+            TurnRole::System => "system",
+        };
+        docs.push(IndexDoc {
+            kind: "session_turn".into(),
+            ref_id: session_id,
+            text: scrub(combined, SanitizeSource::SessionText),
+            turn: Some(TurnPointer {
+                session_uuid: session_uuid.to_string(),
+                turn_index: idx as i64,
+                turn_role: role.into(),
+            }),
+        });
+    }
+    docs
+}
+
 struct RefreshStats {
     repos: usize,
     sessions: usize,
@@ -786,4 +862,62 @@ fn ingest_commits(
         }
         Ok(total_commits)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::claude::sessions_jsonl::{Turn, TurnRole};
+
+    fn turn(role: TurnRole, texts: &[&str], thinking: &[&str]) -> Turn {
+        Turn {
+            role,
+            timestamp: None,
+            texts: texts.iter().map(|s| s.to_string()).collect(),
+            tool_uses: Vec::new(),
+            tool_results: Vec::new(),
+            thinking: thinking.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// #229: one `session_turn` doc per non-empty turn, with prompt /
+    /// output / thinking text scrubbed at ingest.
+    #[test]
+    fn session_turn_docs_scrub_and_index_each_turn() {
+        let turns = vec![
+            turn(TurnRole::User, &["redeploy on kai-server please"], &[]),
+            turn(
+                TurnRole::Assistant,
+                &["rotating ghp_AAAABBBBCCCCDDDDEEEEFFFF now"],
+                &["the deploy plan looks sound"],
+            ),
+            turn(TurnRole::User, &[], &[]), // no prose — dropped
+        ];
+        let docs = session_turn_docs(42, "uuid-1", &turns);
+
+        assert_eq!(docs.len(), 2, "the empty turn is dropped");
+        assert!(docs
+            .iter()
+            .all(|d| d.kind == "session_turn" && d.ref_id == 42));
+        assert!(
+            !docs[0].text.contains("kai-server"),
+            "internal host scrubbed: {}",
+            docs[0].text
+        );
+        assert!(
+            !docs[1].text.contains("ghp_AAAA"),
+            "token scrubbed: {}",
+            docs[1].text
+        );
+        assert!(
+            docs[1].text.contains("the deploy plan looks sound"),
+            "thinking step indexed: {}",
+            docs[1].text
+        );
+
+        let t = docs[1].turn.as_ref().expect("turn pointer");
+        assert_eq!(t.turn_index, 1);
+        assert_eq!(t.turn_role, "assistant");
+        assert_eq!(t.session_uuid, "uuid-1");
+    }
 }

@@ -1203,8 +1203,12 @@ impl CacheDb {
         Ok(out)
     }
 
-    /// Read every record that needs to land in tantivy. The shape mirrors
-    /// the prior FTS5 `search_idx` rows: `(kind, ref_id, text)`.
+    /// Read the redb-resident records that land in tantivy: `repo`,
+    /// `session` (the `last_prompt` summary), and `commit` docs. The
+    /// fourth kind, `session_turn` (#229) — one doc per session turn —
+    /// is built in the session-ingest pass straight from the JSONL the
+    /// scan already parsed (see `refresh::session_turn_docs`), so it is
+    /// not re-parsed off disk here. The caller concatenates the two.
     pub fn collect_search_corpus(&self) -> Result<Vec<crate::search::IndexDoc>> {
         use crate::search::IndexDoc;
         let read = self.db.begin_read()?;
@@ -1213,32 +1217,23 @@ impl CacheDb {
         for row in read.open_table(REPOS)?.iter()? {
             let (_k, v) = row?;
             let r: Repo = serde_json::from_slice(v.value())?;
-            let text = format!("{} {}", r.name, r.path);
-            out.push(IndexDoc {
-                kind: "repo".into(),
-                ref_id: r.id,
-                text,
-            });
+            out.push(IndexDoc::plain(
+                "repo",
+                r.id,
+                format!("{} {}", r.name, r.path),
+            ));
         }
         for row in read.open_table(SESSIONS)?.iter()? {
             let (_k, v) = row?;
             let s: Session = serde_json::from_slice(v.value())?;
             if let Some(text) = s.last_prompt {
-                out.push(IndexDoc {
-                    kind: "session".into(),
-                    ref_id: s.id,
-                    text,
-                });
+                out.push(IndexDoc::plain("session", s.id, text));
             }
         }
         for row in read.open_table(COMMITS)?.iter()? {
             let (_k, v) = row?;
             let c: Commit = serde_json::from_slice(v.value())?;
-            out.push(IndexDoc {
-                kind: "commit".into(),
-                ref_id: c.id,
-                text: c.subject,
-            });
+            out.push(IndexDoc::plain("commit", c.id, c.subject));
         }
         Ok(out)
     }

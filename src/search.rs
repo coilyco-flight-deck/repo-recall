@@ -19,13 +19,40 @@ use tantivy::schema::{
 };
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 
-/// One indexed document. Mirrors the FTS5 row shape (`kind`, `ref_id`,
-/// `text`) so the eventual reader flip in step 3 is a like-for-like swap.
+/// One indexed document. `kind`/`ref_id`/`text` mirror the original FTS5
+/// row shape. `turn` is set only for `kind = "session_turn"` docs (#229):
+/// one document per session turn, so a hit lands on the exact prompt,
+/// model output, or thinking step rather than the whole chat.
 #[derive(Debug, Clone)]
 pub struct IndexDoc {
     pub kind: String,
     pub ref_id: i64,
     pub text: String,
+    pub turn: Option<TurnPointer>,
+}
+
+impl IndexDoc {
+    /// A repo / session / commit doc with no turn pointer.
+    pub fn plain(kind: impl Into<String>, ref_id: i64, text: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            ref_id,
+            text: text.into(),
+            turn: None,
+        }
+    }
+}
+
+/// Pointer back to one turn of a session transcript. Stored alongside the
+/// indexed text so a `session_turn` hit can pivot straight to the turn.
+#[derive(Debug, Clone)]
+pub struct TurnPointer {
+    /// The session this turn belongs to.
+    pub session_uuid: String,
+    /// 0-based position of the turn within the parsed transcript.
+    pub turn_index: i64,
+    /// `user`, `assistant`, or `system`.
+    pub turn_role: String,
 }
 
 /// Top-K hit. Same shape as `db::SearchHit` minus the snippet (snippet is
@@ -36,6 +63,7 @@ pub struct SearchHit {
     pub ref_id: i64,
     pub text: String,
     pub score: f32,
+    pub turn: Option<TurnPointer>,
 }
 
 #[derive(Clone)]
@@ -55,6 +83,9 @@ struct Fields {
     kind: Field,
     ref_id: Field,
     text: Field,
+    session_uuid: Field,
+    turn_index: Field,
+    turn_role: Field,
 }
 
 impl SearchIndex {
@@ -78,6 +109,12 @@ impl SearchIndex {
             .set_indexing_options(text_indexing)
             .set_stored();
         let text = builder.add_text_field("text", text_opts);
+        // Turn-pointer fields for `session_turn` docs (#229). Stored so a
+        // hit can pivot to the exact turn; not tokenized — they are
+        // identifiers, not searchable prose.
+        let session_uuid = builder.add_text_field("session_uuid", STRING | STORED);
+        let turn_index = builder.add_i64_field("turn_index", STORED);
+        let turn_role = builder.add_text_field("turn_role", STRING | STORED);
         let schema = builder.build();
 
         let index = Index::create_in_dir(dir, schema).context("create tantivy index")?;
@@ -95,7 +132,14 @@ impl SearchIndex {
                 index,
                 reader,
                 writer: Mutex::new(writer),
-                fields: Fields { kind, ref_id, text },
+                fields: Fields {
+                    kind,
+                    ref_id,
+                    text,
+                    session_uuid,
+                    turn_index,
+                    turn_role,
+                },
             }),
         })
     }
@@ -119,6 +163,11 @@ impl SearchIndex {
             td.add_text(f.kind, &doc.kind);
             td.add_i64(f.ref_id, doc.ref_id);
             td.add_text(f.text, &doc.text);
+            if let Some(t) = &doc.turn {
+                td.add_text(f.session_uuid, &t.session_uuid);
+                td.add_i64(f.turn_index, t.turn_index);
+                td.add_text(f.turn_role, &t.turn_role);
+            }
             writer.add_document(td)?;
         }
         writer.commit()?;
@@ -157,11 +206,29 @@ impl SearchIndex {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // A `session_turn` doc carries a turn pointer; everything else
+            // leaves `turn` as `None`.
+            let turn = doc
+                .get_first(f.session_uuid)
+                .and_then(|v| v.as_str())
+                .map(|uuid| TurnPointer {
+                    session_uuid: uuid.to_string(),
+                    turn_index: doc
+                        .get_first(f.turn_index)
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    turn_role: doc
+                        .get_first(f.turn_role)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                });
             out.push(SearchHit {
                 kind,
                 ref_id,
                 text,
                 score,
+                turn,
             });
         }
         Ok(out)
@@ -202,16 +269,8 @@ mod tests {
         let dir = temp_dir();
         let idx = SearchIndex::open_at(&dir).unwrap();
         idx.rebuild(vec![
-            IndexDoc {
-                kind: "session".into(),
-                ref_id: 1,
-                text: "Tracked down the CI flake in the auth tests".into(),
-            },
-            IndexDoc {
-                kind: "commit".into(),
-                ref_id: 42,
-                text: "fix: handle empty cwd in scanner".into(),
-            },
+            IndexDoc::plain("session", 1, "Tracked down the CI flake in the auth tests"),
+            IndexDoc::plain("commit", 42, "fix: handle empty cwd in scanner"),
         ])
         .unwrap();
 
@@ -229,22 +288,49 @@ mod tests {
     fn rebuild_replaces_prior_docs() {
         let dir = temp_dir();
         let idx = SearchIndex::open_at(&dir).unwrap();
-        idx.rebuild(vec![IndexDoc {
-            kind: "session".into(),
-            ref_id: 1,
-            text: "alpha bravo".into(),
-        }])
-        .unwrap();
+        idx.rebuild(vec![IndexDoc::plain("session", 1, "alpha bravo")])
+            .unwrap();
         assert_eq!(idx.search("alpha", 10).unwrap().len(), 1);
 
-        idx.rebuild(vec![IndexDoc {
-            kind: "session".into(),
-            ref_id: 2,
-            text: "charlie delta".into(),
-        }])
-        .unwrap();
+        idx.rebuild(vec![IndexDoc::plain("session", 2, "charlie delta")])
+            .unwrap();
         assert!(idx.search("alpha", 10).unwrap().is_empty());
         assert_eq!(idx.search("charlie", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn session_turn_doc_round_trips_its_turn_pointer() {
+        let dir = temp_dir();
+        let idx = SearchIndex::open_at(&dir).unwrap();
+        idx.rebuild(vec![
+            IndexDoc {
+                kind: "session_turn".into(),
+                ref_id: 7,
+                text: "redact the transcript before indexing it".into(),
+                turn: Some(TurnPointer {
+                    session_uuid: "abc-123".into(),
+                    turn_index: 4,
+                    turn_role: "assistant".into(),
+                }),
+            },
+            IndexDoc::plain("commit", 9, "unrelated commit subject"),
+        ])
+        .unwrap();
+
+        let hits = idx.search("transcript", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        assert_eq!(hit.kind, "session_turn");
+        assert_eq!(hit.ref_id, 7);
+        let turn = hit.turn.as_ref().expect("turn pointer present");
+        assert_eq!(turn.session_uuid, "abc-123");
+        assert_eq!(turn.turn_index, 4);
+        assert_eq!(turn.turn_role, "assistant");
+
+        // A plain doc leaves the turn pointer empty.
+        let plain = idx.search("unrelated", 10).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].turn.is_none());
     }
 
     #[test]

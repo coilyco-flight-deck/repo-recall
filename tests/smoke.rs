@@ -21,6 +21,16 @@ async fn boot() -> (String, tokio::task::JoinHandle<()>) {
 async fn boot_with(
     viewer: repo_recall::ingest::github::RemoteFetchState<repo_recall::ingest::github::AuthedUser>,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    // Point session ingest at an empty dir, not the operator's real
+    // `~/.claude/projects`. These tests exercise the HTTP surface, not
+    // session content; turn-indexing hundreds of MB of real JSONL into
+    // tantivy (#229) on every triggered refresh just burns test CPU.
+    // Every test in this binary wants the same empty dir, so the shared
+    // process-global env var is idempotent.
+    let sessions_dir = std::env::temp_dir().join(format!("repo-recall-sessions-{}", uuid_like()));
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::env::set_var("REPO_RECALL_SESSIONS_DIR", &sessions_dir);
+
     // Unique cache dir per test run so parallel `cargo test` invocations
     // don't collide.
     let cache_dir = std::env::temp_dir().join(format!("repo-recall-test-{}", uuid_like()));

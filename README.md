@@ -77,7 +77,7 @@ Drop empty `.repo-recall-ignore` at the root of a repo cloned for reading. Suppr
 
 ## Env vars
 
-`REPO_RECALL_PORT` (7777, loopback only), `REPO_RECALL_CWD` (process cwd), `REPO_RECALL_DEPTH` (4), `REPO_RECALL_COMMITS_PER_REPO` (500), `REPO_RECALL_CACHE_DIR` (`$TMPDIR/repo-recall-<port>`, wipe-on-startup), `REPO_RECALL_REFRESH_INTERVAL_SECS` (150, 0 disables), `RUST_LOG`.
+`REPO_RECALL_PORT` (7777, loopback only), `REPO_RECALL_CWD` (process cwd), `REPO_RECALL_DEPTH` (4), `REPO_RECALL_COMMITS_PER_REPO` (500), `REPO_RECALL_CACHE_DIR` (`$TMPDIR/repo-recall-<port>`, wipe-on-startup), `REPO_RECALL_REFRESH_INTERVAL_SECS` (150, 0 disables), `REPO_RECALL_TURN_INDEX_DAYS` (30, 0 indexes every session's turns), `RUST_LOG`.
 
 ## Privacy
 

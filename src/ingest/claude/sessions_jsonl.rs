@@ -132,9 +132,14 @@ struct RawMessage {
     stop_reason: Option<String>,
 }
 
-/// Parse one JSONL session file into a `SessionRecord`. Returns `Ok(None)` if
-/// the file doesn't yield any recognisable session data (empty, malformed, etc).
-pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
+/// Parse one JSONL session file into a `SessionRecord` plus the flat list
+/// of renderable/indexable turns. Returns `Ok(None)` if the file doesn't
+/// yield any recognisable session data (empty, malformed, etc).
+///
+/// Turns are collected in the same single pass as the metadata so the
+/// scan never parses a session file twice — the full-text turn index
+/// (#229) reuses this output rather than re-reading the JSONL.
+pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn>)>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -163,6 +168,9 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
     // Pending tool_use_id -> tool name, so we can attribute is_error tool
     // results back to the tool that produced them. Cleared as results arrive.
     let mut pending_tool_uses: BTreeMap<String, String> = BTreeMap::new();
+    // Flat transcript, one entry per user/assistant/system line. Built in
+    // this same pass for the full-text turn index (#229).
+    let mut turns: Vec<Turn> = Vec::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -288,6 +296,46 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
                 &mut pending_tool_uses,
             );
         }
+
+        // Build the renderable/indexable turn for user/assistant/system
+        // lines. Same walk as `parse_transcript`, folded into this pass so
+        // a session file is parsed exactly once.
+        let turn_role = match line_type {
+            "user" => Some(TurnRole::User),
+            "assistant" => Some(TurnRole::Assistant),
+            "system" => Some(TurnRole::System),
+            _ => None,
+        };
+        if let Some(role) = turn_role {
+            let ts = raw
+                .timestamp
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc).timestamp());
+            let mut turn = Turn {
+                role,
+                timestamp: ts,
+                texts: Vec::new(),
+                tool_uses: Vec::new(),
+                tool_results: Vec::new(),
+                thinking: Vec::new(),
+            };
+            let content = raw
+                .message
+                .as_ref()
+                .and_then(|m| m.content.as_ref())
+                .or(raw.content.as_ref());
+            if let Some(v) = content {
+                walk_content(v, &mut turn);
+            }
+            if !turn.texts.is_empty()
+                || !turn.tool_uses.is_empty()
+                || !turn.tool_results.is_empty()
+                || !turn.thinking.is_empty()
+            {
+                turns.push(turn);
+            }
+        }
     }
 
     // Derive a session id if none was found (fall back to the filename stem).
@@ -322,30 +370,33 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
     let stop_reason_counts_json =
         serde_json::to_string(&stop_reason_counts).unwrap_or_else(|_| "{}".into());
 
-    Ok(Some(SessionRecord {
-        session_uuid: uuid,
-        cwd,
-        started_at: first_ts,
-        ended_at: last_ts,
-        message_count: user_message_count + assistant_message_count,
-        user_message_count,
-        assistant_message_count,
-        last_prompt,
-        source_file: path.display().to_string(),
-        duration_ms,
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_creation_tokens,
-        parent_uuid,
-        request_id,
-        message_id,
-        is_sidechain_count,
-        models_used: models_used.into_iter().collect(),
-        tools_used: tools_used.into_iter().collect(),
-        tool_call_counts_json,
-        stop_reason_counts_json,
-    }))
+    Ok(Some((
+        SessionRecord {
+            session_uuid: uuid,
+            cwd,
+            started_at: first_ts,
+            ended_at: last_ts,
+            message_count: user_message_count + assistant_message_count,
+            user_message_count,
+            assistant_message_count,
+            last_prompt,
+            source_file: path.display().to_string(),
+            duration_ms,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            parent_uuid,
+            request_id,
+            message_id,
+            is_sidechain_count,
+            models_used: models_used.into_iter().collect(),
+            tools_used: tools_used.into_iter().collect(),
+            tool_call_counts_json,
+            stop_reason_counts_json,
+        },
+        turns,
+    )))
 }
 
 /// Walk one assistant/user `message.content` and collect tool-use names plus

@@ -56,6 +56,14 @@ impl McpClient {
         std::fs::create_dir_all(&state_dir).expect("state dir");
         std::fs::create_dir_all(&index_dir).expect("index dir");
 
+        // Point session ingest at an empty dir, not the operator's real
+        // `~/.claude/projects`. The smoke tests assert refresh mechanics
+        // and payload shape, not session content — and turn-indexing
+        // hundreds of MB of real JSONL into tantivy (#229) under a
+        // parallel `cargo test` blows the 20s initial-scan deadline.
+        let sessions_dir = scratch.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
         let bin = env!("CARGO_BIN_EXE_repo-recall");
         let mut child = Command::new(bin)
             // Loopback bind on a port that is almost certainly free. The
@@ -72,6 +80,7 @@ impl McpClient {
             .env("REPO_RECALL_INDEX_DIR", &index_dir)
             .env("REPO_RECALL_REFRESH_INTERVAL_SECS", "0")
             .env("REPO_RECALL_DEPTH", "0")
+            .env("REPO_RECALL_SESSIONS_DIR", &sessions_dir)
             .env("RUST_LOG", "warn")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

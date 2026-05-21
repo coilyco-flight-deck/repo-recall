@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Repo, CommitRow, SessionRow, ActionRequiredItem } from "./types";
 
 type Props = {
@@ -22,6 +23,27 @@ const slugFromRemote = (url: string | null): string | null => {
   const m = url.match(/github\.com[:/](.+?)(?:\.git)?$/);
   return m ? m[1] : null;
 };
+
+/// Session text (#229) is obscured by default. Revealing is a deliberate
+/// click — on a tailnet-hosted instance the blur is the only thing between
+/// a prompt and a passer-by. Stops click propagation so revealing a prompt
+/// doesn't also collapse the card.
+function RedactedText({ text }: { text: string }) {
+  const [revealed, setRevealed] = useState(false);
+  if (revealed) return <span className="text-slate-700">{text}</span>;
+  return (
+    <span
+      onClick={(e) => {
+        e.stopPropagation();
+        setRevealed(true);
+      }}
+      title="click to reveal session text"
+      className="text-slate-700 blur-[3px] hover:blur-[2px] select-none cursor-pointer transition-all"
+    >
+      {text}
+    </span>
+  );
+}
 
 const fmtAgo = (ts: number | null): string => {
   if (!ts) return "—";
@@ -136,7 +158,11 @@ export function RepoCard({ repo, expanded, faded, onToggle, recentCommits, recen
               <ul className="text-xs space-y-0.5">
                 {mySessions.slice(0, sessionCap).map((s) => (
                   <li key={s.id} className="truncate">
-                    <span className="text-slate-700">{s.last_prompt ?? s.session_uuid.slice(0, 8)}</span>{" "}
+                    {s.last_prompt ? (
+                      <RedactedText text={s.last_prompt} />
+                    ) : (
+                      <span className="text-slate-700">{s.session_uuid.slice(0, 8)}</span>
+                    )}{" "}
                     <span className="text-slate-400">{fmtAgo(s.ended_at ?? s.started_at)}</span>
                   </li>
                 ))}
