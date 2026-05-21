@@ -33,18 +33,27 @@ discovery:
 
 refresh:
   interval_secs: 150             # REPO_RECALL_REFRESH_INTERVAL_SECS. 0 disables periodic refresh.
-  # Per-source override. null => fall back to interval_secs.
-  # Wires the schema for #146; behavior lands with that refactor.
+  # Per-source cadence overrides, keyed by ingest source name. Each entry
+  # is a nested block carrying an optional interval_secs; a null or absent
+  # interval_secs falls back to refresh.interval_secs above. An entire
+  # absent per_source block keeps every source on the global cadence.
+  # Wires the schema for #146; the fan-out refresh task lands with that.
   per_source:
-    git_log:       null
-    github_remote: null
-    sessions:      null
-    docs:          null
-    cli_guard:     null
+    git_log:
+      interval_secs: null
+    github_remote:
+      interval_secs: null
+    sessions:
+      interval_secs: null
+    docs:
+      interval_secs: null
+    cli_guard:
+      interval_secs: null
     # Labeled-issue GraphQL ingest (Source 6 of #155). The sole sanctioned
     # GraphQL call site — runs hourly to stay well inside GitHub's GraphQL
     # secondary budget while still picking up dispatch-label churn quickly.
-    github_remote_labeled: 3600
+    github_remote_labeled:
+      interval_secs: 3600
 
 ingest:
   github:

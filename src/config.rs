@@ -100,32 +100,47 @@ impl Default for Refresh {
     }
 }
 
+/// Per-source refresh overrides, keyed by ingest source name. Each
+/// entry is a nested struct so future per-source knobs land without
+/// another schema break. An absent entry inherits the global
+/// `refresh.interval_secs`. Wires the schema for #146; the fan-out
+/// refresh task that consumes it lands there.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PerSource {
-    pub git_log: Option<u64>,
-    pub github_remote: Option<u64>,
-    pub sessions: Option<u64>,
-    pub docs: Option<u64>,
-    pub cli_guard: Option<u64>,
+    pub git_log: PerSourceEntry,
+    pub github_remote: PerSourceEntry,
+    pub sessions: PerSourceEntry,
+    pub docs: PerSourceEntry,
+    pub cli_guard: PerSourceEntry,
     /// Cadence for the labeled-issue GraphQL ingest (Source 6 of #155).
     /// Default 3600s (hourly): well inside the GraphQL secondary budget
     /// and the dispatch labels are slow-moving. Consumed by the
     /// per-source refresh substrate (#146).
-    pub github_remote_labeled: Option<u64>,
+    pub github_remote_labeled: PerSourceEntry,
 }
 
 impl Default for PerSource {
     fn default() -> Self {
         Self {
-            git_log: None,
-            github_remote: None,
-            sessions: None,
-            docs: None,
-            cli_guard: None,
-            github_remote_labeled: Some(3600),
+            git_log: PerSourceEntry::default(),
+            github_remote: PerSourceEntry::default(),
+            sessions: PerSourceEntry::default(),
+            docs: PerSourceEntry::default(),
+            cli_guard: PerSourceEntry::default(),
+            github_remote_labeled: PerSourceEntry {
+                interval_secs: Some(3600),
+            },
         }
     }
+}
+
+/// One per-source override. `interval_secs` is the only knob today;
+/// `null` or an absent key falls back to `refresh.interval_secs`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct PerSourceEntry {
+    pub interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -666,6 +681,74 @@ discovery:
         assert_eq!(parsed.discovery.scan_depth, 7);
         assert_eq!(parsed.discovery.commits_per_repo, 500); // default preserved
         assert_eq!(parsed.signals.stale_ask_days, 7); // default preserved
+    }
+
+    #[test]
+    fn per_source_defaults_inherit_global_interval() {
+        let c = Config::default();
+        // Absent entries carry no override; the consumer (#146) reads
+        // these as "fall back to refresh.interval_secs".
+        assert_eq!(c.refresh.per_source.git_log.interval_secs, None);
+        assert_eq!(c.refresh.per_source.github_remote.interval_secs, None);
+        assert_eq!(c.refresh.per_source.sessions.interval_secs, None);
+        assert_eq!(c.refresh.per_source.docs.interval_secs, None);
+        assert_eq!(c.refresh.per_source.cli_guard.interval_secs, None);
+        // Source 6 keeps its hourly default.
+        assert_eq!(
+            c.refresh.per_source.github_remote_labeled.interval_secs,
+            Some(3600)
+        );
+    }
+
+    #[test]
+    fn per_source_nested_interval_secs_parses() {
+        let yaml = r#"
+refresh:
+  interval_secs: 300
+  per_source:
+    git_log:
+      interval_secs: 60
+    github_remote:
+      interval_secs: 900
+"#;
+        let parsed: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.refresh.interval_secs, 300);
+        assert_eq!(parsed.refresh.per_source.git_log.interval_secs, Some(60));
+        assert_eq!(
+            parsed.refresh.per_source.github_remote.interval_secs,
+            Some(900)
+        );
+        // Untouched entries keep their defaults.
+        assert_eq!(parsed.refresh.per_source.sessions.interval_secs, None);
+        assert_eq!(
+            parsed
+                .refresh
+                .per_source
+                .github_remote_labeled
+                .interval_secs,
+            Some(3600)
+        );
+    }
+
+    #[test]
+    fn config_without_per_source_block_still_parses() {
+        // Backward compatibility: a config that never mentions per_source
+        // deserialises cleanly and gets the built-in per-source defaults.
+        let yaml = r#"
+refresh:
+  interval_secs: 200
+"#;
+        let parsed: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.refresh.interval_secs, 200);
+        assert_eq!(parsed.refresh.per_source.git_log.interval_secs, None);
+        assert_eq!(
+            parsed
+                .refresh
+                .per_source
+                .github_remote_labeled
+                .interval_secs,
+            Some(3600)
+        );
     }
 
     #[test]
