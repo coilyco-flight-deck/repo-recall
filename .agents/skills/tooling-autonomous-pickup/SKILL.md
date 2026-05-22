@@ -20,7 +20,7 @@ The skill is the bridge between the on-disk dispatch queue and the Desktop sessi
 1. Run the helper to enumerate unhandled artifacts (those without a `.handled` sidecar):
 
    ```sh
-   python3 /Users/kai/projects/coilysiren/agentic-os-kai/.claude/skills/tooling-autonomous-pickup/script.py scan
+   python3 /Users/kai/projects/coilysiren/agentic-os-kai/.agents/skills/tooling-autonomous-pickup/script.py scan
    ```
 
    Output is JSON of shape `{root, count, items: [{path, repo_slug, slug, task_id, description, issue_refs, tracking_issue, prompt}, ...]}`. If `count` is zero, report that and stop.
@@ -38,7 +38,7 @@ The skill is the bridge between the on-disk dispatch queue and the Desktop sessi
 3. After the MCP call succeeds, mark the artifact handled so future scans skip it:
 
    ```sh
-   python3 /Users/kai/projects/coilysiren/agentic-os-kai/.claude/skills/tooling-autonomous-pickup/script.py mark-handled <path> --note "<taskId> at <ISO timestamp>"
+   python3 /Users/kai/projects/coilysiren/agentic-os-kai/.agents/skills/tooling-autonomous-pickup/script.py mark-handled <path> --note "<taskId> at <ISO timestamp>"
    ```
 
    The sidecar is `<path>.handled` and is intentionally outside `.gitignore` consideration because the artifact's repo-local mirror at `<repo>/docs/repo-dispatch/<slug>.md` is the substrate-of-record. The pollable mirror is a working surface.
@@ -76,7 +76,7 @@ Errors get their own line per item with the MCP error message verbatim.
 
 ## Related skills
 
-* [`recall-dispatch`](../../../../repo-recall/.claude/skills/recall-dispatch/SKILL.md) - the producer side, lives in `repo-recall` because that's where the substrate it queries lives.
+* [`recall-dispatch`](../../../../repo-recall/.agents/skills/recall-dispatch/SKILL.md) - the producer side, lives in `repo-recall` because that's where the substrate it queries lives.
 * [`kai-autonomous-engineering`](../kai-autonomous-engineering/SKILL.md) - the older long-horizon planner. `recall-dispatch` is its substrate-aware successor.
 * [`kai-coily-dispatch-shorthand`](../kai-coily-dispatch-shorthand/SKILL.md) - hands-on `coily dispatch` path for one-off dispatches. This skill is the AFK path; coily dispatch is the synchronous path.
 
