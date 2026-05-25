@@ -12,14 +12,6 @@
 
     encode zstd gzip
 
-    # JSON API + MCP host live on the sibling container. Path-match the
-    # three surfaces the Rust binary owns; everything else falls through to
-    # the SPA + try_files fallback below.
-    @api {
-        path /api/* /openapi.json /mcp /mcp/*
-    }
-    reverse_proxy @api {$API_UPSTREAM:localhost:7777}
-
     # Hashed bundle filenames are immutable; cache them aggressively.
     @hashed {
         path_regexp hashed ^/.+\.[0-9a-f]{8,}\..+$
@@ -39,14 +31,31 @@
         -Server
     }
 
-    # SPA fallback: unknown paths serve index.html so client-side routing
-    # works without server-side route definitions.
-    try_files {path} /index.html
-    file_server
-
     # Liveness/readiness endpoint for k8s probes.
     handle /healthz {
         respond "ok" 200
+    }
+
+    # JSON API + MCP host live on the sibling container. handle blocks are
+    # mutually exclusive, so these short-circuit the SPA fallback below.
+    # Without this scoping Caddy's default directive ordering runs the
+    # SPA's try_files rewrite before reverse_proxy, eating /api/* paths
+    # into /index.html before the proxy matcher sees them (#80).
+    handle /api/* {
+        reverse_proxy {$API_UPSTREAM:localhost:7777}
+    }
+    handle /openapi.json {
+        reverse_proxy {$API_UPSTREAM:localhost:7777}
+    }
+    handle /mcp* {
+        reverse_proxy {$API_UPSTREAM:localhost:7777}
+    }
+
+    # SPA fallback: unknown paths serve index.html so client-side routing
+    # works without server-side route definitions.
+    handle {
+        try_files {path} /index.html
+        file_server
     }
 
     log {
