@@ -1,7 +1,5 @@
 //! `docs/AUTONOMY.md` ingest source. The per-repo agent profile spec'd
 //! in #92 - what this repo is good and bad at automating, recent
-//! dispatch patterns, open structural-context asks. Most repos will
-//! be Red on this source until they adopt the pattern.
 
 use std::path::Path;
 use std::time::Duration;

@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
 # brew-build.sh - resilience wrapper around `cargo install` for the
 # repo-recall homebrew formula. Adds timeout, heartbeat, verbose output,
-# and on-timeout postmortem so a hung cargo build is loud and triageable
-# instead of a silent ~48-minute stall.
-#
-# Args: forwarded verbatim to `cargo install` (the formula passes
-# `std_cargo_args`, i.e. `--locked --root=<cellar>/<ver> --path=.`).
-#
-# Env:
-#   REPO_RECALL_BUILD_TIMEOUT_SECS  hard timeout, default 1800.
-#   REPO_RECALL_BUILD_LOG           tee target, default /tmp/repo-recall-brew-build.<ts>.log.
 
 set -uo pipefail
 
@@ -19,8 +10,6 @@ start_epoch=$(date +%s)
 
 # Don't set CARGO_TERM_PROGRESS_WHEN=always here: cargo 1.95+ rejects it when
 # stdout isn't a TTY (we tee into a log file) unless CARGO_TERM_PROGRESS_WIDTH
-# is also set. --verbose already gives per-crate output, which is what's
-# actually useful in the log. See coilysiren/repo-recall#136.
 export CARGO_TERM_VERBOSE=true
 
 cargo install --verbose "$@" 2>&1 | tee "$log_file" &

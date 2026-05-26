@@ -1,11 +1,5 @@
 //! Open-issue ingest. Source 3 of #155. The wire layer lives in
 //! [`super::client::GithubClient::fetch_open_issues`]; this module
-//! owns the typed input shape and the pure JSON-to-record parser
-//! that both the octocrab and fixtures impls call into.
-//!
-//! `pull_request`-tagged rows from the REST `/issues` endpoint are
-//! filtered out (the endpoint mixes PRs in with issues - PRs go
-//! through `pulls.rs`).
 
 use chrono::DateTime;
 
@@ -33,8 +27,6 @@ pub struct IssueRecordInput {
 
 /// Pure parser. Takes the GitHub REST `GET /repos/X/issues` response
 /// body (a JSON array) and returns the typed records. Rows tagged
-/// `pull_request` are skipped. Both the octocrab path and the fixtures
-/// path call this so the parsing rules live in one place.
 pub fn parse_issues_json(value: &serde_json::Value) -> Vec<IssueRecordInput> {
     let Some(arr) = value.as_array() else {
         return Vec::new();

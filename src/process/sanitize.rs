@@ -1,19 +1,5 @@
 //! Sanitization gate for session-derived content (#110).
 //!
-//! Every public-safe emitter routes free text through [`scrub`] before
-//! it lands on disk or in a remote issue body. The pass is best-effort
-//! for a single-operator install — a known-bad list, not a real DLP
-//! solution. Two categories:
-//!
-//! * **Fixed terms** matched via `aho-corasick` (vault paths, hostnames,
-//!   anything caller-configured via `REPO_RECALL_SANITIZE_TERMS`).
-//! * **Token prefixes** (`ghp_`, `sk-ant-`, `AKIA`, ...) where the
-//!   prefix is fixed but the trailing characters are the secret. We
-//!   find the prefix with `aho-corasick`, then consume the run of
-//!   token characters that follow.
-//!
-//! Matches are replaced with `[REDACTED:<category>]` so a reviewer can
-//! see which gate fired without leaking the original text.
 
 use std::sync::OnceLock;
 
@@ -21,7 +7,6 @@ use aho_corasick::AhoCorasick;
 
 /// Where the text came from. Currently only used for telemetry / future
 /// per-source policy. Carry it through every emitter even though the
-/// scrub itself is uniform today.
 #[derive(Debug, Clone, Copy)]
 pub enum SanitizeSource {
     /// Body text destined for `docs/repo-dispatch/<slug>.md` and the

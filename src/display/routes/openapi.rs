@@ -1,8 +1,5 @@
 //! Static OpenAPI 3.1 description of the JSON surface.
 //!
-//! Hand-maintained, not generated. The endpoint exists so a cold-start agent
-//! that lands on any URL can follow the `Link: ...; rel="service-desc"`
-//! header back to a machine-readable description of what's callable.
 
 use axum::response::IntoResponse;
 use axum::Json;

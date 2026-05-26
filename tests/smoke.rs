@@ -23,10 +23,6 @@ async fn boot_with(
 ) -> (String, tokio::task::JoinHandle<()>) {
     // Point session ingest at an empty dir, not the operator's real
     // `~/.claude/projects`. These tests exercise the HTTP surface, not
-    // session content; turn-indexing hundreds of MB of real JSONL into
-    // tantivy (#229) on every triggered refresh just burns test CPU.
-    // Every test in this binary wants the same empty dir, so the shared
-    // process-global env var is idempotent.
     let sessions_dir = std::env::temp_dir().join(format!("repo-recall-sessions-{}", uuid_like()));
     std::fs::create_dir_all(&sessions_dir).unwrap();
     std::env::set_var("REPO_RECALL_SESSIONS_DIR", &sessions_dir);
@@ -249,8 +245,6 @@ async fn openapi_doc_is_served() {
 async fn git_log_parses_commits() {
     // Build a throwaway repo in a tempdir, drop two commits, and assert
     // `commits::scan` pulls them back with correct SHAs + subjects. Catches
-    // regressions in the NUL-separated parse path without needing any real
-    // git history on the test machine.
     use std::process::Command;
 
     let dir = std::env::temp_dir().join(format!("repo-recall-gittest-{}", uuid_like()));
@@ -295,9 +289,6 @@ async fn git_log_parses_commits() {
 async fn worktree_snapshot_drops_stat_stale_modifications() {
     // Set up a real repo, commit a file, then mutate the file's mtime
     // without changing its content. `git status` will report it as
-    // modified because the cached stat info no longer matches; `git diff`
-    // will be silent. Confirm the snapshot drops the phantom from the
-    // count + path sample. Untracked entries should still come through.
     use std::process::Command;
 
     let dir = std::env::temp_dir().join(format!("repo-recall-statestale-{}", uuid_like()));

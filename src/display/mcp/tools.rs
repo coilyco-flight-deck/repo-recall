@@ -14,7 +14,6 @@ use crate::{db, display::routes, AppState};
 
 // -----------------------------------------------------------------------------
 // recall_dashboard
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DashboardArgs {}
@@ -114,7 +113,6 @@ pub async fn dashboard(
 
 // -----------------------------------------------------------------------------
 // recall_repo
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RepoArgs {
@@ -165,7 +163,6 @@ pub async fn repo(
 
 // -----------------------------------------------------------------------------
 // recall_session
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SessionArgs {
@@ -206,13 +203,11 @@ pub async fn session(
 
 // -----------------------------------------------------------------------------
 // recall_search
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchArgs {
     /// Free-text query. Searches repo names, session summaries, full
     /// session turn text (prompts, model outputs, thinking steps), and
-    /// commit subjects.
     pub q: String,
     /// Max hits per partition. Default 20.
     #[serde(default)]
@@ -263,7 +258,6 @@ pub async fn search(
 
 // -----------------------------------------------------------------------------
 // recall_action_required
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActionRequiredArgs {}
@@ -302,7 +296,6 @@ pub async fn action_required(
 
 // -----------------------------------------------------------------------------
 // recall_ticket_history
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TicketHistoryArgs {
@@ -314,8 +307,6 @@ pub struct TicketHistoryArgs {
 
 /// Returns the sessions and commits in the cache that reference the named
 /// issue in the named repo. Empty arrays when the issue is unindexed.
-/// Designed in #92 to ground per-ticket recall-dispatch context in real
-/// prior work.
 pub async fn ticket_history(
     state: AppState,
     args: TicketHistoryArgs,
@@ -333,7 +324,6 @@ pub async fn ticket_history(
 
 // -----------------------------------------------------------------------------
 // recall_refresh
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RefreshArgs {}

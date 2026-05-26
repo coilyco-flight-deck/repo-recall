@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 /// Given a session cwd and a slice of known repos, return the index of the
 /// longest repo path that is an ancestor of (or equal to) `cwd`. Returns
-/// `None` if no repo matches.
 pub fn best_repo_for_cwd(cwd: &str, repos: &[(i64, PathBuf)]) -> Option<i64> {
     let cwd_canon = canonicalize(Path::new(cwd));
     let mut best: Option<(usize, i64)> = None;
@@ -24,8 +23,6 @@ fn canonicalize(p: &Path) -> PathBuf {
 
 /// A reference to a GitHub issue or PR, parsed from text.
 ///
-/// `owner` and `repo` are lower-cased. `issue` is the issue (or PR) number.
-/// Recall-dispatch uses these to ground per-ticket context (#92).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GhRef {
     pub owner: String,
@@ -35,13 +32,6 @@ pub struct GhRef {
 
 /// Scan `text` for fully-qualified GitHub references and yield `GhRef`
 /// values. Matches two shapes:
-///
-/// - `<owner>/<repo>#<n>` — the `gh issue list` / commit-message shorthand.
-/// - `github.com/<owner>/<repo>/(pull|issues)/<n>` — pasted PR or issue URLs.
-///
-/// Returns one entry per match site (callers can dedup). Owner/repo are
-/// validated against GitHub's name rules: 1-39 chars, alphanumerics plus
-/// `-`, `_`, `.`. Cheap, allocation-light single pass; no regex dep.
 pub fn gh_refs_with_issue_in_text(text: &str) -> Vec<GhRef> {
     let mut out = Vec::new();
     // Pass 1: github.com/<owner>/<repo>/(pull|issues)/<n>. Split on
@@ -78,7 +68,6 @@ pub fn gh_refs_with_issue_in_text(text: &str) -> Vec<GhRef> {
     }
     // Pass 2: <owner>/<repo>#<n>. Walk byte-by-byte, anchor on `#`, walk
     // backwards to collect `<repo>` and `<owner>`. Cheap given typical text
-    // sizes (a few MB of session JSONL at most).
     let bytes = text.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b != b'#' {
@@ -140,12 +129,6 @@ pub fn gh_refs_in_text(text: &str) -> Vec<(String, String)> {
 
 /// Extract issue numbers from commit-message `closes/fixes/resolves` trailers
 /// (and inline forms). These are repo-implicit — the caller knows which repo
-/// the source text belongs to. Recognized verbs match the GitHub auto-close
-/// list: close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved.
-///
-/// Each match must be followed by optional space/colon, then `#<n>`. The
-/// `<owner>/<repo>#<n>` shape is left to `gh_refs_with_issue_in_text` — this
-/// function only returns bare issue numbers.
 pub fn closes_refs_in_text(text: &str) -> Vec<u32> {
     const VERBS: &[&str] = &[
         "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
@@ -224,7 +207,6 @@ fn is_valid_name(s: &str) -> bool {
 fn is_ancestor_or_equal(ancestor: &Path, descendant: &Path) -> bool {
     // Compare on macOS (case-insensitive by default) and Linux (case-sensitive)
     // consistently by lowercasing on macOS-style targets. Simpler: compare
-    // components as-is; if that fails, fall back to case-insensitive.
     if descendant.starts_with(ancestor) {
         return true;
     }
@@ -283,7 +265,6 @@ mod tests {
     fn closes_ignores_bare_hash_with_no_verb() {
         // `closes_refs_in_text` only picks up issue numbers that follow an
         // auto-close verb. Plain `#42` in a message is left to the GhRef
-        // pass when the owner/repo prefix disambiguates it.
         assert!(closes_refs_in_text("plain #42 in passing").is_empty());
     }
 
@@ -317,9 +298,6 @@ mod tests {
     fn shorthand_overmatches_path_fragments() {
         // `path/to/file#1` matches `to/file` here. That's by design: we
         // can't tell apart "path-like text" from "owner/repo" without a
-        // GitHub-side check, and the refresh pass filters every hit
-        // against discovered repo remotes anyway. Documenting the
-        // behavior so a future change doesn't silently tighten it.
         let hits = gh_refs_in_text("path/to/file#1");
         assert_eq!(hits, vec![("to".into(), "file".into())]);
     }

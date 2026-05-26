@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 /// One row from coily's audit JSONL, normalized for storage. Mirrors the
 /// shape produced by cli-guard's `audit` writer. Unknown fields on the
-/// wire are tolerated via serde's default behavior.
 #[derive(Debug, Clone)]
 pub struct AuditRecord {
     pub event_id: String,
@@ -66,14 +65,12 @@ pub struct ProfileDecision {
     pub reason: String,
     /// Resolved capability coordinate. Shape is owned by cli-guard and may
     /// gain fields; stored as raw JSON so additions land without a schema
-    /// migration.
     #[serde(default)]
     pub coordinate: serde_json::Value,
 }
 
 /// Resolve the audit directory. Honors `REPO_RECALL_AUDIT_DIR` (point at
 /// a fixture tree for tests) and otherwise falls back to `~/.coily/audit`,
-/// where cli-guard writes one JSONL shard per git toplevel.
 pub fn default_audit_dir() -> Option<PathBuf> {
     if let Some(over) = std::env::var_os("REPO_RECALL_AUDIT_DIR") {
         let dir = PathBuf::from(over);
@@ -150,7 +147,6 @@ struct RawRow {
 
 /// Parse every line of a single JSONL shard into `AuditRecord`. Malformed
 /// or empty lines are logged at `debug!` and skipped - one bad row should
-/// never sink a whole file.
 pub fn parse_audit_file(path: &Path) -> Result<Vec<AuditRecord>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -209,7 +205,6 @@ mod tests {
     fn fixture(rows: &[&str]) -> PathBuf {
         // Sequence counter as well as pid + nanos: two tests calling
         // `fixture()` within the same nanosecond would otherwise land on
-        // the same dir and clobber each other's `scope.jsonl` (#240).
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(

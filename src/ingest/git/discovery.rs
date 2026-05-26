@@ -13,8 +13,6 @@ pub struct DiscoveredRepo {
 
 /// Scan `root` and up to `max_depth` levels down for directories containing a
 /// `.git` entry (file or directory — worktrees use a file).
-///
-/// Depth 0 = root itself; depth 1 = immediate children; etc.
 pub fn scan(root: &Path, max_depth: usize) -> Result<Vec<DiscoveredRepo>> {
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut out = Vec::new();
@@ -22,7 +20,6 @@ pub fn scan(root: &Path, max_depth: usize) -> Result<Vec<DiscoveredRepo>> {
 
     // walkdir handles depth + ordering; we drive descent control via
     // `it.skip_current_dir()` so a found repo doesn't recurse into its own
-    // submodules / vendor git dirs.
     let mut it = WalkDir::new(&root)
         .min_depth(0)
         .max_depth(max_depth)

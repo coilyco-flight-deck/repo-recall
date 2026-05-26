@@ -1,9 +1,5 @@
 //! Shared action-required signal derivation. Both the HTTP `routes::api`
 //! surface and the MCP `mcp::tools` surface call into this. Adding a new
-//! signal here lights it up on both paths at once.
-//!
-//! Keep this list in sync with [`crate::process::activity::is_action_required`] —
-//! same triggers, just exploded into per-signal records.
 
 use crate::db;
 use crate::process::activity;
@@ -20,8 +16,6 @@ pub struct DerivedSignal {
 
 /// Map a `Repo` row's individual fields onto the curated set of signals
 /// that drive `is_action_required`. One repo can produce multiple items
-/// (e.g. a dirty tree and an in-progress git op) — the orchestrator can
-/// act on each independently.
 pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
     let mut out = Vec::new();
     if activity::is_vendored(r) {
@@ -167,7 +161,6 @@ pub fn derive_action_signals(r: &db::Repo) -> Vec<DerivedSignal> {
 
 /// Compact age rendering for branch staleness - whole days once past 24h,
 /// hours below that. Stale branches are always >24h old by construction, so
-/// the hours arm only shows for the rare sub-day clock skew.
 fn humanize_age(secs: i64) -> String {
     let days = secs / 86_400;
     if days >= 1 {

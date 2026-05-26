@@ -1,15 +1,5 @@
 //! Machine-consumable endpoints for an external orchestrator
 //! ([issue #3](https://github.com/coilysiren/repo-recall/issues/3)).
-//!
-//! - `GET /api/action-required` is a thin slice of the dashboard's
-//!   action-required list — what would otherwise force the orchestrator
-//!   to scrape the HTML or pull the whole dashboard JSON every tick.
-//! - `POST /api/refresh` is the sync sibling of `POST /refresh`: it awaits
-//!   the scan and returns the new `scan_version`, so a poller doesn't have
-//!   to subscribe to the WebSocket to know "fresh data is now available."
-//! - `GET /api/scan-version` is the cheapest possible "did anything change"
-//!   check — `{ "scan_version": N }`. Pair with the `ETag` on the JSON
-//!   endpoints if your client groks `If-None-Match`.
 
 use std::sync::atomic::Ordering;
 
@@ -34,7 +24,6 @@ pub struct ActionRequiredItem {
     pub signal: &'static str,
     /// Short human-readable description of why this signal fired. Carries
     /// the count when relevant ("4 uncommitted files"), the op name
-    /// (`rebase` / `merge` / etc.), or the failing CI text.
     pub detail: String,
 }
 
@@ -47,8 +36,6 @@ pub struct ActionRequiredResponse {
 
 /// `GET /api/action-required` — JSON-only. Always returns JSON regardless of
 /// `Accept` (this endpoint exists *for* the JSON consumer; HTML browsers go
-/// to `/`). Honors `If-None-Match` against the `scan_version` ETag so a
-/// polling client gets `304` between scans.
 pub async fn action_required(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cache = state.cache_db.clone();
     let repos =
@@ -107,8 +94,6 @@ pub struct SessionsResponse {
 
 /// `GET /api/sessions` — every session in the cache as `Vec<SessionWithRepos>`,
 /// unbounded by recency. ETag keyed on `scan_version`.
-///
-/// Consumer: coilysiren/session-lattice puller (coilysiren/repo-recall#220).
 pub async fn sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cache = state.cache_db.clone();
     let sessions = tokio::task::spawn_blocking(move || cache.list_sessions().unwrap_or_default())
@@ -128,15 +113,11 @@ pub struct RefreshSyncResponse {
     pub last_scan: Option<i64>,
     /// True if a refresh actually ran. False if another refresh was in
     /// flight and this call coalesced — the returned `scan_version` will
-    /// jump as soon as the in-flight refresh lands.
     pub ran: bool,
 }
 
 /// `POST /api/refresh` — runs a refresh inline and returns the new
 /// `scan_version`. Sync sibling of `POST /refresh`, which returns 202 and
-/// asks the caller to watch the WebSocket. If another refresh holds the
-/// lock, this call coalesces (`ran=false`) rather than queueing — same
-/// semantics as the HTML refresh button.
 pub async fn refresh_sync(State(state): State<AppState>) -> Response {
     let before = state.scan_version.load(Ordering::Acquire);
     let res = crate::display::routes::refresh::run_refresh(state.clone()).await;
@@ -158,7 +139,6 @@ pub async fn refresh_sync(State(state): State<AppState>) -> Response {
 
 /// `GET /api/repos/{id}/tickets/{n}/history` - sessions + commits touching
 /// issue `n` in repo `id`. Powers `recall_ticket_history` (#112) and the
-/// per-repo dispatch view (#117). JSON-only, ETag on `scan_version`.
 pub async fn ticket_history(
     State(state): State<AppState>,
     headers: HeaderMap,

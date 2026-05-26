@@ -1,8 +1,5 @@
 //! Shared file-presence health helper for the per-doc ingest sources.
 //!
-//! Every per-doc source applies the same Red / Yellow / Green logic
-//! to its target file. This helper holds that logic so each source
-//! is a thin wrapper that names the file and forwards.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -20,12 +17,6 @@ pub fn stale_after_from_days(days: u32) -> Duration {
 
 /// Compute a `Report` for one named file inside a repo.
 ///
-/// * `source_id` and `repo_path` identify what we are inspecting.
-/// * `relative_path` is the file's path under the repo root
-///   (e.g. `"README.md"`, `"docs/FEATURES.md"`).
-/// * `stale_after` is the cutoff past which an untouched file is
-///   reported Yellow. Sourced from `ingest.docs.file_stale_after_days`
-///   at the source's construction site.
 pub fn file_report(
     source_id: &'static str,
     repo_path: &Path,
@@ -79,7 +70,6 @@ mod tests {
 
     /// Roll our own scratch-dir helper to avoid pulling in `tempfile`
     /// as a dev-dep just for these four tests. Matches the pattern
-    /// `tests/smoke.rs` already uses.
     fn scratch_dir() -> std::path::PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()

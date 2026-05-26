@@ -23,8 +23,6 @@ pub async fn trigger(State(state): State<AppState>) -> impl IntoResponse {
 
 /// One ingest source. The fan-out scheduler (#146) gives each its own
 /// cadence and watermark; `run_refresh_for` runs an arbitrary subset in a
-/// single sweep. Discovery (repo upsert + prune) is a prerequisite of
-/// every sweep, not a `Source` — it always runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
     /// `git log` + churn + worktree/local state. Owns the commit tables.
@@ -39,7 +37,6 @@ pub enum Source {
     CliGuard,
     /// Repo docs (README / AGENTS / FEATURES / file health). No ingest is
     /// wired yet - the slot exists so the scheduler carries its cadence
-    /// once the ingest lands. See repo-recall#146 follow-up.
     Docs,
 }
 
@@ -73,14 +70,6 @@ pub async fn run_refresh(state: AppState) -> anyhow::Result<()> {
 
 /// Refresh exactly the sources in `sources`. The fan-out scheduler calls
 /// this each tick with the subset whose interval has elapsed (#146).
-///
-/// Discovery always runs first - the repo table is the join key for every
-/// source. Each requested source then wipes and rebuilds only the tables
-/// it owns, so a `git_log`-only sweep never disturbs session or remote
-/// data. Per-repo aggregates recompute every sweep. The full-text index
-/// rebuilds when `Sessions` is in the set (it is the only source that
-/// re-parses the turn text the index needs). Watermarks for every
-/// requested source advance at the end.
 pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Result<()> {
     // Prevent overlapping refreshes.
     let _guard = match state.refresh_lock.try_lock() {
@@ -113,8 +102,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
     let cutoff_30d = chrono::Utc::now().timestamp() - 30 * 86_400;
     // Turn-index window (#229). Full session turn text is re-parsed and
     // re-indexed every refresh, so the window bounds that work to recent
-    // sessions. `REPO_RECALL_TURN_INDEX_DAYS` overrides the 30-day default;
-    // 0 disables the window (index every session's turns).
     let turn_index_days: i64 = std::env::var("REPO_RECALL_TURN_INDEX_DAYS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -128,9 +115,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RefreshStats> {
         // Discovery: always. The repo table is the join key for every
         // source. `upsert_repo` is idempotent; `prune_repos_not_in` drops
-        // repos that vanished from disk - the cache persists across
-        // refreshes now (#146), so a stale repo no longer falls out by
-        // virtue of a full wipe.
         let discovered = git::discovery::scan(&cwd, scan_depth)?;
         let now = Utc::now().timestamp();
         let repo_id_by_path: Vec<(i64, PathBuf)> = cache_db.write_batch(|w| {
@@ -157,7 +141,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
         // sessions source: re-parse the session JSONL, rebuild the session
         // + cwd-join tables. `wipe_sessions` clears only the tables this
-        // source owns, so a sessions-skipping sweep leaves them intact.
         let mut turn_docs: Vec<crate::search::IndexDoc> = Vec::new();
         if do_sessions {
             let projects_dirs = sessions::default_projects_dirs();
@@ -215,7 +198,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
         // git_log source: commits + churn + worktree/local state. The
         // wipe + rebuild stay in adjacent transactions so the empty window
-        // is brief; `refresh_lock` already blocks a competing refresh.
         if do_git {
             cache_db.write_batch(|w| w.wipe_git_log())?;
             stats.commits = ingest_commits(&cache_db, &repo_id_by_path, commits_per_repo)?;
@@ -223,7 +205,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
         // cli_guard source: audit log (#148). Walks every JSONL shard under
         // `~/.coily/audit/` and groups rows by `commit_scope`. Rows whose
-        // scope matched no discovered repo land under `repo_id = 0`.
         if do_cli {
             cache_db.write_batch(|w| w.wipe_cli_guard())?;
             ingest_cli_guard(&cache_db, &repo_id_by_path)?;
@@ -235,8 +216,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
         // Full-text index. Rebuilt only when the sessions source ran: it is
         // the one source that re-parses the turn text the index needs, and
-        // `rebuild` replaces the whole index. A `git_log`-only sweep leaves
-        // commit search docs to refresh on the next sessions tick.
         if do_sessions {
             let mut corpus = cache_db.collect_search_corpus()?;
             corpus.extend(turn_docs);
@@ -259,9 +238,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
     // github_remote source: PR + issue counts, deploy status, then the
     // "clone one" active-repo snapshot. Runs as its own async tasks so the
-    // network latency overlaps instead of serialising into the blocking
-    // sweep above. Best-effort - `gh` missing / unauthenticated leaves the
-    // remote tables empty.
     let remote_updated = if do_remote {
         let n = ingest_remote_state(state.clone()).await;
         let _active = ingest_active_repos(state.clone()).await;
@@ -272,12 +248,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
     // Content-mention + gh-ref joins belong to the sessions source: both
     // add `session_repos` rows and depend on the session parse above, so
-    // they run only when the sessions source was in this sweep.
-    //
-    // content-mention: walks every session JSONL for bare-word hits on
-    // known repo names - heavy (N sessions x M repos) and best-effort.
-    // gh-ref: a single string sweep per file for `owner/name#42` and
-    // pasted PR/issue URLs - robust to upstream JSONL schema drift.
     let content_matches = if do_sessions {
         let n = ingest_content_mentions(state.clone()).await;
         let _gh_refs = ingest_gh_refs(state.clone()).await;
@@ -288,7 +258,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
     // Advance the watermark for every source this sweep covered. The
     // scheduler measures the next "has my interval elapsed?" check from
-    // completion, so a slow sweep does not immediately re-trigger (#146).
     let done_at = Utc::now();
     {
         let cache_db = state.cache_db.clone();
@@ -327,9 +296,6 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
 
 /// Best-effort word-boundary content match: for each session file we've
 /// indexed, read it once and add `session_repos` rows with
-/// `match_type = 'content_mention'` for any repo whose name appears as a
-/// bare word. Runs inside a single `spawn_blocking` — IO-heavy rather than
-/// CPU-heavy, and serial is fine since a few dozen MB of JSONL parses fast.
 async fn ingest_content_mentions(state: AppState) -> usize {
     let cache_db = state.cache_db.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
@@ -357,9 +323,6 @@ async fn ingest_content_mentions(state: AppState) -> usize {
 
 /// gh-ref pass. For each session JSONL, scan once for `<owner>/<repo>#<n>`
 /// and `github.com/<owner>/<repo>/(pull|issues)/<n>` references; resolve
-/// matches against discovered repos by `(owner, repo)` parsed from each
-/// repo's GitHub remote URL; write `match_type='gh-ref'` rows. Idempotent
-/// per `link_session_repo` (rejects duplicate keys at the redb layer).
 async fn ingest_gh_refs(state: AppState) -> usize {
     let cache_db = state.cache_db.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
@@ -381,7 +344,6 @@ async fn ingest_gh_refs(state: AppState) -> usize {
                 let hits = sessions::issue_refs_in_file(std::path::Path::new(path));
                 // Track which repo links we've already added per session
                 // so the link write-amplification stays at one row per
-                // (session, repo).
                 let mut linked: std::collections::HashSet<i64> = std::collections::HashSet::new();
                 for hit in hits {
                     let slug = format!("{}/{}", hit.owner, hit.repo);
@@ -393,7 +355,6 @@ async fn ingest_gh_refs(state: AppState) -> usize {
                         }
                         // Record the issue-level reference. Idempotent on
                         // (repo, issue_number, source_kind, source_id) so
-                        // duplicate hits in the same file are absorbed.
                         w.record_issue_ref(
                             repo_id,
                             hit.issue,
@@ -415,13 +376,9 @@ async fn ingest_gh_refs(state: AppState) -> usize {
 
 /// Parallel GitHub REST fetch across every repo with a GitHub remote +
 /// known default branch: open PRs, open issues, deploy workflow health.
-/// Returns how many rows we successfully updated. A bounded `JoinSet`
-/// caps in-flight calls to avoid fork-bombing.
 async fn ingest_remote_state(state: AppState) -> usize {
     // Skip the entire remote pass while we're inside a rate-limit
     // cooldown window. Set by a prior pass that observed a
-    // `RateLimited` from any gh fetcher; cleared automatically when
-    // the deadline passes.
     {
         let until_guard = state.remote_backoff_until.lock().await;
         if let Some(until) = *until_guard {
@@ -438,8 +395,6 @@ async fn ingest_remote_state(state: AppState) -> usize {
 
     // Re-probe the viewer on every refresh - the user may have logged in
     // since startup, switched accounts, or hit a fresh rate limit. The
-    // banner updates from the same call. Skip the rest of the pass on
-    // anything but `Ok`.
     use crate::ingest::github::RemoteFetchState;
     let viewer_state = state.github_client.fetch_user().await;
     let my_login = match &viewer_state {
@@ -466,7 +421,6 @@ async fn ingest_remote_state(state: AppState) -> usize {
 
     // Filter to repos we actually know how to query (GitHub-hosted only).
     // Sniff the deploy workflow on disk up front so the gh subprocess block
-    // can fan out without re-touching the filesystem.
     let jobs: Vec<_> = targets
         .into_iter()
         .filter_map(|(id, url, branch, path)| {
@@ -493,9 +447,6 @@ async fn ingest_remote_state(state: AppState) -> usize {
             let _permit = sem.acquire_owned().await.ok()?;
             // #176: issues now flow through the GithubClient trait
             // (octocrab in prod, FixturesClient in `make watch-fixtures`).
-            // Run async outside the spawn_blocking that hosts the still-
-            // subprocess pulls/ci/deploy calls. Steps 3-5 of #173 pull
-            // those out the same way.
             let issue_state = github_client.fetch_open_issues(&slug).await;
             let pr_state = github_client.fetch_open_prs(&slug).await;
             let deploy_state = match deploy_wf.as_ref() {
@@ -562,10 +513,6 @@ async fn ingest_remote_state(state: AppState) -> usize {
 
     // #169: substitute the in-memory shadow for any per-repo snapshot
     // that came back rate-limited (or otherwise empty due to a non-Ok
-    // RemoteFetchState). Keeps the dashboard showing last-good values
-    // through a transient outage instead of blanking on the next wipe.
-    // Successful snapshots also refresh the shadow with their fresh
-    // data + a wall-clock captured_at for a future freshness pill.
     apply_last_good_shadow(&state, &mut results).await;
 
     let cache_db = state.cache_db.clone();
@@ -613,8 +560,6 @@ async fn ingest_remote_state(state: AppState) -> usize {
 
 /// Snapshot the viewer's GitHub repos via `gh repo list` and write them into
 /// `active_remote_repos`. Skipped silently when `gh` is missing or
-/// unauthenticated. Caps at 100 repos — enough to surface the user's active
-/// workspace, small enough not to balloon the gh API budget.
 async fn ingest_active_repos(state: AppState) -> usize {
     use crate::ingest::github::RemoteFetchState;
     if !matches!(&*state.viewer.lock().await, RemoteFetchState::Ok(_)) {
@@ -653,18 +598,6 @@ async fn ingest_active_repos(state: AppState) -> usize {
 
 /// Walk the just-collected snapshots and reconcile against
 /// `AppState.last_good_remote`:
-///
-/// - For a snapshot whose pass succeeded (no rate-limit, with at
-///   least one populated field), refresh the shadow entry with the
-///   new data and a wall-clock `captured_at`.
-/// - For a snapshot that came back rate-limited (or fully blank from
-///   another error), fall back to the shadow entry's prior data so
-///   the cache write that follows still surfaces a useful value
-///   instead of NULL columns.
-///
-/// Net effect: a single bad refresh pass no longer blanks the
-/// dashboard for the affected repos. Shadow lives in-memory and
-/// resets on process restart by design.
 async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]) {
     let mut shadow = state.last_good_remote.lock().await;
     let now = chrono::Utc::now();
@@ -713,7 +646,6 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
 
 /// Inspect a finished pass's snapshots and advance or reset the
 /// rate-limit backoff stored on `AppState`. Idempotent: a pass with
-/// zero rate-limit hits clears any prior backoff.
 async fn update_remote_backoff(state: &AppState, results: &[RemoteSnapshot]) {
     let any_rl = results.iter().any(|s| s.rate_limited);
     let max_retry: Option<u64> = results.iter().filter_map(|s| s.max_retry_after_secs).max();
@@ -758,20 +690,14 @@ struct RemoteSnapshot {
     issue_records: Vec<crate::ingest::github::IssueRecordInput>,
     /// True if any of this snapshot's gh fetchers reported
     /// `RemoteFetchState::RateLimited`. Aggregated across the pass to
-    /// drive `AppState::remote_backoff_*`.
     rate_limited: bool,
     /// The largest parsed `Retry-After` (seconds) from any rate-limited
     /// call in this snapshot. The pass-level aggregator keeps the max
-    /// across all snapshots and seeds the next pass's backoff floor.
     max_retry_after_secs: Option<u64>,
 }
 
 /// Expand one session's parsed transcript into `session_turn` index docs
 /// (#229): one doc per turn, carrying the joined prompt / model-output /
-/// thinking text. Each turn's text is scrubbed with the same gate as
-/// PR/issue bodies before it is handed to the index — secrets are
-/// redacted at ingest, before anything is persisted or searchable.
-/// Turns with no prose (tool-only bookkeeping) are dropped.
 fn session_turn_docs(
     session_id: i64,
     session_uuid: &str,
@@ -824,12 +750,6 @@ struct RefreshStats {
 
 /// Walk every JSONL shard under `~/.coily/audit/` (or the path resolved
 /// by `audit::default_audit_dir`), parse each row, and insert it keyed
-/// to the repo whose toplevel matches the row's `commit_scope`. Rows
-/// from cli-guard's `_unrooted` shard or with no matching repo land
-/// under `repo_id = 0` so the unrouted bucket stays queryable.
-///
-/// No-ops cleanly when the directory is unset or empty. One write
-/// transaction for the whole sweep so the audit tables commit atomically.
 fn ingest_cli_guard(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Result<usize> {
     let Some(audit_dir) = audit::default_audit_dir() else {
         return Ok(0);
@@ -871,7 +791,6 @@ fn ingest_cli_guard(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Res
 
 /// Run `git log` in every discovered repo and bulk-insert the results.
 /// Also computes 30-day LOC churn in the same sweep (second git subprocess
-/// per repo) and updates the `repos` row.
 fn ingest_commits(
     cache_db: &CacheDb,
     repos: &[(i64, PathBuf)],
@@ -887,9 +806,6 @@ fn ingest_commits(
                         let (commit_id, _new) = w.upsert_commit(*repo_id, rec)?;
                         // Auto-close trailers (`closes #N`, `fixes #N`, ...)
                         // are repo-implicit: the issue lives in the same
-                        // repo as the commit. Cross-repo references are
-                        // emitted as `<owner>/<repo>#N` and handled by the
-                        // gh-refs pass below.
                         for issue_n in crate::process::join::closes_refs_in_text(&rec.subject) {
                             w.record_issue_ref(
                                 *repo_id,
@@ -917,7 +833,6 @@ fn ingest_commits(
             }
             // Cap per-repo at 50 paths: enough for the dashboard sample,
             // small enough that a pathological refactor cannot blow up the
-            // DB.
             let snap = git::log::worktree_snapshot(repo_path, 50);
             let local = git::log::local_state(repo_path);
             let stale_branches =

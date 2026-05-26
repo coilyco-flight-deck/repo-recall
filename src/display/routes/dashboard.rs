@@ -1,8 +1,5 @@
 //! `/` - JSON dashboard projection.
 //!
-//! Returns the same data the old HTML dashboard used to render, as JSON.
-//! Carries an `ETag` keyed on the monotonic scan version so a polling
-//! consumer gets `304 Not Modified` between scans.
 
 use std::sync::atomic::Ordering;
 

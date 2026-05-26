@@ -1,18 +1,5 @@
 //! Config-file loader. See [#145](https://github.com/coilysiren/repo-recall/issues/145).
 //!
-//! Layered precedence, highest wins:
-//!   1. `REPO_RECALL_*` env vars (per host, final override)
-//!   2. `./repo-recall.yaml` in the process cwd (per workspace)
-//!   3. `$XDG_CONFIG_HOME/repo-recall/config.yaml` (per user)
-//!   4. Built-in defaults (this file)
-//!
-//! The shape mirrors `config.example.yaml` at the repo root. Forward-leaning
-//! keys (e.g. `refresh.per_source`, `card.short.rows`) deserialise into the
-//! struct but aren't consumed by the runtime yet - they wait for #144 / #146.
-//! Until those land, this loader only swaps the env-var orchestration knobs
-//! main.rs already reads. Per-module paths (sessions dir, dispatch root, etc.)
-//! continue to resolve from their own env-var sites; a follow-up issue
-//! migrates them in one sweep.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +7,6 @@ use serde::Deserialize;
 
 /// Top-level config. Every nested struct uses `#[serde(default)]` so a
 /// partial YAML file overlays the built-in defaults rather than nulling
-/// them out.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -103,7 +89,6 @@ impl Default for Refresh {
 impl Refresh {
     /// Resolve the refresh cadence for one ingest source. A per-source
     /// `interval_secs` override wins; `null` or an unknown source name
-    /// falls back to the global `refresh.interval_secs` (#146).
     pub fn interval_for(&self, source: &str) -> u64 {
         let over = match source {
             "git_log" => self.per_source.git_log.interval_secs,
@@ -120,9 +105,6 @@ impl Refresh {
 
 /// Per-source refresh overrides, keyed by ingest source name. Each
 /// entry is a nested struct so future per-source knobs land without
-/// another schema break. An absent entry inherits the global
-/// `refresh.interval_secs`. Wires the schema for #146; the fan-out
-/// refresh task that consumes it lands there.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PerSource {
@@ -133,8 +115,6 @@ pub struct PerSource {
     pub cli_guard: PerSourceEntry,
     /// Cadence for the labeled-issue GraphQL ingest (Source 6 of #155).
     /// Default 3600s (hourly): well inside the GraphQL secondary budget
-    /// and the dispatch labels are slow-moving. Consumed by the
-    /// per-source refresh substrate (#146).
     pub github_remote_labeled: PerSourceEntry,
 }
 
@@ -517,7 +497,6 @@ pub struct Privacy {
 
 /// Built-in defaults plus the layered file + env overlay. Best-effort:
 /// a malformed YAML file emits a `tracing::warn!` and falls back to the
-/// next layer rather than crashing the startup path.
 pub fn load() -> Config {
     let mut cfg = Config::default();
     if let Some(path) = xdg_config_path() {
@@ -564,8 +543,6 @@ fn overlay_file(cfg: &mut Config, path: &Path) {
 
 /// Apply `REPO_RECALL_*` overrides. Existing knobs in main.rs are the
 /// authoritative set; this function mirrors them. Unset env vars leave
-/// the file/default value intact. Malformed values emit a warning and
-/// fall back to the prior value.
 fn overlay_env(cfg: &mut Config) {
     if let Ok(v) = std::env::var("REPO_RECALL_PORT") {
         match v.parse() {
@@ -643,7 +620,6 @@ fn overlay_env(cfg: &mut Config) {
 
 /// Sanity-check the loaded config. Warnings only - never refuse to boot
 /// because of config; surface the problem and let the runtime carry on
-/// with whatever the loader produced.
 pub fn validate(cfg: &Config) {
     let churn_window = cfg.ingest.git.churn_window_days;
     for row in cfg
@@ -809,7 +785,6 @@ refresh:
     fn env_overlay_overrides_defaults() {
         // Hand-build a minimal Config and apply a controlled env set.
         // Avoid writing globals that other tests read; this test owns
-        // a narrow blast radius by only checking the keys it set.
         let key = "REPO_RECALL_PORT";
         let prev = std::env::var(key).ok();
         // SAFETY: tests run in parallel; setting a global env var here can
@@ -830,8 +805,6 @@ refresh:
         c.ingest.git.churn_window_days = 10;
         // Default short rows include activity with cap_window_days=30, so
         // this should now exceed the ingest window. We can't easily
-        // capture tracing output here, but `validate` must not panic and
-        // must return normally.
         validate(&c);
     }
 }

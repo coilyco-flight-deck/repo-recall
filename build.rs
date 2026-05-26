@@ -2,12 +2,6 @@ use std::process::Command;
 
 // Resolves the version string baked into the binary, in priority order:
 //   1. $REPO_RECALL_VERSION  - set by release CI and by the brew Formula
-//   2. `git describe --tags` - dev builds from a clone with tags
-//   3. Cargo.toml's pinned `0.0.0-dev` - last-resort fallback
-//
-// Cargo.toml's version field stays at `0.0.0-dev` permanently. Releases tag
-// without committing back to main, so there's no version-bump commit to bury
-// CI status from the prior commit.
 fn main() {
     println!("cargo:rerun-if-env-changed=REPO_RECALL_VERSION");
     println!("cargo:rerun-if-changed=.git/HEAD");

@@ -1,15 +1,5 @@
 //! MCP-protocol integration smoke. Spawns the `repo-recall` binary, talks
 //! line-delimited JSON-RPC over stdio, and asserts the surface every host
-//! relies on (initialize, tools/list, resources/list, tools/call) is
-//! intact end-to-end.
-//!
-//! Replaces the deleted axum-router `tests/smoke.rs` (the MCP rewrite removed
-//! axum's tool-routes anyway) and supersedes `scripts/mcp-smoke.py`. The
-//! Python harness was a single-shot manual probe with no per-tool assertions;
-//! this suite gives real failure attribution under `cargo test`.
-//!
-//! Each test gets its own `$TMPDIR` cache + state dir keyed on nanos + PID +
-//! atomic counter so parallel `cargo test` invocations don't collide.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -38,7 +28,6 @@ struct McpClient {
     stdin: ChildStdin,
     /// Buffered stdout. Locked across reads because `read_id` may be called
     /// concurrently in future tests; today everything is single-threaded but
-    /// the lock costs nothing and keeps the invariant explicit.
     stdout: Mutex<BufReader<ChildStdout>>,
     next_id: AtomicU64,
     _scratch_dir: PathBuf,
@@ -58,9 +47,6 @@ impl McpClient {
 
         // Point session ingest at an empty dir, not the operator's real
         // `~/.claude/projects`. The smoke tests assert refresh mechanics
-        // and payload shape, not session content — and turn-indexing
-        // hundreds of MB of real JSONL into tantivy (#229) under a
-        // parallel `cargo test` blows the 20s initial-scan deadline.
         let sessions_dir = scratch.join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
@@ -68,14 +54,11 @@ impl McpClient {
         let mut child = Command::new(bin)
             // Loopback bind on a port that is almost certainly free. The
             // test does not exercise the axum surface; the bind exists only
-            // so the process stays up. Picking an ephemeral port avoids
-            // collisions with brew-services or another test instance.
             .env("REPO_RECALL_PORT", "0")
             .env("REPO_RECALL_CWD", &scratch)
             .env("REPO_RECALL_CACHE_DIR", &cache_dir)
             // State + tantivy must be per-test or redb's exclusive file lock
             // collides with a brew-services-managed repo-recall on the same
-            // machine. The cache DB is already per-port (set above).
             .env("REPO_RECALL_STATE_DIR", &state_dir)
             .env("REPO_RECALL_INDEX_DIR", &index_dir)
             .env("REPO_RECALL_REFRESH_INTERVAL_SECS", "0")
@@ -256,8 +239,6 @@ fn tools_list_exposes_seven_tools() {
 
 /// Pull the JSON payload out of a `tools/call` result. pmcp returns either
 /// `structuredContent` (when the handler's return type generates a schema) or
-/// a single text content item whose body is the JSON string. Tolerate both —
-/// the contract every host actually consumes is "this is the payload."
 fn tool_payload(res: &Value) -> Value {
     if let Some(s) = res.get("structuredContent") {
         return s.clone();
@@ -273,8 +254,6 @@ fn tool_payload(res: &Value) -> Value {
 
 /// Block until the initial background scan bumps `scan_version` past 0, so a
 /// subsequent `recall_refresh` is not coalesced into the still-running
-/// initial scan. ~10s for the scan body plus a tantivy commit on a fresh
-/// index, which is the bulk of the time on an empty cwd.
 fn wait_for_initial_scan(client: &mut McpClient) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -363,8 +342,6 @@ fn search_with_empty_query_rejects() {
     let mut client = McpClient::spawn();
     // Empty query is a validation error: the tool exists, the input is bad.
     // pmcp may surface this as a JSON-RPC error or as a tool-result with
-    // `isError: true`. Accept either shape; the contract is "this is not a
-    // success."
     let resp = client.request_allow_error(
         "tools/call",
         json!({"name": "recall_search", "arguments": {"q": ""}}),

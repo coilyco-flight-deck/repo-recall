@@ -1,18 +1,5 @@
 // Cache layer backed by redb. Wipe-on-restart: the file lives under
 // `$TMPDIR/repo-recall-<port>/cache.redb` by default and is deleted at
-// startup so a fresh process always sees an empty corpus.
-//
-// Layout: one primary table per entity (id -> JSON-encoded record) plus a
-// hand-designed secondary index for every query path so per-repo lookups
-// stay sub-linear. Aggregates that the SQL layer used subqueries for
-// (`session_count`, `commits_30d`, `authors_30d`) are precomputed at the
-// end of refresh and stored on the Repo record itself.
-//
-// Concurrency: redb gives MVCC, so reads open lightweight read txns
-// freely. The single writer is the refresh path (guarded by
-// `state.refresh_lock` upstream); request handlers never write to the
-// cache. Bulk writes during refresh route through `CacheDb::write_batch`
-// so the whole phase commits atomically.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,7 +14,6 @@ use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // table definitions
-// ---------------------------------------------------------------------------
 
 // Primary tables: id -> JSON record.
 const REPOS: TableDefinition<u64, &[u8]> = TableDefinition::new("repos");
@@ -43,15 +29,10 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
 // Per-source refresh watermarks (#146): `<source name> -> last_run_unix_ts`.
 // Read by the fan-out scheduler to decide whether a source's interval has
-// elapsed. Never cleared by a per-source wipe — only by the schema-change
-// full wipe — so a source's cadence survives the wipe of its own data.
 const REFRESH_WATERMARKS: TableDefinition<&str, i64> = TableDefinition::new("refresh_watermarks");
 
 /// Cache schema version. Bump whenever a redb table's key/value layout or
 /// the JSON shape of a persisted record changes. A mismatch between this
-/// constant and the value stored in `META` triggers a full wipe at open
-/// time — wipe-on-schema-change replaces the old wipe-on-restart contract
-/// (#146), so cache data now survives a plain process restart.
 pub const SCHEMA_VERSION: u64 = 2;
 
 /// `META` key holding the on-disk schema version.
@@ -93,7 +74,6 @@ const ACTIVE_REPOS_BY_PUSHED_AT: TableDefinition<(i64, u64), ()> =
 
 // Labeled issues pulled from GitHub (#92, #114, #115, #116). One row per
 // (repo, label, number) so multiple ingest passes can write to the same
-// table without colliding. Wipe-on-refresh like everything else.
 const LABELED_ISSUES: TableDefinition<u64, &[u8]> = TableDefinition::new("labeled_issues");
 // (repo_id, label, number) -> row_id. Primary natural-key dedup.
 const LABELED_ISSUES_BY_REPO_LABEL_NUMBER: TableDefinition<(u64, &str, i64), u64> =
@@ -105,13 +85,9 @@ const LABELED_ISSUES_BY_LABEL_STATE: TableDefinition<(&str, &str, u64, i64), ()>
 
 // Dispatch records: parsed `docs/repo-dispatch/*.md` files for each repo.
 // Designed in #92, #113 - dispatch artifacts are write-once on disk, with
-// status tracked on a thin GitHub issue. The cache mirror lets the per-repo
-// view and the MCP surface answer "show me this repo's dispatches" without
-// re-walking the filesystem on every request.
 const DISPATCHES: TableDefinition<u64, &[u8]> = TableDefinition::new("dispatches");
 // (repo_id, -dispatched_at, dispatch_id) -> () — newest-first per repo.
 // `dispatched_at` is negated so a forward scan returns newest first; rows
-// without a timestamp use i64::MAX so they sort to the bottom.
 const DISPATCHES_BY_REPO: TableDefinition<(u64, i64, u64), ()> =
     TableDefinition::new("dispatches_by_repo");
 
@@ -127,7 +103,6 @@ const AUDIT_EVENTS_BY_NATURAL_KEY: TableDefinition<&str, u64> =
 
 // Issue refs: which sessions/commits touch which issue in which repo.
 // Designed in #92 to let recall-dispatch ground per-ticket context in real
-// prior work, instead of guessing from in-session reasoning.
 const ISSUE_REFS: TableDefinition<u64, &[u8]> = TableDefinition::new("issue_refs");
 // (repo_id, issue_number, source_kind, source_id) -> issue_ref_id.
 const ISSUE_REFS_BY_REPO_ISSUE: TableDefinition<(u64, u32, &str, u64), u64> =
@@ -138,8 +113,6 @@ const ISSUE_REFS_BY_SOURCE: TableDefinition<(&str, u64, u64, u32), ()> =
 
 // Individual open-PR rows from `gh api /repos/X/pulls?state=open`. Source 2
 // of #155. One row per (repo, number). The aggregate `PrCounts` on the Repo
-// row is still computed in the same pass; this table preserves the full
-// per-PR record for the dashboard and MCP surface.
 const PR_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("pr_records");
 const PR_RECORDS_BY_REPO_NUMBER: TableDefinition<(u64, i64), u64> =
     TableDefinition::new("pr_records_by_repo_number");
@@ -164,7 +137,6 @@ const META_NEXT_ISSUE_RECORD: &str = "next_issue_record_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileHotspot {
@@ -176,8 +148,6 @@ pub struct FileHotspot {
 
 /// Directory-level churn rollup. `path` is the directory prefix at the
 /// rollup depth (top-N path components). `depth` is the number of
-/// components in `path` — equal to the depth the rollup was computed
-/// at, capped by the actual path length for shallow files.
 #[derive(Debug, Clone, Serialize)]
 pub struct DirChurn {
     pub path: String,
@@ -198,8 +168,6 @@ pub struct SearchHit {
 
 /// A local branch that looks like unmerged work left sitting - its tip
 /// commit is older than the stale-branch threshold and it is not merged into
-/// the default branch. Drives the `stale_branch` action-required signal
-/// (issue #228).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaleBranch {
     pub name: String,
@@ -254,8 +222,6 @@ pub struct Session {
     pub assistant_message_count: i64,
     /// Most-recent prompt the user sent in this session, sourced from the
     /// `last-prompt` JSONL line type. Replaces the prior `summary` field
-    /// (which used the first user message — less useful for "what was this
-    /// session doing").
     pub last_prompt: Option<String>,
     pub source_file: String,
     pub duration_ms: Option<i64>,
@@ -309,7 +275,6 @@ pub struct Commit {
 
 /// One row from coily's audit log, joined to the repo via `commit_scope`.
 /// `repo_id == 0` means the row's scope didn't match any discovered repo
-/// (the cli-guard `_unrooted` shard or a workspace outside `cwd`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub id: i64,
@@ -403,13 +368,11 @@ pub struct IssueRecord {
     pub locked: bool,
     /// Raw reactions block from the REST response. Shape is owned by
     /// GitHub and may gain keys; persist as JSON so we don't need a
-    /// schema migration when it changes.
     pub reactions_json: String,
 }
 
 /// A reference from a session or commit to a GitHub issue or PR in a
 /// known repo. Populated during ingest from extractors in
-/// `process::join` (`gh_refs_with_issue_in_text`, `closes_refs_in_text`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueRef {
     pub id: i64,
@@ -417,7 +380,6 @@ pub struct IssueRef {
     pub issue_number: u32,
     /// `"session"` or `"commit"` — kept as a string to leave room for
     /// future sources (PR review comments, dispatch files) without
-    /// breaking the redb schema.
     pub source_kind: String,
     pub source_id: i64,
 }
@@ -431,8 +393,6 @@ pub mod issue_ref_source {
 
 /// One labeled GitHub issue row in the cache. Records a single
 /// `(repo, label, issue)` association — the same underlying issue
-/// can land in multiple rows (one per matching label of interest),
-/// which keeps downstream queries on a single index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabeledIssueRow {
     pub id: i64,
@@ -451,7 +411,6 @@ pub struct LabeledIssueRow {
 
 /// One stored dispatch row in the cache. Mirrors the parsed
 /// `docs/repo-dispatch/*.md` shape with the `repo_id` and assigned
-/// `dispatch_id` added.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchRow {
     pub id: i64,
@@ -508,7 +467,6 @@ pub struct AutonomyMetrics {
 
 /// One dispatch-substrate signal (#92, #115). Distinct from the
 /// per-Repo `derive_action_signals` because the input rows live in
-/// `LABELED_ISSUES`, not on the `Repo` row itself.
 #[derive(Debug, Clone, Serialize)]
 pub struct DispatchSignal {
     pub repo_id: i64,
@@ -518,7 +476,6 @@ pub struct DispatchSignal {
 
 /// Bundle returned by `ticket_history`: the sessions and commits that
 /// reference a given issue in a given repo. Consumers (recall-dispatch,
-/// JSON API) decide how to render.
 #[derive(Debug, Clone, Serialize)]
 pub struct TicketHistory {
     pub repo_id: i64,
@@ -542,7 +499,6 @@ pub struct ActiveRemoteRepo {
 
 // ---------------------------------------------------------------------------
 // records persisted to disk (extra fields beyond the public types)
-// ---------------------------------------------------------------------------
 
 /// Internal on-disk record for `file_changes` rows. The dashboard never
 /// reads these directly; they exist for the hotspot aggregation.
@@ -571,7 +527,6 @@ struct UncommittedFileRecord {
 
 // ---------------------------------------------------------------------------
 // CacheDb
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct CacheDb {
@@ -587,20 +542,12 @@ impl std::fmt::Debug for CacheDb {
 impl CacheDb {
     /// Open the cache file at `<dir>/cache.redb`, reusing a prior file when
     /// its schema version matches [`SCHEMA_VERSION`]. Wipe-on-schema-change
-    /// (#146) replaces the old wipe-on-restart contract: a plain restart
-    /// keeps the cache, a schema bump wipes it.
-    ///
-    /// Three outcomes:
-    ///   - file absent or unreadable as redb -> recreate from scratch
-    ///   - file opens, version matches -> reuse as-is
-    ///   - file opens, version differs/absent -> full wipe + stamp version
     pub fn open_in_dir(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).with_context(|| format!("create cache dir: {dir:?}"))?;
         let path = dir.join("cache.redb");
 
         // A file that fails to open as redb (corrupt, or written by a build
         // whose table layout we can no longer parse) is unrecoverable here:
-        // drop it and start clean rather than wedging boot.
         let this = match Self::open_at(path.clone()) {
             Ok(db) => db,
             Err(e) => {
@@ -691,7 +638,6 @@ impl CacheDb {
 
     /// Truncate every cache table. Used by the schema-change wipe at open
     /// time and by a full-sweep refresh; per-source refreshes call the
-    /// scoped `wipe_*` methods on [`CacheWriter`] instead.
     pub fn wipe(&self) -> Result<()> {
         self.write_batch(|w| w.wipe())
     }
@@ -706,7 +652,6 @@ impl CacheDb {
 
     /// Last-run unix timestamp recorded for `source`, or `None` if the
     /// source has never completed a refresh in this cache. Drives the
-    /// fan-out scheduler's "has my interval elapsed?" check (#146).
     pub fn refresh_watermark(&self, source: &str) -> Result<Option<i64>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(REFRESH_WATERMARKS)?;
@@ -715,12 +660,9 @@ impl CacheDb {
 
     // -----------------------------------------------------------------
     // reads
-    // -----------------------------------------------------------------
 
     /// Newest-first scan of audit events for one repo. `repo_id == 0`
     /// returns rows from cli-guard's `_unrooted` shard. `since_ts` is the
-    /// inclusive lower bound (unix seconds); `None` means no lower bound.
-    /// `limit` caps the result count.
     pub fn audit_events_for_repo(
         &self,
         repo_id: i64,
@@ -932,9 +874,6 @@ impl CacheDb {
         let content = by_match.remove("content_mention").unwrap_or_default();
         // Anything else (future match types) defaults into the cwd bucket
         // for the same reason the SQLite version's match arm did: callers
-        // treat non-content matches as the primary list. `gh-ref` is named
-        // explicitly so it widens cwd without tripping the unknown-type
-        // debug log.
         let mut cwd_combined = cwd;
         for r in gh_ref {
             if !cwd_combined.iter().any(|x| x.0 == r.0) {
@@ -1167,9 +1106,6 @@ impl CacheDb {
 
     /// Per-directory churn rollup over the same FileChange records that feed
     /// `file_hotspots`. `depth` controls how many leading path components
-    /// define each directory bucket (e.g. depth=2 rolls `src/ingest/git/log.rs`
-    /// up to `src/ingest`). Files shallower than `depth` are bucketed at
-    /// their actual depth. Pure query-time aggregation — no pre-aggregation.
     pub fn dir_hotspots(
         &self,
         repo_id: i64,
@@ -1234,10 +1170,6 @@ impl CacheDb {
 
     /// Read the redb-resident records that land in tantivy: `repo`,
     /// `session` (the `last_prompt` summary), and `commit` docs. The
-    /// fourth kind, `session_turn` (#229) — one doc per session turn —
-    /// is built in the session-ingest pass straight from the JSONL the
-    /// scan already parsed (see `refresh::session_turn_docs`), so it is
-    /// not re-parsed off disk here. The caller concatenates the two.
     pub fn collect_search_corpus(&self) -> Result<Vec<crate::search::IndexDoc>> {
         use crate::search::IndexDoc;
         let read = self.db.begin_read()?;
@@ -1284,7 +1216,6 @@ impl CacheDb {
         };
         // "Active" means pushed within the last 30 days. A repo high in the
         // top-100-by-pushedAt window with a years-old last push is not
-        // meaningfully active, just less stale than the rest.
         let cutoff = chrono::Utc::now().timestamp() - 30 * 24 * 60 * 60;
         let mut out: Vec<ActiveRemoteRepo> = Vec::new();
         for row in by_pushed.iter()?.rev() {
@@ -1343,9 +1274,6 @@ impl CacheDb {
 
     /// Pull every repo in the cache as `(id, remote_url)` pairs. Used by
     /// the gh-ref session-link pass to map `<owner>/<repo>` references in
-    /// session text back onto a discovered repo's GitHub remote. Repos
-    /// without a remote (or with a non-GitHub remote) are filtered out by
-    /// the caller via `ingest::git::log::github_owner_repo`.
     pub fn iter_repo_ids_and_remotes(&self) -> Result<Vec<(i64, String)>> {
         let read = self.db.begin_read()?;
         let mut out = Vec::new();
@@ -1361,18 +1289,6 @@ impl CacheDb {
 
     /// Compute the AFK success-rate rollup (#92, #116). Walks every
     /// repo-dispatch tracking issue (open + closed) and classifies the
-    /// closed ones as success / abandon / block by joining against
-    /// the issue-ref table.
-    ///
-    /// Classification:
-    /// - `successes` — closed and at least one commit in `ISSUE_REFS`
-    ///   references this issue (auto-close trailer landed real code).
-    /// - `abandons` — closed with no referencing commit (manual close
-    ///   without a fix).
-    /// - `blocks` — closed but at least one open `autonomous-block`
-    ///   issue exists in the same repo created within 7 days of the
-    ///   close. Lossy heuristic; refine later via dispatch-file link.
-    /// - `open` — still open.
     pub fn autonomy_metrics(&self) -> Result<AutonomyMetrics> {
         let open = self.labeled_issues_by_state("repo-dispatch", "open")?;
         let closed = self.labeled_issues_by_state("repo-dispatch", "closed")?;
@@ -1457,15 +1373,6 @@ impl CacheDb {
 
     /// Per-repo signal entries derived from the labeled-issues table.
     /// Emits at most one entry per `(repo, signal)` to match the
-    /// existing `recall_action_required` shape:
-    ///
-    /// - `autonomous_block` — N>=1 open `autonomous-block` issues.
-    /// - `stale_ask` — N>=1 open `structural-ask` issues older than
-    ///   `stale_after_secs`.
-    ///
-    /// Designed in #92, #115. Detail strings include the oldest issue
-    /// number so the dashboard can deep-link to the one most worth
-    /// resolving.
     pub fn dispatch_signals(&self, stale_after_secs: i64) -> Result<Vec<DispatchSignal>> {
         let blocks = self.labeled_issues_by_state("autonomous-block", "open")?;
         let asks = self.labeled_issues_by_state("structural-ask", "open")?;
@@ -1519,7 +1426,6 @@ impl CacheDb {
 
     /// Cross-repo view: every labeled issue matching `label` (lowercased)
     /// and `state` ("open" / "closed"). Used by the structural-asks and
-    /// autonomous-blocks panels (#92, #114, #115).
     pub fn labeled_issues_by_state(
         &self,
         label: &str,
@@ -1609,7 +1515,6 @@ impl CacheDb {
 
     /// Return all dispatch records for a repo, newest-first by
     /// `dispatched_at`. Empty when the repo has no `docs/repo-dispatch/`
-    /// or all files failed to parse.
     pub fn dispatches_for_repo(&self, repo_id: i64) -> Result<Vec<DispatchRow>> {
         let read = self.db.begin_read()?;
         let by_repo = read.open_table(DISPATCHES_BY_REPO)?;
@@ -1629,11 +1534,6 @@ impl CacheDb {
 
     /// Return the sessions and commits in the cache that reference a
     /// given issue in a given repo. Walks the `ISSUE_REFS_BY_REPO_ISSUE`
-    /// secondary index, then loads source records. Empty result is the
-    /// expected normal case for unindexed tickets — never errors.
-    ///
-    /// Used by `recall_ticket_history` (#92) to ground per-ticket
-    /// dispatch context in real prior work.
     pub fn ticket_history(&self, repo_id: i64, issue_number: u32) -> Result<TicketHistory> {
         let read = self.db.begin_read()?;
         let by_repo_issue = read.open_table(ISSUE_REFS_BY_REPO_ISSUE)?;
@@ -1687,7 +1587,6 @@ impl CacheDb {
 
     /// Subset of repos eligible for remote-state queries: those with a
     /// known origin URL and default branch. Sorted by most-recent commit
-    /// timestamp DESC so the optional cap keeps the active workspace.
     pub fn remote_targets(
         &self,
         target_limit: usize,
@@ -1728,7 +1627,6 @@ impl CacheDb {
 
 // ---------------------------------------------------------------------------
 // CacheWriter: a typed handle on an open redb write transaction
-// ---------------------------------------------------------------------------
 
 pub struct CacheWriter<'a> {
     txn: &'a WriteTransaction,
@@ -1795,9 +1693,6 @@ impl CacheWriter<'_> {
 
     /// Clear the tables owned by the `git_log` source: commits, their
     /// secondary indexes, file-change churn rows, and the uncommitted-file
-    /// snapshot. Commit-sourced issue refs go too. Per-repo local-state
-    /// columns on the `repos` row are overwritten in place by the rebuild,
-    /// so they need no explicit clear.
     pub fn wipe_git_log(&self) -> Result<()> {
         clear_table::<u64, &[u8]>(self.txn, COMMITS)?;
         clear_table::<(u64, &str), u64>(self.txn, COMMITS_BY_REPO_SHA)?;
@@ -1813,8 +1708,6 @@ impl CacheWriter<'_> {
 
     /// Clear the tables owned by the `sessions` source: sessions, their
     /// indexes, and every `session_repos` join row (cwd, content-mention,
-    /// and gh-ref links all rebuild from the same pass). Session-sourced
-    /// issue refs go too.
     pub fn wipe_sessions(&self) -> Result<()> {
         clear_table::<u64, &[u8]>(self.txn, SESSIONS)?;
         clear_table::<&str, u64>(self.txn, SESSIONS_BY_UUID)?;
@@ -1827,9 +1720,6 @@ impl CacheWriter<'_> {
 
     /// Clear the tables owned by the `github_remote` source: PR / issue
     /// record tables and their indexes. Per-repo remote-state columns on
-    /// the `repos` row are overwritten in place, and the
-    /// `active_remote_repos` snapshot self-clears via
-    /// [`CacheWriter::replace_active_remote_repos`].
     pub fn wipe_github_remote(&self) -> Result<()> {
         clear_table::<u64, &[u8]>(self.txn, PR_RECORDS)?;
         clear_table::<(u64, i64), u64>(self.txn, PR_RECORDS_BY_REPO_NUMBER)?;
@@ -1849,7 +1739,6 @@ impl CacheWriter<'_> {
 
     /// Delete every issue ref whose `source_kind` matches `kind`. Walks the
     /// main `ISSUE_REFS` table once, collecting matches, then deletes from
-    /// all three tables so a per-source wipe leaves no dangling index rows.
     fn clear_issue_refs_by_source(&self, kind: &str) -> Result<()> {
         let mut victims: Vec<(u64, u64, u32, i64)> = Vec::new();
         {
@@ -1875,8 +1764,6 @@ impl CacheWriter<'_> {
 
     /// Delete `repos` rows (and their `repos_by_path` index entries) whose
     /// id is not in `keep`. Called after discovery so a repo removed from
-    /// disk drops out of the cache even though discovery itself only
-    /// upserts. Idempotent: an empty `keep` clears every repo.
     pub fn prune_repos_not_in(&self, keep: &[i64]) -> Result<usize> {
         let keep: HashSet<u64> = keep.iter().map(|id| id_to_u64(*id)).collect();
         let mut victims: Vec<(u64, String)> = Vec::new();
@@ -1955,7 +1842,6 @@ impl CacheWriter<'_> {
 
     /// Insert a session if its UUID has not been seen, returning the
     /// `(session_id, true)` on success or `(existing_id, false)` if a
-    /// previous file already produced this UUID.
     pub fn upsert_session(
         &self,
         rec: &crate::ingest::claude::sessions_jsonl::SessionRecord,
@@ -2004,8 +1890,6 @@ impl CacheWriter<'_> {
 
     /// Insert one audit event keyed by its `event_id` (uuid7 from cli-guard).
     /// Returns `(id, true)` on first sight, `(existing_id, false)` on dup.
-    /// `repo_id == 0` is allowed and reserved for rows whose `commit_scope`
-    /// didn't match any discovered repo. See #148.
     pub fn upsert_audit_event(
         &self,
         repo_id: i64,
@@ -2071,7 +1955,6 @@ impl CacheWriter<'_> {
 
     /// Insert a commit if `(repo_id, sha)` is new. Returns
     /// `(commit_id, true)` on first sight, `(existing_id, false)` on dup.
-    /// Callers use the id to wire downstream side-tables (e.g. issue refs).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_commit(
         &self,
@@ -2113,8 +1996,6 @@ impl CacheWriter<'_> {
 
     /// Insert (or replace) one labeled-issue row in the cache.
     /// `label` is forced lowercase for index stability; the original
-    /// case is preserved in the row's `labels` vector. Idempotent on
-    /// `(repo_id, label, number)`.
     pub fn upsert_labeled_issue(
         &self,
         repo_id: i64,
@@ -2159,12 +2040,6 @@ impl CacheWriter<'_> {
 
     /// Record that a session or commit references a specific issue in a
     /// known repo. Idempotent on `(repo_id, issue_number, source_kind,
-    /// source_id)`. Returns true on first sight. `source_kind` is one of
-    /// `IssueRefSource::SESSION` / `IssueRefSource::COMMIT`.
-    ///
-    /// Designed for the recall-dispatch substrate reads spec'd in #92:
-    /// `recall_ticket_history` walks this table to ground per-ticket
-    /// context in real prior work.
     pub fn record_issue_ref(
         &self,
         repo_id: i64,
@@ -2409,8 +2284,6 @@ impl CacheWriter<'_> {
 
     /// Recompute and store the per-repo aggregates that the dashboard
     /// reads back in one shot: `session_count`, `commits_30d`,
-    /// `authors_30d`. Run once at the end of every refresh after the row
-    /// inserts and per-repo state updates have all landed.
     pub fn finalize_repo_aggregates(&self, cutoff_30d_ts: i64) -> Result<()> {
         // Tally per-repo session counts (DISTINCT session_id).
         let mut sessions_per_repo: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
@@ -2469,7 +2342,6 @@ impl CacheWriter<'_> {
 
     /// Replace the active-remote-repos snapshot with `repos`. Wipes the
     /// table first to match `DELETE FROM active_remote_repos` + bulk
-    /// insert. Returns the number of rows written.
     pub fn replace_active_remote_repos(&self, repos: &[ActiveRemoteRepo]) -> Result<usize> {
         clear_table::<u64, &[u8]>(self.txn, ACTIVE_REMOTE_REPOS)?;
         clear_table::<&str, u64>(self.txn, ACTIVE_REPOS_BY_FULL_NAME)?;
@@ -2522,7 +2394,6 @@ impl CacheWriter<'_> {
 
 // ---------------------------------------------------------------------------
 // helpers
-// ---------------------------------------------------------------------------
 
 fn next_id(txn: &WriteTransaction, key: &str) -> Result<u64> {
     let mut meta = txn.open_table(META)?;
@@ -2551,9 +2422,6 @@ fn u64_to_id(id: u64) -> i64 {
 
 /// Take the first `depth` `/`-separated components of `path` as the rollup
 /// bucket. Returns `(bucket_path, bucket_depth)`. Files shallower than the
-/// target depth are bucketed at their actual depth (so a top-level `README.md`
-/// stays bucketed as `README.md` rather than disappearing). Depth `0` is
-/// treated as depth `1` to avoid an empty bucket key.
 fn bucket_dir(path: &str, depth: u32) -> (String, u32) {
     let d = depth.max(1) as usize;
     let parts: Vec<&str> = path.split('/').collect();

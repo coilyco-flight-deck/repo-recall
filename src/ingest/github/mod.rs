@@ -1,9 +1,5 @@
 //! GitHub REST ingest. Two calls per remote-tracked repo:
 //!
-//! - `/repos/X/pulls?state=open`     -> open PRs (Source 2 of #155)
-//! - `/repos/X/issues?state=open`    -> open issues, with PR rows filtered (Source 3)
-//!
-//! Stays on REST. No GraphQL.
 
 pub mod client;
 pub mod fetch_state;

@@ -1,14 +1,5 @@
 //! MCP App server. Tools expose repo-recall's data layer to MCP hosts.
 //!
-//! Seven tools:
-//!
-//! - `recall_dashboard` — repo list + action-required + counts.
-//! - `recall_repo` — single repo detail.
-//! - `recall_session` — single session detail.
-//! - `recall_search` — unified search.
-//! - `recall_action_required` — thin orchestrator slice.
-//! - `recall_ticket_history` — sessions + commits touching one issue.
-//! - `recall_refresh` — trigger a rescan.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -143,11 +134,6 @@ pub async fn run_stdio(state: AppState) -> anyhow::Result<()> {
 
 /// Build a streamable-HTTP MCP router. Mount under a path prefix to expose
 /// `POST <prefix>` (JSON-RPC) and `GET <prefix>` (SSE) per the MCP spec.
-///
-/// `REPO_RECALL_MCP_ORIGINS` is a comma-separated list of additional origin
-/// URLs (`scheme://host[:port]`) to allow past pmcp's DNS-rebinding check.
-/// Loopback aliases are always allowed; the env var is for non-loopback
-/// hostnames a reverse proxy might forward (e.g. `https://repo-recall.localhost`).
 pub fn http_router(state: AppState) -> anyhow::Result<Router> {
     let server = build_server(state)?;
     let mut origins: Vec<String> = vec![

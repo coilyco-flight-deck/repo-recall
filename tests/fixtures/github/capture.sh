@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
 # Capture GitHub API fixtures for the octocrab rewrite.
-#
-# Re-run anytime to refresh real-server captures. Synthetic failure-mode
-# fixtures (rate-limit, 5xx, malformed) are hand-authored next to these
-# and not touched by this script.
-#
-# Format: HTTP/1.1 status + headers + blank line + body. Wiremock-shaped.
-# Sanitized: noisy / auth-revealing headers stripped, bodies trimmed to
-# 1-2 representative items.
 
 set -euo pipefail
 

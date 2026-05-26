@@ -13,7 +13,6 @@ class RepoRecall < Formula
     ENV["REPO_RECALL_VERSION"] = version.to_s
     # scripts/brew-build.sh wraps cargo install with a 30min timeout,
     # 60s heartbeat, --verbose, and on-timeout postmortem so a hung
-    # build is loud rather than a silent stall under brew's progress bar.
     system "bash", buildpath/"scripts/brew-build.sh", *std_cargo_args
   end
 

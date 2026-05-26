@@ -21,7 +21,6 @@ pub struct SessionRecord {
     pub source_file: String,
     /// Wall-clock span in milliseconds (end - start). `None` when we saw at
     /// most one timestamp. Uses ms rather than seconds so sub-second sessions
-    /// don't collapse to zero.
     pub duration_ms: Option<i64>,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -54,16 +53,6 @@ struct ToolStat {
 
 /// Returns every directory we'll parse session files from. Honors the
 /// `REPO_RECALL_SESSIONS_DIR` env override (point it at a fixture tree for
-/// tests) and otherwise falls back to the canonical Claude Code projects
-/// directory at `~/.claude/projects/`.
-///
-/// The env override is a comma-delimited list of directories (#230). Each
-/// entry is checked independently: existing directories are kept, missing
-/// ones emit a `WARN` and are dropped. This lets the same config ship to
-/// every machine - on kai-server `~/projects/coilysiren,/tmp` resolves both
-/// halves, on other machines the `/tmp` sink half is simply absent and
-/// dropped. If the override resolves to zero usable directories the loader
-/// falls back to the default projects dir.
 pub fn default_projects_dirs() -> Vec<PathBuf> {
     if let Some(over) = std::env::var_os("REPO_RECALL_SESSIONS_DIR") {
         let raw = over.to_string_lossy();
@@ -148,8 +137,6 @@ struct RawMessage {
     content: Option<serde_json::Value>,
     /// Claude's usage block. Real shape (verified against live JSONL):
     ///   `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
-    ///   `cache_creation_input_tokens`, plus richer detail we don't use.
-    /// `None` for user turns and older sessions.
     #[serde(default)]
     usage: Option<serde_json::Value>,
     #[serde(default)]
@@ -162,11 +149,6 @@ struct RawMessage {
 
 /// Parse one JSONL session file into a `SessionRecord` plus the flat list
 /// of renderable/indexable turns. Returns `Ok(None)` if the file doesn't
-/// yield any recognisable session data (empty, malformed, etc).
-///
-/// Turns are collected in the same single pass as the metadata so the
-/// scan never parses a session file twice — the full-text turn index
-/// (#229) reuses this output rather than re-reading the JSONL.
 pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn>)>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -239,7 +221,6 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
 
         // `message.usage` on assistant turns carries the token counts. Sum
         // across every turn we see — these are per-turn values, not running
-        // totals, so addition is the right aggregation.
         if let Some(usage) = raw.message.as_ref().and_then(|m| m.usage.as_ref()) {
             let pull = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
             input_tokens += pull("input_tokens");
@@ -269,7 +250,6 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
 
         // `last-prompt` line type carries the most-recent user prompt verbatim.
         // Preferred over the historical "first user message" summary because it
-        // reflects what the session was last working on.
         if line_type == "last-prompt" {
             if let Some(lp) = raw.last_prompt.as_deref() {
                 let trimmed = lp.trim();
@@ -284,7 +264,6 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
 
         // Pointer fields: keep the most recent observed value. `parentUuid` is
         // per-record on user/assistant lines; `requestId` and `message.id`
-        // identify the latest API call.
         if let Some(p) = raw.parent_uuid.as_deref() {
             if !p.is_empty() {
                 parent_uuid = Some(p.to_string());
@@ -318,7 +297,6 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
 
         // Walk message content blocks once to collect tool-use names and
         // tool_result errors. Sessions are short (~hundreds of turns) so this
-        // is cheap and lets us avoid threading the state through walk_content.
         if let Some(content) = raw.message.as_ref().and_then(|m| m.content.as_ref()) {
             collect_tool_signals(
                 content,
@@ -330,7 +308,6 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
 
         // Build the renderable/indexable turn for user/assistant/system
         // lines. Same walk as `parse_transcript`, folded into this pass so
-        // a session file is parsed exactly once.
         let turn_role = match line_type {
             "user" => Some(TurnRole::User),
             "assistant" => Some(TurnRole::Assistant),
@@ -432,8 +409,6 @@ pub fn parse_session_file(path: &Path) -> Result<Option<(SessionRecord, Vec<Turn
 
 /// Walk one assistant/user `message.content` and collect tool-use names plus
 /// per-tool call + error counts. Tool results are matched back to their
-/// tool_use by `tool_use_id` so an `is_error: true` result increments the
-/// originating tool's error count, not a generic "errors" bucket.
 fn collect_tool_signals(
     v: &serde_json::Value,
     tools_used: &mut std::collections::BTreeSet<String>,
@@ -512,7 +487,6 @@ pub enum TurnRole {
 
 /// Parse every user/assistant line of a JSONL and return a flat list of
 /// turns for rendering. Silent on malformed lines (same tolerance as the
-/// metadata pass — one bad line doesn't kill the whole view).
 pub fn parse_transcript(path: &Path) -> Result<Vec<Turn>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -548,7 +522,6 @@ pub fn parse_transcript(path: &Path) -> Result<Vec<Turn>> {
 
         // Walk whichever content shape we have. A `user` turn often uses
         // top-level `content` (string); assistant turns nest under
-        // `message.content` as an array of typed blocks.
         let content = raw
             .message
             .as_ref()
@@ -573,12 +546,6 @@ pub fn parse_transcript(path: &Path) -> Result<Vec<Turn>> {
 
 /// Scan a session file for `<owner>/<repo>#<n>` and PR / issue URL
 /// references. Returns the deduped set of `(owner, repo)` pairs found in
-/// any text or tool field of the JSONL — we use the whole-file string
-/// since the references are stable shape regardless of which Claude Code
-/// record type they land in.
-///
-/// Lower-cases names so the caller can match against repo remotes
-/// case-insensitively.
 pub fn gh_refs_in_file(path: &Path) -> Vec<(String, String)> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -591,8 +558,6 @@ pub fn gh_refs_in_file(path: &Path) -> Vec<(String, String)> {
 
 /// Same as `gh_refs_in_file` but also keeps the issue/PR number. Used
 /// by the issue-ref ingest pass (#92, #111) so the recall-dispatch
-/// planner can ask "which sessions touched issue N in this repo."
-/// Returns deduped `GhRef`s.
 pub fn issue_refs_in_file(path: &Path) -> Vec<crate::process::join::GhRef> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -611,12 +576,6 @@ pub fn issue_refs_in_file(path: &Path) -> Vec<crate::process::join::GhRef> {
 
 /// Scan a single JSONL file for bare-word mentions of each repo name.
 /// `needles` is a list of `(repo_id, name)` pairs; the name is case-folded
-/// and matched with word boundaries (ASCII only — names with weird chars
-/// will still match, just less cleanly).
-///
-/// Returns the set of matching `repo_id`s. Purely best-effort: common
-/// English-word names ("backend", "website") will over-match, which is why
-/// the UI labels these as fuzzy content-mentions separate from cwd matches.
 pub fn mentions_in_file(path: &Path, needles: &[(i64, String)]) -> Vec<i64> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -625,8 +584,6 @@ pub fn mentions_in_file(path: &Path, needles: &[(i64, String)]) -> Vec<i64> {
 
     // Build the Aho-Corasick automaton once and stream the haystack through
     // it in a single pass — multi-pattern, ASCII-case-insensitive (we
-    // pre-lowered the haystack, so plain matching suffices). Names shorter
-    // than 3 chars are dropped: "io", "ai", etc. would match constantly.
     let mut pat_owners: Vec<i64> = Vec::with_capacity(needles.len());
     let mut patterns: Vec<String> = Vec::with_capacity(needles.len());
     for (id, name) in needles {
@@ -661,11 +618,6 @@ pub fn mentions_in_file(path: &Path, needles: &[(i64, String)]) -> Vec<i64> {
 
 /// Like `mentions_in_file`, but also returns a short text snippet around the
 /// first valid match per repo. Used by the session detail view to show *why*
-/// a fuzzy content-mention fired — the bare-word context, not just the repo
-/// name. Returns `repo_id -> (matched_text, snippet_with_match_marker)`. The
-/// matched text is sliced from the original (case-preserving) content; the
-/// snippet replaces the match span with `\u{1}MATCH\u{1}` sentinels so the
-/// renderer can highlight without re-searching.
 pub fn mention_snippets_in_file(
     path: &Path,
     needles: &[(i64, String)],
@@ -821,7 +773,6 @@ fn walk_content(v: &serde_json::Value, turn: &mut Turn) {
                     "tool_result" => {
                         // `content` here is either a string or an array of
                         // text blocks. Truncate to a preview — the raw file
-                        // is there for deep inspection.
                         let text = obj
                             .get("content")
                             .map(|c| match c {

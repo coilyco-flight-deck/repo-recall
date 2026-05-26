@@ -1,9 +1,5 @@
 //! JSON response helper with ETag short-circuit.
 //!
-//! Every JSON response carries `ETag: "<scan_version>"` keyed on the
-//! monotonic `AppState::scan_version` counter, bumped at the end of every
-//! successful refresh. A polling consumer that passes `If-None-Match` gets
-//! `304 Not Modified` between scans.
 
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -37,7 +33,6 @@ fn insert_cache_headers(headers: &mut HeaderMap, etag: &str) {
     }
     // Loopback-only service, no auth. `private` is the most accurate hint
     // even though no shared cache will ever see this. `must-revalidate`
-    // makes well-behaved clients re-check rather than reuse blindly.
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, must-revalidate"),

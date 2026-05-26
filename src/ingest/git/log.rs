@@ -1,7 +1,5 @@
 //! Git-subprocess helpers. `scan()` pulls `git log`; `remote_info()` pulls
 //! the default-branch + origin URL. We shell out rather than linking libgit2:
-//! system `git` is everywhere Rust already is, one subprocess per repo is
-//! cheap at our scale, and the output is plain text we can stream.
 
 use std::path::Path;
 use std::process::Command;
@@ -24,7 +22,6 @@ pub struct CommitRecord {
     pub committer_email: String,
     /// Committer date as strict ISO-8601 (%cI). Strings, not unix seconds,
     /// because committer date is what GitHub displays and ISO survives
-    /// round-trips through JSON without UTC ambiguity.
     pub committer_date_iso: String,
     /// Parent SHAs, space-separated as git emits them (%P). Empty for
     /// root commits, two-or-more for merges.
@@ -39,17 +36,11 @@ pub struct CommitRecord {
 
 /// Run `git log` in `repo_path` and parse the last `limit` commits across all
 /// refs. Merges are excluded — they clutter the feed without adding signal.
-///
-/// Returns an empty vec rather than erroring if `git` can't run the log (e.g.
-/// a shallow clone with a corrupted ref). Individual-repo errors shouldn't
-/// fail the whole scan.
 pub fn scan(repo_path: &Path, limit: usize) -> Result<Vec<CommitRecord>> {
     let path_str = repo_path.to_str().context("repo path is not valid utf-8")?;
 
     // Field separator is NUL (\x00); record separator is RS (\x1e). RS
     // matters because %B (full body) is multi-line — splitting records on
-    // newlines would shred bodies. Body is the last field so any trailing
-    // RS-less LF between records is harmless.
     let output = Command::new("git")
         .args([
             "-C",
@@ -112,9 +103,6 @@ pub fn scan(repo_path: &Path, limit: usize) -> Result<Vec<CommitRecord>> {
 
 /// Origin metadata for a repo — raw normalized base URL (suitable for
 /// building `.../tree/<branch>` links) and the short default branch name.
-/// Either field can be `None`: the repo may have no `origin`, origin/HEAD
-/// may not be set locally (common after a fresh clone before the first
-/// fetch), or the URL may be in a form we can't parse (exotic SSH config).
 #[derive(Debug, Clone, Default)]
 pub struct RemoteInfo {
     pub url: Option<String>,
@@ -168,12 +156,6 @@ pub struct FileChange {
 
 /// Parse a numstat path that may carry a git rename annotation. Without
 /// `-z`, git emits renames in two shapes:
-///
-///   `prefix/{old => new}/suffix`  - common prefix + suffix factored out
-///   `oldpath => newpath`          - no shared affix
-///
-/// Returns `(rename_from, file_path)`. When no rename marker is present,
-/// `rename_from` is `None` and `file_path` is the raw path.
 pub fn parse_numstat_path(raw: &str) -> (Option<String>, String) {
     if let (Some(open), Some(close)) = (raw.find('{'), raw.find('}')) {
         if close > open {
@@ -199,13 +181,6 @@ pub fn parse_numstat_path(raw: &str) -> (Option<String>, String) {
 
 /// Walk `git log --numstat` in a single subprocess per repo and return one
 /// `FileChange` per (commit, file) pair. Merges excluded; binary rows
-/// (`-\t-\t<path>`) skipped. This replaces the old `churn_since`
-/// aggregate — callers can sum for total churn, group-by for per-file
-/// hotspots, filter by author for "my churn", etc.
-///
-/// Format string: `%H|%at|%ae` commit headers followed by numstat rows.
-/// A pipe separator is safe here — emails and SHAs don't contain them —
-/// and keeps the output trivially parseable as "header or numstat row".
 pub fn file_changes_since(repo_path: &Path, since_ts: i64) -> Vec<FileChange> {
     let Some(path_str) = repo_path.to_str() else {
         return Vec::new();
@@ -338,7 +313,6 @@ pub fn churn_since(repo_path: &Path, since_ts: i64) -> i64 {
 
 /// Local-state snapshot of a repo — everything we can learn from plain `git`
 /// subprocess calls that changes between refreshes. One struct, one refresh
-/// pass, all `git` calls share the same cwd for cache friendliness.
 #[derive(Debug, Clone, Default)]
 pub struct LocalState {
     pub commits_ahead: i64,
@@ -374,7 +348,6 @@ pub fn local_state(repo_path: &Path) -> LocalState {
 
     // ahead/behind upstream via `rev-list --left-right --count @{u}...HEAD`.
     // That prints `<behind>\t<ahead>` — count of commits upstream has that
-    // HEAD doesn't, then vice versa. Requires an upstream; if none, default 0.
     let (behind, ahead) = git(&["rev-list", "--left-right", "--count", "@{u}...HEAD"])
         .and_then(|s| {
             let mut parts = s.split_whitespace();
@@ -419,15 +392,6 @@ pub fn local_state(repo_path: &Path) -> LocalState {
 
 /// Local branches that look like unmerged work left sitting: their tip
 /// commit is older than `older_than_secs` and they are not fully merged
-/// into the default branch. The default branch itself is always excluded -
-/// it is the landing target, not pending work. A branch merged into the
-/// default branch but not yet deleted is excluded too: that is cleanup, not
-/// action-required.
-///
-/// Two `git for-each-ref` subprocesses per repo. Returns an empty vec on any
-/// failure, and also when the default branch can't be determined - without it
-/// we can't tell merged from unmerged, so we stay silent rather than guess.
-/// Result is sorted oldest-tip first.
 pub fn stale_branches(repo_path: &Path, older_than_secs: i64) -> Vec<crate::db::StaleBranch> {
     let Some(path_str) = repo_path.to_str() else {
         return Vec::new();
@@ -534,7 +498,6 @@ pub struct WorktreeFile {
 
 /// Working-tree snapshot. Full counts for every dirty file in the tree, plus
 /// a capped sample of the individual paths (so the dashboard can show a few
-/// without exploding on a monorepo's thousand-file refactor).
 #[derive(Debug, Clone, Default)]
 pub struct WorktreeSnapshot {
     pub files: Vec<WorktreeFile>,
@@ -550,13 +513,6 @@ impl WorktreeSnapshot {
 
 /// Run `git status --porcelain=v1 -uall` and return counts + the first
 /// `paths_cap` file paths. Format (from git docs): each line is `XY <path>`
-/// where X/Y are status codes. `??` = untracked; anything else = tracked
-/// and dirty (staged, unstaged, renamed, etc.). `-uall` expands untracked
-/// directories to individual files so the count matches what `git status`
-/// shows a human.
-///
-/// Returns an empty snapshot on any failure — one rough repo shouldn't
-/// abort the whole refresh.
 pub fn worktree_snapshot(repo_path: &Path, paths_cap: usize) -> WorktreeSnapshot {
     let Some(path_str) = repo_path.to_str() else {
         return WorktreeSnapshot::default();
@@ -607,15 +563,6 @@ pub fn worktree_snapshot(repo_path: &Path, paths_cap: usize) -> WorktreeSnapshot
     }
     // Index-stat-stale phantom-dirty: `git status` reports modified files
     // whose worktree content is byte-identical to the index, just because
-    // the cached stat info is older than the file mtime. Touched routinely
-    // by deploys / cross-host syncs / file managers. `git diff --quiet`
-    // exits 0 when the unstaged worktree-vs-index diff is empty; if status
-    // claims modifications but diff disagrees, those modifications aren't
-    // real and shouldn't fire dirty_tree. Drop them from the count and
-    // strip them from the path sample. Untracked entries are unaffected
-    // (diff doesn't see those). Mixed real-vs-stale cases keep the full
-    // count, which is acceptable noise on the side of caution. See issue
-    // [#22](https://github.com/coilysiren/repo-recall/issues/22).
     if snap.total_modified > 0 && unstaged_diff_is_empty(repo_path) {
         snap.total_modified = 0;
         snap.files.retain(|f| f.kind == FileKind::Untracked);
@@ -625,7 +572,6 @@ pub fn worktree_snapshot(repo_path: &Path, paths_cap: usize) -> WorktreeSnapshot
 
 /// True when `git diff --quiet` exits 0 (no unstaged differences). Any other
 /// outcome — real diff, subprocess failure, weird repo state — returns false
-/// so we keep the dirty count rather than silently masking real dirt.
 fn unstaged_diff_is_empty(repo_path: &Path) -> bool {
     let Some(path_str) = repo_path.to_str() else {
         return false;
@@ -641,16 +587,6 @@ fn unstaged_diff_is_empty(repo_path: &Path) -> bool {
 
 /// Locate the repo's deploy workflow on disk. We sniff
 /// `.github/workflows/*.{yml,yaml}` for a basename containing "deploy"
-/// (case-insensitive), first match wins. Returns the *filename* (not the
-/// full path) since `gh run list --workflow=<file>` accepts either the
-/// filename or the workflow name. None when nothing matches; the deploy
-/// signals stay silent in that case (not every repo deploys).
-///
-/// Deliberate divergence from the original repo-recall#7 sketch: we don't
-/// read a `.repo-recall/config.yaml` override here. Repo-recall is "no
-/// config file" by convention (see AGENTS.md). If the filename sniff
-/// misses a real deploy workflow, the fix is renaming the workflow file
-/// or extending this sniffer, not introducing a config surface.
 pub fn find_deploy_workflow(repo_path: &Path) -> Option<String> {
     let dir = repo_path.join(".github").join("workflows");
     let entries = std::fs::read_dir(&dir).ok()?;
@@ -672,9 +608,6 @@ pub fn find_deploy_workflow(repo_path: &Path) -> Option<String> {
 
 /// Latest-deploy health for a repo. `status` is the *last* run's outcome,
 /// `last_success_ts` is the unix-seconds timestamp of the most recent
-/// successful run (None when there's never been a green run). Together
-/// they distinguish "broken right now" from "rotted, last green is old"
-/// from "never deployed."
 #[derive(Debug, Clone, Default)]
 pub struct DeployHealth {
     pub status: Option<String>,
@@ -683,7 +616,6 @@ pub struct DeployHealth {
 
 /// Aggregated open-PR counts for one repo. Derived client-side from a
 /// single `gh pr list --json` call so we only pay one subprocess per repo
-/// for the PR view.
 #[derive(Debug, Clone, Default)]
 pub struct PrCounts {
     pub open: i64,
@@ -694,7 +626,6 @@ pub struct PrCounts {
     pub mine_awaiting_review: i64,
     /// Your open non-draft PRs with zero reviewers requested. You are the
     /// blocker (request a reviewer, or self-merge on a solo repo).
-    /// Action-required.
     pub mine_no_reviewer: i64,
     /// Open draft PRs authored by the viewer. Subset of `draft`. Drives the
     /// "get this into a reviewable state" action-required signal.
@@ -711,15 +642,6 @@ pub struct IssueCounts {
 
 /// Fetch PR counts + open-issue counts for a GitHub repo via two REST
 /// `gh api` calls. Stays on REST deliberately: `gh pr list` / `gh issue list`
-/// route through GraphQL under the hood and burn the secondary rate limit
-/// at refresh cadence. See AGENTS.md "No GraphQL".
-///
-/// `my_login` is the viewer's GitHub handle. Empty string is fine — the
-/// reviewer-split + assignee fields just stay zero. Returns `None` on any
-/// gh failure (network, auth, parse) so one repo can't break the refresh.
-///
-/// PRs are capped at 100; issues at 100 (REST `per_page` max). Repos that
-/// exceed either saturate at the cap but the dashboard still functions.
 pub fn fetch_pr_and_issue_counts(
     owner_repo: &str,
     my_login: &str,
@@ -819,8 +741,6 @@ pub fn fetch_pr_and_issue_counts(
 
 /// One GitHub issue surfaced by `gh issue list --label LABEL`. Used by
 /// the recall-dispatch substrate (#92) to surface structural-ask,
-/// autonomous-block, and repo-dispatch tracking issues without forcing
-/// every consumer to re-query the API.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LabeledIssue {
     pub number: i64,
@@ -838,7 +758,6 @@ pub struct LabeledIssue {
 
 /// One entry from `gh repo list --json …` — the viewer's GitHub repos
 /// regardless of whether they're cloned locally. Drives the dashboard's
-/// "active repos not cloned yet" panel.
 #[derive(Debug, Clone)]
 pub struct ActiveRepo {
     pub full_name: String,
@@ -853,9 +772,6 @@ pub struct ActiveRepo {
 
 /// Pull `OWNER/NAME` out of a normalised remote URL like
 /// `https://github.com/coilysiren/repo-recall`. Returns `None` for non-
-/// GitHub remotes (we can only drive `gh` against GitHub). We don't try to
-/// be clever with enterprise GHE hosts yet — if that becomes real we'll
-/// match on the host whitelist `gh` itself reads.
 pub fn github_owner_repo(remote_url: &str) -> Option<String> {
     let parsed = parse_owner_repo(remote_url)?;
     if parsed.host != "github.com" {
@@ -866,8 +782,6 @@ pub fn github_owner_repo(remote_url: &str) -> Option<String> {
 
 /// Turn a raw git remote URL (`git@github.com:owner/repo.git`,
 /// `https://github.com/owner/repo.git`, `ssh://git@host:22/owner/repo`, …)
-/// into a browsable HTTPS base — no trailing `.git`, no trailing slash.
-/// Returns `None` if we can't confidently produce one.
 fn normalize_remote_url(raw: &str) -> Option<String> {
     let parsed = parse_owner_repo(raw)?;
     Some(format!(
@@ -884,10 +798,6 @@ struct OwnerRepo {
 
 /// Parse a remote URL via `git-url-parse` and validate that the URL's path is
 /// *exactly* `owner/repo(.git)?` — no extra segments. The crate is
-/// permissive: `https://github.com/a/b/tree/main` parses without error and
-/// silently picks the last two segments as owner/name, which would let
-/// pasted browser URLs sneak past as legit remotes. Reject anything where
-/// the path doesn't round-trip back to `fullname`.
 fn parse_owner_repo(raw: &str) -> Option<OwnerRepo> {
     use git_url_parse::Scheme;
     let parsed = git_url_parse::GitUrl::parse(raw.trim()).ok()?;

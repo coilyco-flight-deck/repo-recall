@@ -1,46 +1,5 @@
 //! Activity scoring for repos — one number summarising "how lively is this
 //! place" across every activity dimension we've wired up. Used to sort the
-//! dashboard repo list so balanced-activity repos rise above one-dimension-
-//! heavy ones.
-//!
-//! ## The scoring function
-//!
-//! For each activity dimension i, with per-repo value `xᵢ` and corpus-wide
-//! max `Mᵢ`:
-//!
-//! ```text
-//! score = Σ ln(1 + xᵢ / Mᵢ)
-//! ```
-//!
-//! ### Why this form
-//!
-//! - **Rewards breadth.** A repo with some activity in every dimension beats
-//!   one that's huge on a single dimension. That's exactly the "having both
-//!   commits AND sessions should put you at the top" intuition, generalised.
-//!   This is the same idea as a geometric mean (which multiplies terms), but
-//!   expressed additively so the math stays numerically stable.
-//! - **Diminishing returns on magnitude.** The first few commits / sessions
-//!   on a dormant repo move it up a lot; going from 500 to 600 barely does.
-//!   Matches the product-intuition: the 1000th commit is not 10× as
-//!   meaningful as the 100th.
-//! - **Zero-safe.** `ln(1 + 0) = 0` — a missing dimension contributes nothing
-//!   but doesn't annihilate the score (unlike raw product / geometric mean).
-//! - **Scales to N attributes without special casing.** Add an entry to
-//!   `ATTRS` and both the score and the sort pick it up.
-//! - **Normalisation by max.** Without it, commits (hundreds) would
-//!   swamp sessions (single digits) and the "breadth" property degrades.
-//!   Dividing by max_i puts every dim in [0, 1], so each contributes at most
-//!   `ln(2) ≈ 0.69` to the score when it's at its peak.
-//!
-//! ### What we're not doing
-//!
-//! - Hand-tuned per-dimension weights. Too fiddly; the log+normalise combo
-//!   does most of the work.
-//! - A CES / softmin / other tunable aggregator. Overkill for a dashboard
-//!   sort; we'd reach for one of those if the ranking felt wrong in practice.
-//! - Recency weighting (e.g. decay by age of latest commit). `commits_30d`
-//!   already does this at the data layer — attributes that want recency can
-//!   bake it into their own value.
 
 use crate::db::Repo;
 
@@ -49,16 +8,6 @@ pub type AttrFn = fn(&Repo) -> i64;
 
 /// Three categories of repo signal, each with its own pace and cost:
 ///
-/// - **Historical** — past activity derived from git log + Claude sessions.
-///   Cheap to compute (subprocess against a local repo), covers a window
-///   (e.g. 30 days).
-/// - **LocalState** — what the working tree looks like *right now* on disk
-///   (untracked, modified, maybe branch divergence later). Also cheap; also
-///   changes between refreshes.
-/// - **RemoteState** — what a remote service currently thinks: deploy
-///   status, open PRs, review requests. Requires a network call (via the
-///   GitHub REST API), so these attributes are refreshed with a
-///   tolerance for latency + failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     Historical,
@@ -68,7 +17,6 @@ pub enum Category {
 
 /// One activity dimension: a stable key (for logs / future debugging), its
 /// category (see [`Category`]), and the function that extracts its per-repo
-/// value.
 pub struct Attr {
     pub key: &'static str,
     pub category: Category,
@@ -77,8 +25,6 @@ pub struct Attr {
 
 /// Every activity dimension we've wired up. The design target is 5+ entries.
 /// To add a new dimension: land the underlying count on `Repo`, then append
-/// an `Attr` here. Everything downstream — score, sort, dormancy fade —
-/// picks it up.
 pub const ATTRS: &[Attr] = &[
     // --- Historical: past activity, cheap + offline --------------------
     Attr {
@@ -105,8 +51,6 @@ pub const ATTRS: &[Attr] = &[
     Attr {
         // Combined signal — untracked + modified treated as one "working
         // tree is dirty" dimension. The breakdown still lives on `Repo`
-        // (and in the `uncommitted_files` table) for tooltips + the
-        // right-column listing, but activity scoring uses the sum.
         key: "uncommitted_files",
         category: Category::LocalState,
         get: |r| r.untracked_files + r.modified_files,
@@ -156,13 +100,6 @@ pub const ATTRS: &[Attr] = &[
 
 /// Per-attribute normaliser across a slice of repos. Uses the **median of
 /// non-zero values** rather than the max. Rationale: one super-active repo
-/// (a monorepo with 10× the commits of anything else) used to compress
-/// everybody else's contribution toward zero; the median pins the "typical
-/// active repo" at `ln(2) ≈ 0.69` per dimension, so differences between
-/// smaller repos actually register.
-///
-/// Returns 0.0 for a dimension where no repo has any signal — `score()` then
-/// contributes nothing for it rather than dividing by zero.
 pub fn normalisers(repos: &[Repo]) -> Vec<f64> {
     ATTRS
         .iter()
@@ -204,38 +141,14 @@ pub fn score(repo: &Repo, norms: &[f64]) -> f64 {
 
 /// "Action required" repos — something tangible is waiting for you. These
 /// hard-sort above the activity-score ranking.
-///
-/// The trigger set is intentionally a subset of all `RemoteState` /
-/// `LocalState` attrs — not *every* local/remote signal is actionable, only
-/// the ones that ought to pull attention. Add a check here when a new
-/// attribute carries the same "needs doing" weight.
-///
-/// Threshold for the `deploy_stale` signal: if the deploy workflow had a
-/// successful run before going quiet *and* the most recent green run is
-/// older than this, the deploy path itself probably rotted.
 pub const DEPLOY_STALE_SECS: i64 = 7 * 86_400;
 
 /// Threshold for the `stale_branch` signal: a local branch whose tip commit
 /// is older than this, and which is not merged into the default branch, is
-/// treated as unmerged work that needs landing or cleanup (issue #228).
 pub const STALE_BRANCH_SECS: i64 = 24 * 3_600;
 
 /// Current triggers:
 /// - Dirty working tree (untracked + modified)
-/// - In-progress git operation (rebase / merge / cherry-pick / revert / bisect)
-/// - Detached HEAD
-/// - PR awaiting my review
-/// - My draft PR (push it into a reviewable state)
-/// - My open PR with no reviewer requested (you are the blocker)
-/// - My non-draft PR open (test it, ask for review)
-/// - Issue assigned to me
-/// - Current branch has local commits not pushed to its upstream (`push`)
-/// - Deploy workflow's last run failed
-/// - Deploy workflow has been silent for > 7d since its last green run
-/// - A local branch carries unmerged commits with a tip older than 24h
-///
-/// `commits_behind` stays informational - it's drift that self-resolves on
-/// the next pull, not a todo (see #233/#234).
 pub fn is_action_required(r: &Repo) -> bool {
     if is_vendored(r) {
         return false;
@@ -256,14 +169,6 @@ pub fn is_action_required(r: &Repo) -> bool {
 
 /// Vendored / external repo: a third-party tree cloned for reading, not for
 /// work. Suppresses every action-required signal so detached-HEAD release-tag
-/// clones (e.g. `~/projects/virtualenv` checked out at tag `20.17.1`) and
-/// dirty trees in vendored sources don't flow into the dashboard's action
-/// queue.
-///
-/// Opt-in marker only. Drop a literal empty `.repo-recall-ignore` file at the
-/// repo root and the repo goes silent. No auto-detection - explicit beats
-/// clever, and the user is the only one who knows whether a repo is theirs
-/// or vendored.
 pub fn is_vendored(r: &Repo) -> bool {
     std::path::Path::new(&r.path)
         .join(".repo-recall-ignore")
@@ -277,8 +182,6 @@ pub fn is_deploy_failing(r: &Repo) -> bool {
 
 /// Deploy workflow has gone quiet: there *was* a successful run, but the
 /// most recent green run is older than [`DEPLOY_STALE_SECS`]. Repos that
-/// have never deployed successfully don't count as "stale" - they're
-/// "never-deployed", a different (and not-this-signal) thing.
 pub fn is_deploy_stale(r: &Repo) -> bool {
     let Some(last_success) = r.deploy_last_success_ts else {
         return false;
@@ -309,7 +212,6 @@ pub fn sort(repos: &mut [Repo]) {
 
 /// A repo is "dormant" when every activity dimension reads zero. Used for the
 /// visual fade on the dashboard. Equivalent to `score(r) == 0` but doesn't
-/// require the per-corpus max vector, so callers don't need to pass it in.
 pub fn is_dormant(repo: &Repo) -> bool {
     ATTRS.iter().all(|a| (a.get)(repo) == 0)
 }
@@ -386,7 +288,6 @@ mod tests {
     fn median_gives_typical_repo_a_meaningful_score() {
         // Under max-normalisation, a solo outlier would squash everyone else
         // near zero. With median-normalisation, a "typical" repo (at the
-        // median) contributes exactly ln(2) per dimension it hits.
         let repos = vec![
             repo(1, "solo-giant", 0, 1000),
             repo(2, "typical-a", 0, 10),

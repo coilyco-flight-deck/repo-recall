@@ -1,12 +1,5 @@
 // Tantivy full-text index. Step 2 of the redb migration tracked in #39:
 // dual-write the FTS5 `search_idx` rows into a tantivy index living
-// alongside the SQLite cache in $TMPDIR. SQLite stays the read path for
-// /search until step 3 flips the reader.
-//
-// Tokenizer choice matches FTS5's `porter unicode61 remove_diacritics 1`
-// closely enough: tantivy's `en_stem` does Unicode + lowercase + Porter.
-// Diacritic stripping is approximate (tantivy applies NFKC + lowercase, no
-// explicit diacritic-fold), which is fine for the corpus we index.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,8 +14,6 @@ use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 
 /// One indexed document. `kind`/`ref_id`/`text` mirror the original FTS5
 /// row shape. `turn` is set only for `kind = "session_turn"` docs (#229):
-/// one document per session turn, so a hit lands on the exact prompt,
-/// model output, or thinking step rather than the whole chat.
 #[derive(Debug, Clone)]
 pub struct IndexDoc {
     pub kind: String,
@@ -91,8 +82,6 @@ struct Fields {
 impl SearchIndex {
     /// Open a tantivy index at `dir`. The directory is wiped first so the
     /// index always starts clean alongside the SQLite cache (which is also
-    /// dropped + recreated at process start). The directory is created if
-    /// missing.
     pub fn open_at(dir: &Path) -> Result<Self> {
         if dir.exists() {
             std::fs::remove_dir_all(dir).with_context(|| format!("clear tantivy dir: {dir:?}"))?;
@@ -111,7 +100,6 @@ impl SearchIndex {
         let text = builder.add_text_field("text", text_opts);
         // Turn-pointer fields for `session_turn` docs (#229). Stored so a
         // hit can pivot to the exact turn; not tokenized — they are
-        // identifiers, not searchable prose.
         let session_uuid = builder.add_text_field("session_uuid", STRING | STORED);
         let turn_index = builder.add_i64_field("turn_index", STORED);
         let turn_role = builder.add_text_field("turn_role", STRING | STORED);
@@ -146,7 +134,6 @@ impl SearchIndex {
 
     /// Drop every doc and rebuild from the supplied iterator. Called at the
     /// end of a refresh, after SQLite's `rebuild_search_index` has run, with
-    /// the same rows. Commits once at the end.
     pub fn rebuild<I>(&self, docs: I) -> Result<()>
     where
         I: IntoIterator<Item = IndexDoc>,

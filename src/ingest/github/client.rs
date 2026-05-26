@@ -1,21 +1,5 @@
 //! GitHub client abstraction for the octocrab rewrite (#173).
 //!
-//! Two implementations behind one trait:
-//!
-//! - [`OctocrabClient`] is the production path. It builds an
-//!   `octocrab::Octocrab` from the user's `gh auth token` at startup;
-//!   missing/empty token degrades to an anonymous client and every
-//!   method short-circuits to [`RemoteFetchState::Unconfigured`] with a
-//!   single startup `WARN` banner.
-//! - [`FixturesClient`] reads `.http` files from
-//!   `REPO_RECALL_GITHUB_FIXTURES_DIR` and replays them. Selected when
-//!   the env var is set; emits a one-line `WARN` banner so leaving
-//!   fixture mode on is loud, not silent. Drives both `make
-//!   watch-fixtures` (for manual UI verification) and the unit tests
-//!   (a test helper builds a `FixturesClient` against the same dir).
-//!
-//! Step 1 of #173 only adds the trait + the auth probe ([`fetch_user`]).
-//! Subsequent steps grow the trait and migrate one ingest call site each.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -31,8 +15,6 @@ use crate::ingest::git::log::{ActiveRepo, DeployHealth};
 
 /// Authenticated user as exposed to repo-recall. Trimmed shape: only
 /// the fields the dashboard / refresh path actually reads. Octocrab's
-/// `models::Author` has more, but tying the trait to octocrab's types
-/// would force the fixtures path to depend on octocrab too.
 #[derive(Debug, Clone)]
 pub struct AuthedUser {
     pub login: String,
@@ -40,7 +22,6 @@ pub struct AuthedUser {
 
 /// The single seam between repo-recall and GitHub. Implementors return
 /// [`RemoteFetchState`]-wrapped payloads so the existing classifier in
-/// [`super::fetch_state`] keeps owning categorization.
 #[async_trait]
 pub trait GithubClient: Send + Sync {
     /// `GET /user` - viewer's GitHub identity. Single source of truth
@@ -49,17 +30,14 @@ pub trait GithubClient: Send + Sync {
 
     /// `GET /repos/{owner}/{repo}/issues?state=open&per_page=100` -
     /// open issues for one repo. PR-tagged rows are filtered by the
-    /// shared parser. Replaces `crate::ingest::github::issues::fetch_open_issues`.
     async fn fetch_open_issues(&self, owner_repo: &str) -> RemoteFetchState<Vec<IssueRecordInput>>;
 
     /// `GET /repos/{owner}/{repo}/pulls?state=open&per_page=100` -
     /// open pull requests for one repo. Replaces
-    /// `crate::ingest::github::pulls::fetch_open_prs`.
     async fn fetch_open_prs(&self, owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>>;
 
     /// `GET /repos/{owner}/{repo}/actions/workflows/{wf}/runs?branch=B&per_page=30`
     /// plus a `last_success_ts` derived from the same response.
-    /// Replaces `crate::ingest::git::log::fetch_deploy_health`.
     async fn fetch_deploy_health(
         &self,
         owner_repo: &str,
@@ -69,18 +47,11 @@ pub trait GithubClient: Send + Sync {
 
     /// `GET /user/repos?sort=pushed&type=owner&per_page=N` - viewer's
     /// recently-pushed repos. Replaces
-    /// `crate::ingest::git::log::fetch_active_repos` and closes the
-    /// AGENTS.md "no `gh repo list`" violation.
     async fn fetch_active_repos(&self, limit: usize) -> RemoteFetchState<Vec<ActiveRepo>>;
 }
 
 /// Build the right client for the current process based on env state:
 ///
-/// - `REPO_RECALL_GITHUB_FIXTURES_DIR` set + readable → [`FixturesClient`].
-/// - Otherwise → [`OctocrabClient`] sourced from `gh auth token`.
-///
-/// Emits the appropriate startup banner. Never fails; in the worst case
-/// returns an `OctocrabClient` whose every call is `Unconfigured`.
 pub fn build_client() -> Arc<dyn GithubClient> {
     if let Ok(dir) = std::env::var("REPO_RECALL_GITHUB_FIXTURES_DIR") {
         if !dir.is_empty() {
@@ -97,7 +68,6 @@ pub fn build_client() -> Arc<dyn GithubClient> {
 
 /// Production GitHub client. Wraps an [`Octocrab`] built from the
 /// user's `gh auth token`. Empty token → `unconfigured = true` and
-/// every method returns [`RemoteFetchState::Unconfigured`].
 pub struct OctocrabClient {
     inner: Octocrab,
     unconfigured: bool,
@@ -106,7 +76,6 @@ pub struct OctocrabClient {
 impl OctocrabClient {
     /// Read `gh auth token` (one subprocess at startup), build the
     /// inner client. Logs a `WARN` if the token is missing so the
-    /// dashboard's "GitHub not configured" pill has a paired log line.
     pub fn from_gh_auth_token() -> Self {
         let token = read_gh_auth_token();
         match token {
@@ -158,7 +127,6 @@ impl GithubClient for OctocrabClient {
         }
         // Raw-JSON path keeps parsing identical to the gh-subprocess
         // shape and lets the shared `parse_issues_json` own the field
-        // coercion. Per-page cap matches the prior subprocess call.
         let path = format!("/repos/{owner_repo}/issues?state=open&per_page=100");
         let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
             Ok(v) => v,
@@ -213,7 +181,6 @@ impl GithubClient for OctocrabClient {
 
 /// Normalize a single REST workflow-run object's `(status, conclusion)`
 /// into the small status vocabulary the dashboard renders. Used by
-/// `fetch_deploy_health`.
 fn normalize_run_status(status: &str, conclusion: &str) -> Option<&'static str> {
     match (status, conclusion) {
         ("completed", "success") => Some("success"),
@@ -227,7 +194,6 @@ fn normalize_run_status(status: &str, conclusion: &str) -> Option<&'static str> 
 
 /// Pure parser. Builds a `DeployHealth` from the REST workflow-runs
 /// response (latest run's status + most-recent successful run's
-/// `created_at`).
 fn parse_deploy_health_json(value: &serde_json::Value) -> DeployHealth {
     let Some(arr) = value.get("workflow_runs").and_then(|v| v.as_array()) else {
         return DeployHealth::default();
@@ -260,7 +226,6 @@ fn parse_deploy_health_json(value: &serde_json::Value) -> DeployHealth {
 
 /// Pure parser. Reads `/user/repos` and maps to `ActiveRepo`. REST
 /// field names: `full_name`, `clone_url`, `ssh_url`, `default_branch`,
-/// `pushed_at`, `description`, `fork`, `archived`.
 fn parse_active_repos_json(value: &serde_json::Value) -> Vec<ActiveRepo> {
     let Some(arr) = value.as_array() else {
         return Vec::new();
@@ -311,8 +276,6 @@ fn parse_active_repos_json(value: &serde_json::Value) -> Vec<ActiveRepo> {
 
 /// Replays `.http` fixture files from a directory. Each trait method
 /// reads a known filename (e.g. `fetch_user` → `user.http`), parses
-/// status + headers + body, runs them through the same classifier the
-/// production path uses.
 pub struct FixturesClient {
     dir: PathBuf,
 }
@@ -320,7 +283,6 @@ pub struct FixturesClient {
 impl FixturesClient {
     /// Construct a client over `dir`. The dir is not validated at
     /// construction time; missing files surface as
-    /// [`RemoteFetchState::Error`] at the per-method call.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
@@ -402,8 +364,6 @@ impl GithubClient for FixturesClient {
     ) -> RemoteFetchState<DeployHealth> {
         // No captured-real-server fixture for the workflow-runs
         // endpoint today; the branch-scoped runs fixture has the
-        // same shape so reuse it. Status normalization + last-success
-        // derivation are identical.
         let parsed = match self.read_fixture("actions_runs_branch.http") {
             Ok(p) => p,
             Err(e) => return RemoteFetchState::Error(e),
@@ -442,7 +402,6 @@ impl GithubClient for FixturesClient {
 
 /// Read the user's `gh auth token`. Returns `None` if `gh` is missing,
 /// not authenticated, or returns an empty token. One subprocess at
-/// startup; never called again.
 fn read_gh_auth_token() -> Option<String> {
     let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
     if !output.status.success() {
@@ -458,7 +417,6 @@ fn read_gh_auth_token() -> Option<String> {
 
 /// Lightweight HTTP-response parser for fixture files. Only what we
 /// need for replay: status code, headers, body. Tolerates `\r\n` or
-/// `\n` line separators since both forms occur in captured fixtures.
 struct ParsedHttp {
     status: u16,
     headers: Vec<(String, String)>,

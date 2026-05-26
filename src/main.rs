@@ -30,7 +30,6 @@ async fn main() -> miette::Result<()> {
 
     // Single binary, both surfaces. The MCP server is purely additive.
     // tracing-subscriber writer is stderr unconditionally because the MCP
-    // stdio transport reserves stdout for JSON-RPC framing.
     tracing_subscriber::registry()
         .with(
             EnvFilter::try_from_default_env()
@@ -55,8 +54,6 @@ async fn main() -> miette::Result<()> {
     let port: u16 = cfg.server.port;
     // Default is loopback. Override only when fronted by something that gates
     // access at a different layer (e.g. `tailscale serve` on a tailnet-only
-    // host). Setting this to a non-loopback address on a shared or public-facing
-    // box would expose session metadata.
     let host: IpAddr = cfg.server.host.parse().unwrap_or_else(|e| {
         tracing::warn!(
             "config server.host={:?} invalid: {e}; falling back to 127.0.0.1",
@@ -67,10 +64,6 @@ async fn main() -> miette::Result<()> {
 
     // Default cache directory is per-port so two instances (e.g.
     // launchd-managed on 7777 and a dev binary on 7778) don't share state
-    // and wipe each other's tables during their periodic refreshes. Override
-    // with REPO_RECALL_CACHE_DIR. The cache file inside is `cache.redb`; it
-    // persists across restarts and is wiped only on a schema-version change
-    // (#146).
     let cache_dir = cfg
         .paths
         .cache_dir
@@ -82,8 +75,6 @@ async fn main() -> miette::Result<()> {
 
     // Underlying errors are `anyhow::Error`, which does not implement
     // `std::error::Error`, so `.into_diagnostic()` won't see them. Render via
-    // `miette::miette!` and tack on a wrap_err for the labeled "failed to
-    // bootstrap because X" line.
     let cache_db = CacheDb::open_in_dir(&cache_dir)
         .map_err(|e| miette::miette!("{e:?}"))
         .wrap_err_with(|| format!("failed to open cache db at {}", cache_dir.display()))?;
@@ -100,7 +91,6 @@ async fn main() -> miette::Result<()> {
     let github_client = repo_recall::ingest::github::build_client();
     // Bounded startup probe so a slow/blocked network never wedges boot.
     // Timeout collapses to `Error` so the banner reflects the failure
-    // instead of silently rendering "ok".
     let viewer = match tokio::time::timeout(
         std::time::Duration::from_secs(3),
         github_client.fetch_user(),
@@ -150,10 +140,6 @@ async fn main() -> miette::Result<()> {
 
     // Per-source refresh fan-out (#146). Each ingest source carries its
     // own cadence: `refresh.per_source.<source>.interval_secs` overrides
-    // the global `refresh.interval_secs`, and a resolved interval of 0
-    // disables that source. The scheduler ticks at the smallest positive
-    // interval and, each tick, runs exactly the sources whose watermark
-    // says their interval has elapsed.
     use routes::refresh::Source;
     let scheduled: Vec<(Source, u64)> = Source::ALL
         .iter()
@@ -207,8 +193,6 @@ async fn main() -> miette::Result<()> {
 
     // Always start MCP. Tolerate dead-stdin: in the brew-services case, stdin
     // is /dev/null so run_stdio returns Ok almost immediately and we keep
-    // running axum. In the Claude-Desktop-spawned case, stdin is a pipe from
-    // the host and run_stdio holds it open for the session's life.
     let mcp_state = state.clone();
     let mcp_handle = tokio::spawn(async move {
         if let Err(e) = mcp::run_stdio(mcp_state).await {

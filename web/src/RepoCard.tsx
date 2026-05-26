@@ -26,8 +26,6 @@ const slugFromRemote = (url: string | null): string | null => {
 
 /// Session text (#229) is obscured by default. Revealing is a deliberate
 /// click — on a tailnet-hosted instance the blur is the only thing between
-/// a prompt and a passer-by. Stops click propagation so revealing a prompt
-/// doesn't also collapse the card.
 function RedactedText({ text }: { text: string }) {
   const [revealed, setRevealed] = useState(false);
   if (revealed) return <span className="text-slate-700">{text}</span>;

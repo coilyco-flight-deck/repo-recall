@@ -1,7 +1,5 @@
 //! Open-PR ingest. Source 2 of #155. The wire layer lives in
 //! [`super::client::GithubClient::fetch_open_prs`]; this module owns
-//! the typed input shape and the pure JSON-to-record parser that
-//! both the octocrab and fixtures impls call into.
 
 use chrono::DateTime;
 
@@ -37,8 +35,6 @@ pub struct PrRecordInput {
 
 /// Pure parser. Takes the GitHub REST `GET /repos/X/pulls` response
 /// body (a JSON array) and returns the typed records. Both the
-/// octocrab path and the fixtures path call this so the parsing
-/// rules live in one place.
 pub fn parse_prs_json(value: &serde_json::Value) -> Vec<PrRecordInput> {
     let Some(arr) = value.as_array() else {
         return Vec::new();
