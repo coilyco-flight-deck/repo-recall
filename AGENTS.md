@@ -14,7 +14,7 @@ Stack: Rust 2021 (axum 0.8 + tokio, redb, tantivy, pmcp 2.6) for the API. React 
 
 `make install` (cargo-watch + pre-commit), `make watch` (cargo-watch over src + Cargo.toml), `make test` (axum + MCP smoke), `make ci` (fmt + clippy + check + test).
 
-Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECALL_REFRESH_INTERVAL_SECS` (150, 0 disables), `REPO_RECALL_REMOTE_TARGET_LIMIT` (25), `REPO_RECALL_GITHUB_FIXTURES_DIR` (fixtures replay, loud WARN).
+Env vars: see README.
 
 
 ## Conventions
@@ -33,7 +33,7 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 - **Remote pass runs second.** Main refresh is local + blocking in one `spawn_blocking`. Remote uses tokio tasks + bounded semaphore (8). Failures swallowed at `debug!`.
 - **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath).
 - **Git log shelled out.** `git log --all --no-merges` subprocess, NUL-separated. No libgit2.
-- **Two-artifact shape.** Rust binary serves JSON + MCP. `web/` is a Vite SPA built to `web/dist/` and served by Caddy via `Dockerfile.web` + `deploy/Caddyfile`. Vite dev proxies `/api`, `/openapi.json`, `/mcp` to the Rust process. `make watch-all` runs both.
+- **Two-artifact shape.** Rust binary serves JSON + MCP. `web/` is a Vite SPA built to `web/dist/`, served by Caddy via `Dockerfile.web` + `deploy/Caddyfile`. See Reachability for URLs.
 - **Refresh signal is `GET /api/scan-version`** - monotonic counter bumped at end of refresh. ETag keys on the same counter.
 - **MCP server co-runs with axum.** `src/mcp/` calls existing modules. Port-bind failure falls back to MCP-only.
 - **MCP stdout reserved for JSON-RPC.** In `mcp` mode tracing writes stderr; axum writes stdout.
@@ -41,6 +41,11 @@ Env vars (subset; see README): `REPO_RECALL_HOST` (default loopback), `REPO_RECA
 ## Privacy
 
 Metadata + 200-char summary only, not transcripts. Loopback by default; `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache to `$TMPDIR`. Outbound limited to GitHub REST reads for PRs, issues, and deploy status.
+
+## Reachability
+
+- **Prod (tailnet)** - `http://repo-recall` via MagicDNS. HTTP only (short names have no HTTPS cert). Caddy fronts the SPA + reverse-proxies `/api/*`, `/openapi.json`, `/mcp` to the Rust binary.
+- **Local dev** - `http://127.0.0.1:7777` (Rust). `make watch-all` adds Vite proxying the same paths.
 
 ## Release + post-push
 
@@ -54,4 +59,4 @@ Post-push: verify CI at +300s; `brew outdated` → `brew upgrade`; `coily ssh sy
 - [docs/FEATURES.md](docs/FEATURES.md) - inventory of what ships today.
 - [.coily/coily.yaml](.coily/coily.yaml) - allowlisted commands.
 
-Cross-reference convention from [coilysiren/agentic-os#59](https://github.com/coilysiren/agentic-os/issues/59).
+Cross-reference convention: coilysiren/agentic-os#59.
