@@ -1,4 +1,2 @@
 ^\.git/
 ^target/
-node_modules/
-^web/dist/

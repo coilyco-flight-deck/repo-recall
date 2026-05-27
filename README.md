@@ -13,10 +13,7 @@ Local-only. Binds `127.0.0.1`, cache lives in `$TMPDIR`. Outbound limited to Git
 
 ## Surface
 
-Two artifacts deployed side by side:
-
-- **Rust binary** - JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML.
-- **React SPA** under `web/` - static bundle built by Vite, served by Caddy in its own container in production. Consumes the JSON surface. Hello World stub today; the real card dashboard lands in [#144](https://github.com/coilysiren/repo-recall/issues/144).
+API + MCP service only. The Rust binary serves JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML, no web frontend. Consumers are agents (via MCP) and the `luca-*` skills + `coily` wrappers (via JSON).
 
 Endpoint list and MCP tool inventory: [`docs/endpoints.md`](docs/endpoints.md). Env vars: [`docs/env-vars.md`](docs/env-vars.md).
 
@@ -29,7 +26,7 @@ curl http://127.0.0.1:7777/
 
 No config, no wizard. Walks cwd + 4 levels for `.git`, parses `~/.claude/projects/**/*.jsonl`, joins by `cwd`.
 
-Local dev: `make watch-all` runs cargo-watch on the Rust side and the Vite dev server on the web side concurrently. Vite proxies `/api`, `/openapi.json`, `/mcp` to the Rust binary so a single browser origin works.
+Local dev: `make watch` runs cargo-watch on the Rust binary.
 
 ## MCP host
 

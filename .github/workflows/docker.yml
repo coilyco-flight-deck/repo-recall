@@ -2,18 +2,17 @@ name: docker
 
 # Build, push, and (on main) sideload + roll on kai-server.
 #
-# Images:
+# Image:
 #   ghcr.io/coilysiren/repo-recall-api  (Dockerfile, Rust + axum + MCP on :7777)
-#   ghcr.io/coilysiren/repo-recall-web  (Dockerfile.web, caddy + static SPA)
 #
 # Two paths on every push to main:
 #
-# 1. Public GHCR push. The matrix `build` job tags `latest` + short-sha
-#    and publishes to ghcr.io/coilysiren/*. Anyone who wants to deploy
-#    repo-recall on their own k8s cluster pulls from here.
+# 1. Public GHCR push. The `build` job tags `latest` + short-sha
+#    and publishes to ghcr.io/coilysiren/repo-recall-api. Anyone who
+#    wants to deploy repo-recall on their own k8s cluster pulls from here.
 #
 # 2. Kai-server sideload. The `ship` job (needs build) pulls the
-#    just-pushed images, docker-save them, pipes the tarball over
+#    just-pushed image, docker-save it, pipes the tarball over
 #    tailscale ssh into kai-server's containerd via
 #    `k3s ctr -n k8s.io images import -`, then `kubectl set image` +
 #    `rollout status` to land the SHA-pinned image. Sidesteps ghcr.io
@@ -41,14 +40,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: repo-recall-api
-            dockerfile: Dockerfile
-          - image: repo-recall-web
-            dockerfile: Dockerfile.web
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +58,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          images: ghcr.io/${{ github.repository_owner }}/repo-recall-api
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -77,12 +68,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          cache-from: type=gha,scope=repo-recall-api
+          cache-to: type=gha,scope=repo-recall-api,mode=max
           # Pass tag-derived version to build.rs so the binary reports a
           # real version when built from a tag. Falls through to
           # `git describe` on plain main commits.
@@ -91,12 +82,12 @@ jobs:
 
   # Kai-server sideload. Only on main pushes (tag pushes are a release
   # publish flow; the homelab rolls from main commits). Pulls the
-  # just-pushed GHCR images, saves them as tarballs, pipes them over
+  # just-pushed GHCR image, saves it as a tarball, pipes it over
   # tailscale ssh into kai-server's k3s containerd, then rolls the
-  # deployment to the SHA-pinned image refs. This bypasses any
+  # deployment to the SHA-pinned image ref. This bypasses any
   # cluster-side GHCR pull (ghcr.io has been flaky enough that the
   # homelab benefits from a registry-free path) while keeping the
-  # public images available for anyone else who wants to deploy
+  # public image available for anyone else who wants to deploy
   # repo-recall on their own cluster.
   ship:
     if: github.ref == 'refs/heads/main'
@@ -127,38 +118,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull both just-pushed images, then save + stream them over
-      # tailscale ssh into kai-server's containerd. Keep the GHCR ref
-      # end-to-end so kubelet's IfNotPresent lookup matches the ref
-      # containerd stored on import; an earlier version retagged
-      # locally and broke the lookup, which fell through to a
-      # docker.io pull that 404s (repo-recall#219).
-      #
-      # `set image` updates both containers in the same Pod template
-      # to the same SHA-pinned GHCR ref. rollout-status timeout is 5m
-      # because a Recreate roll on the WSL-hosted k3s node can spend
-      # 1-2m on ImagePull-then-start for an 85 MB api + 24 MB web,
-      # even with the sideload already done (kubelet still has to
-      # confirm + start containers, and the api warms up its index).
+      # Pull the just-pushed image, then save + stream it over tailscale
+      # ssh into kai-server's containerd. Keep the GHCR ref end-to-end
+      # so kubelet's IfNotPresent lookup matches the ref containerd
+      # stored on import; an earlier version retagged locally and broke
+      # the lookup, which fell through to a docker.io pull that 404s
+      # (repo-recall#219).
       - name: Sideload to kai-server + roll
         env:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           SHORT="${SHA:0:7}"
-          for name in repo-recall-api repo-recall-web; do
-            ref="ghcr.io/coilysiren/${name}:sha-${SHORT}"
-            docker pull "$ref"
-            docker save "$ref" | \
-              tailscale ssh deploy@kai-server \
-                "sudo k3s ctr -n k8s.io images import -"
-          done
+          ref="ghcr.io/coilysiren/repo-recall-api:sha-${SHORT}"
+          docker pull "$ref"
+          docker save "$ref" | \
+            tailscale ssh deploy@kai-server \
+              "sudo k3s ctr -n k8s.io images import -"
           # `sudo k3s kubectl` because k3s ships its own kubectl and the
           # deploy user has NOPASSWD on /usr/local/bin/k3s but no
           # kubeconfig of its own. Same shape as the `sudo k3s ctr`
           # import above.
-          tailscale ssh deploy@kai-server "sudo k3s kubectl -n repo-recall set image deploy/repo-recall \
-            api=ghcr.io/coilysiren/repo-recall-api:sha-$SHORT \
-            web=ghcr.io/coilysiren/repo-recall-web:sha-$SHORT"
+          tailscale ssh deploy@kai-server \
+            "sudo k3s kubectl -n repo-recall set image deploy/repo-recall api=$ref"
           tailscale ssh deploy@kai-server \
             "sudo k3s kubectl -n repo-recall rollout status deploy/repo-recall --timeout=5m"

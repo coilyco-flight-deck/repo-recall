@@ -54,10 +54,6 @@ Local-only. Loopback bind. Cache in `$TMPDIR`. `Session` rows store metadata + 2
 
 Homebrew tap, `brew services`-managed. Conventional commits drive GHA releases + auto-pushed formula update. `Cargo.toml` pinned `0.0.0-dev`; version from `build.rs`.
 
-## Frontend status
-
-Rust binary serves JSON + MCP; static React SPA under `web/`, built by Vite, served by Caddy. Today: Hello World stub (#192). Real card dashboard lands in #144. Local dev via `make watch-all`.
-
 ## See also
 
 - [README.md](../README.md) - human-facing intro.

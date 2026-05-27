@@ -8,15 +8,15 @@ Local hydration layer joining on-disk repos against git, `gh`, and Claude Code s
 
 ## Project shape
 
-Inventory: [`docs/FEATURES.md`](docs/FEATURES.md). Rust 2021 (axum 0.8, tokio, redb, tantivy, pmcp 2.6); SPA under `web/` (React + Vite + Tailwind v4). Modules: `main.rs`, `lib.rs`, `db.rs`, `scanner.rs`, `sessions.rs`, `commits.rs`, `join.rs`, `activity.rs`, `routes/`, `mcp/`. Smoke tests in `tests/`.
+Inventory: [`docs/FEATURES.md`](docs/FEATURES.md). Rust 2021 (axum 0.8, tokio, redb, tantivy, pmcp 2.6). Modules: `main.rs`, `lib.rs`, `db.rs`, `scanner.rs`, `sessions.rs`, `commits.rs`, `join.rs`, `activity.rs`, `routes/`, `mcp/`. Smoke tests in `tests/`.
 
 ## Repo boundaries
 
-Two artifacts. Rust binary serves JSON + MCP; SPA builds to `web/dist/`, served by Caddy via `Dockerfile.web` + `deploy/Caddyfile`. No config file - env vars only (see README). Sessions, session_repos, commits all reference `repos.id` but never unify; cross-source views are query-time.
+Single artifact. Rust binary serves JSON + MCP. No web frontend - agents consume MCP, the `luca-*` skills + `coily` wrappers consume the JSON surface. No config file - env vars only (see README). Sessions, session_repos, commits all reference `repos.id` but never unify; cross-source views are query-time.
 
 ## Commands
 
-Route through coily; see [`.coily/coily.yaml`](.coily/coily.yaml). `make install`, `make watch`, `make test`, `make ci`, `make watch-all` (Rust + Vite, proxied paths).
+Route through coily; see [`.coily/coily.yaml`](.coily/coily.yaml). `make install`, `make watch`, `make test`, `make ci`.
 
 ## Validation
 
@@ -41,7 +41,7 @@ Loopback by default. `REPO_RECALL_HOST` override only when access is gated elsew
 - **MCP co-runs with axum.** Port-bind failure falls back to MCP-only.
 - **Refresh signal** `GET /api/scan-version` - monotonic; ETag keys on it.
 
-Reachability: prod (tailnet) `http://repo-recall` via MagicDNS, HTTP only; Caddy fronts SPA + reverse-proxies `/api/*`, `/openapi.json`, `/mcp`. Local dev `http://127.0.0.1:7777`.
+Reachability: prod (tailnet) `http://repo-recall` via MagicDNS, HTTP only. Local dev `http://127.0.0.1:7777`.
 
 ## Release
 

@@ -1,11 +1,6 @@
-# Local two-container shape. Mirrors the future k8s deploy: caddy fronts the
-# static React bundle on :8080, the Rust binary serves JSON + MCP on :7777.
-# The browser hits caddy (or the Vite dev server during dev) and lets it
-# proxy / route to the API.
-#
-# For day-to-day iteration prefer `make watch-all` (cargo-watch on the Rust
-# side plus Vite dev server on the web side). docker compose is for the
-# "ship-shape preview" path and as the local mirror of prod.
+# Local mirror of the API + MCP service. For day-to-day iteration prefer
+# `make watch` (cargo-watch). docker compose is for the "ship-shape preview"
+# path and as the local mirror of prod.
 
 services:
   api:
@@ -22,20 +17,3 @@ services:
     volumes:
       - ${HOME}/projects/coilysiren:/work:ro
       - ${HOME}/.claude:/home/repo-recall/.claude:ro
-
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-    image: repo-recall-web:dev
-    ports:
-      - "8080:8080"
-    environment:
-      PORT: "8080"
-      # Compose: API is a sibling service, reachable by service name on the
-      # default bridge. k8s shares a Pod and talks over localhost (the
-      # Caddyfile default).
-      API_UPSTREAM: "api:7777"
-    depends_on:
-      api:
-        condition: service_started

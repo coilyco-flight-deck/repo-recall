@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # -----------------------------------------------------------------------------
-# repo-recall API: Rust axum + MCP server. Sibling to Dockerfile.web (caddy
-# fronts the static SPA, this image serves /api, /openapi.json, /mcp on :7777).
+# repo-recall API: Rust axum + MCP server. Serves /api, /openapi.json,
+# /mcp on :7777.
 #
 # Runtime layer carries `git` and `gh` because the ingest pass shells out to
 # both (see AGENTS.md "No GraphQL, one exception"). Filesystem mounts that
