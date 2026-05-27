@@ -216,7 +216,7 @@ fn normalize_run_status(status: &str, conclusion: &str) -> Option<&'static str> 
 
 /// Pure parser. Builds a `DeployHealth` from the REST workflow-runs
 /// response (latest run's status + most-recent successful run's
-fn parse_deploy_health_json(value: &serde_json::Value) -> DeployHealth {
+pub(crate) fn parse_deploy_health_json(value: &serde_json::Value) -> DeployHealth {
     let Some(arr) = value.get("workflow_runs").and_then(|v| v.as_array()) else {
         return DeployHealth::default();
     };
@@ -248,7 +248,7 @@ fn parse_deploy_health_json(value: &serde_json::Value) -> DeployHealth {
 
 /// Pure parser. Reads `/user/repos` and maps to `ActiveRepo`. REST
 /// field names: `full_name`, `clone_url`, `ssh_url`, `default_branch`,
-fn parse_active_repos_json(value: &serde_json::Value) -> Vec<ActiveRepo> {
+pub(crate) fn parse_active_repos_json(value: &serde_json::Value) -> Vec<ActiveRepo> {
     let Some(arr) = value.as_array() else {
         return Vec::new();
     };

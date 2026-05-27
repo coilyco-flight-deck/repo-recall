@@ -89,6 +89,11 @@ async fn main() -> miette::Result<()> {
     let commits_per_repo: usize = cfg.discovery.commits_per_repo;
 
     let github_client = repo_recall::ingest::github::build_client();
+    let forgejo_host = std::env::var("REPO_RECALL_FORGEJO_HOST")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "forgejo.coilysiren.me".to_string());
+    let forgejo_client = repo_recall::ingest::forgejo::build_client(&forgejo_host);
     // Bounded startup probe so a slow/blocked network never wedges boot.
     // Timeout collapses to `Error` so the banner reflects the failure
     let viewer = match tokio::time::timeout(
@@ -125,6 +130,8 @@ async fn main() -> miette::Result<()> {
         remote_backoff_secs: Arc::new(Mutex::new(0)),
         last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
         github_client,
+        forgejo_client,
+        remote_kind_cache: repo_recall::ingest::remote_kind::RemoteKindCache::new(),
     };
 
     // Initial scan in the background so the dashboard / first MCP tool call

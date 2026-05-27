@@ -419,50 +419,73 @@ async fn ingest_remote_state(state: AppState) -> usize {
         _ => return 0,
     };
 
-    // Filter to repos we actually know how to query (GitHub-hosted only).
-    // Sniff the deploy workflow on disk up front so the gh subprocess block
-    let jobs: Vec<_> = targets
-        .into_iter()
-        .filter_map(|(id, url, branch, path)| {
-            git::log::github_owner_repo(&url).map(|slug| {
-                let deploy_wf = git::log::find_deploy_workflow(std::path::Path::new(&path));
-                (id, slug, branch, deploy_wf)
-            })
-        })
-        .collect();
+    // Per-repo dispatch (#91); see docs/forgejo-dispatch.md.
+    use crate::ingest::remote_kind::RemoteKind;
+    type RemoteJob = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        std::sync::Arc<dyn crate::ingest::github::GithubClient>,
+        &'static str,
+    );
+    let mut jobs: Vec<RemoteJob> = Vec::new();
+    for (id, url, branch, path) in targets {
+        let Some((host, slug)) = git::log::remote_host_and_slug(&url) else {
+            continue;
+        };
+        let Some(kind) = state.remote_kind_cache.detect(&host).await else {
+            continue;
+        };
+        let (client, source) = match kind {
+            RemoteKind::Github => (
+                state.github_client.clone(),
+                crate::db::milestone_source::GITHUB,
+            ),
+            RemoteKind::Forgejo => (
+                state.forgejo_client.clone(),
+                crate::db::milestone_source::FORGEJO,
+            ),
+        };
+        let deploy_wf = git::log::find_deploy_workflow(std::path::Path::new(&path));
+        jobs.push((id, slug, branch, deploy_wf, client, source));
+    }
     let total = jobs.len();
     if total == 0 {
         return 0;
     }
 
-    // Bounded concurrency: 8 concurrent `gh` processes is plenty without
+    // Bounded concurrency: 8 concurrent fetches is plenty without
     // hammering the rate limit or fork-bombing the laptop.
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
     let mut set = tokio::task::JoinSet::new();
-    for (id, slug, branch, deploy_wf) in jobs {
+    for (id, slug, branch, deploy_wf, client, source) in jobs {
         let sem = semaphore.clone();
         let login = my_login.clone();
-        let github_client = state.github_client.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
-            // #176: issues now flow through the GithubClient trait
-            // (octocrab in prod, FixturesClient in `make watch-fixtures`).
-            let issue_state = github_client.fetch_open_issues(&slug).await;
-            let pr_state = github_client.fetch_open_prs(&slug).await;
-            let milestone_state = github_client.fetch_open_milestones(&slug).await;
+            // #176, #91: GithubClient trait → octocrab / fixtures / Forgejo.
+            let issue_state = client.fetch_open_issues(&slug).await;
+            let pr_state = client.fetch_open_prs(&slug).await;
+            let milestone_state = client.fetch_open_milestones(&slug).await;
             let deploy_state = match deploy_wf.as_ref() {
                 Some(wf) => Some((
                     wf.clone(),
-                    github_client.fetch_deploy_health(&slug, wf, &branch).await,
+                    client.fetch_deploy_health(&slug, wf, &branch).await,
                 )),
                 None => None,
             };
             let slug_for_blocking = slug.clone();
             tokio::task::spawn_blocking(move || {
                 let slug = slug_for_blocking;
-                let (prs, issues) = match git::log::fetch_pr_and_issue_counts(&slug, &login) {
-                    Some((p, i)) => (Some(p), Some(i)),
-                    None => (None, None),
+                // `gh`-shell counts are GitHub-only; Forgejo skips them (#91).
+                let (prs, issues) = if source == crate::db::milestone_source::GITHUB {
+                    match git::log::fetch_pr_and_issue_counts(&slug, &login) {
+                        Some((p, i)) => (Some(p), Some(i)),
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
                 };
                 use crate::ingest::github::RemoteFetchState;
                 let deploy = deploy_state.and_then(|(wf, st)| st.into_option().map(|h| (wf, h)));
@@ -488,6 +511,7 @@ async fn ingest_remote_state(state: AppState) -> usize {
                 let milestones = milestone_state.into_option().unwrap_or_default();
                 RemoteSnapshot {
                     id,
+                    milestone_source: source,
                     prs,
                     issues,
                     deploy,
@@ -552,7 +576,7 @@ async fn ingest_remote_state(state: AppState) -> usize {
                     w.upsert_issue_record(snap.id, issue)?;
                 }
                 for m in &snap.milestones {
-                    w.upsert_milestone(snap.id, crate::db::milestone_source::GITHUB, m)?;
+                    w.upsert_milestone(snap.id, snap.milestone_source, m)?;
                 }
                 n += 1;
             }
@@ -569,13 +593,17 @@ async fn ingest_remote_state(state: AppState) -> usize {
 /// `active_remote_repos`. Skipped silently when `gh` is missing or
 async fn ingest_active_repos(state: AppState) -> usize {
     use crate::ingest::github::RemoteFetchState;
-    if !matches!(&*state.viewer.lock().await, RemoteFetchState::Ok(_)) {
-        return 0;
-    }
-    let actives = match state.github_client.fetch_active_repos(100).await {
+    // #91: merge GitHub + Forgejo active-repos; failures degrade independently.
+    let gh = match state.github_client.fetch_active_repos(100).await {
         RemoteFetchState::Ok(v) => v,
-        _ => return 0,
+        _ => Vec::new(),
     };
+    let fj = match state.forgejo_client.fetch_active_repos(100).await {
+        RemoteFetchState::Ok(v) => v,
+        _ => Vec::new(),
+    };
+    let mut actives = gh;
+    actives.extend(fj);
     if actives.is_empty() {
         return 0;
     }
@@ -693,6 +721,8 @@ async fn update_remote_backoff(state: &AppState, results: &[RemoteSnapshot]) {
 
 struct RemoteSnapshot {
     id: i64,
+    /// Milestone `source` tag at persist time (#91).
+    milestone_source: &'static str,
     prs: Option<git::log::PrCounts>,
     issues: Option<git::log::IssueCounts>,
     deploy: Option<(String, git::log::DeployHealth)>,

@@ -24,7 +24,7 @@ Integration tests boot a router on port 0 with their own cache dir. MCP tests sp
 
 ## Safety
 
-Loopback by default. `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache in `$TMPDIR`. Metadata + 200-char summary only, no transcripts. Outbound limited to GitHub REST reads. MCP stdout reserved for JSON-RPC; in `mcp` mode tracing writes stderr.
+Loopback by default. `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache in `$TMPDIR`. Metadata + 200-char summary only, no transcripts. Outbound limited to GitHub + Forgejo REST reads. MCP stdout reserved for JSON-RPC; in `mcp` mode tracing writes stderr.
 
 ## Cross-repo contracts
 
@@ -36,7 +36,7 @@ Loopback by default. `REPO_RECALL_HOST` override only when access is gated elsew
 - **Activity score** `Σ ln(1 + xᵢ / Mᵢ)`; action-required hard-sorts above. Categories `Historical`, `LocalState`, `RemoteState`.
 - **`is_action_required` curated**: dirty tree, in-progress git op, detached HEAD. Ahead/behind + stash informational.
 - **Remote pass second.** Local in one `spawn_blocking`; remote via bounded semaphore (8), failures at `debug!`.
-- **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list`.
+- **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list`. Forgejo REST via `ReqwestForgejoClient` (`REPO_RECALL_FORGEJO_TOKEN`); per-repo dispatch picks via `ingest::remote_kind` probe.
 - **Git log shelled out** as `git log --all --no-merges`, NUL-separated. No libgit2.
 - **MCP co-runs with axum.** Port-bind failure falls back to MCP-only.
 - **Refresh signal** `GET /api/scan-version` - monotonic; ETag keys on it.

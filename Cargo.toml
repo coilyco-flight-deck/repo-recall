@@ -38,6 +38,7 @@ async-trait = "0.1"
 # Default features pull rustls + retry + tracing; we don't need the
 # JWT-app or opentls features.
 octocrab = "0.50"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [profile.release]
 opt-level = 3
@@ -46,6 +47,5 @@ codegen-units = 1
 strip = "symbols"
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde_json = "1"
 tempfile = "3"

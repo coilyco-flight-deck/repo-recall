@@ -50,6 +50,10 @@ pub struct AppState {
     /// GitHub API client. Either an [`ingest::github::OctocrabClient`]
     /// sourced from `gh auth token` (production), an anonymous octocrab
     pub github_client: Arc<dyn ingest::github::GithubClient>,
+    /// Forgejo API client (#91). See docs/forgejo-dispatch.md.
+    pub forgejo_client: Arc<dyn ingest::github::GithubClient>,
+    /// Per-host kind cache (#91). See docs/forgejo-dispatch.md.
+    pub remote_kind_cache: ingest::remote_kind::RemoteKindCache,
 }
 
 /// One repo's last-good remote-state, captured on the most recent

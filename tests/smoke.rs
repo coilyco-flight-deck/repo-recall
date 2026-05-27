@@ -54,6 +54,8 @@ async fn boot_with(
         remote_backoff_secs: Arc::new(Mutex::new(0)),
         last_good_remote: Arc::new(Mutex::new(std::collections::HashMap::new())),
         github_client: repo_recall::ingest::github::build_client(),
+        forgejo_client: repo_recall::ingest::forgejo::build_client("forgejo.coilysiren.me"),
+        remote_kind_cache: repo_recall::ingest::remote_kind::RemoteKindCache::new(),
     };
 
     let app = routes::router(state);

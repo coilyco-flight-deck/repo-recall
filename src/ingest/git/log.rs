@@ -780,6 +780,12 @@ pub fn github_owner_repo(remote_url: &str) -> Option<String> {
     Some(format!("{}/{}", parsed.owner, parsed.name))
 }
 
+/// Host-agnostic peer of `github_owner_repo`; drives per-repo dispatch (#91).
+pub fn remote_host_and_slug(remote_url: &str) -> Option<(String, String)> {
+    let parsed = parse_owner_repo(remote_url)?;
+    Some((parsed.host, format!("{}/{}", parsed.owner, parsed.name)))
+}
+
 /// Turn a raw git remote URL (`git@github.com:owner/repo.git`,
 /// `https://github.com/owner/repo.git`, `ssh://git@host:22/owner/repo`, …)
 fn normalize_remote_url(raw: &str) -> Option<String> {
@@ -966,5 +972,29 @@ mod tests {
         assert!(github_owner_repo("https://gitlab.com/a/b").is_none());
         assert!(github_owner_repo("https://github.com/only-one").is_none());
         assert!(github_owner_repo("https://github.com/a/b/tree/main").is_none());
+    }
+
+    #[test]
+    fn extracts_host_and_slug_for_any_provider() {
+        use super::remote_host_and_slug;
+        assert_eq!(
+            remote_host_and_slug("https://github.com/coilysiren/repo-recall"),
+            Some(("github.com".into(), "coilysiren/repo-recall".into())),
+        );
+        assert_eq!(
+            remote_host_and_slug("https://forgejo.coilysiren.me/coilysiren/repo-recall.git"),
+            Some((
+                "forgejo.coilysiren.me".into(),
+                "coilysiren/repo-recall".into(),
+            )),
+        );
+        assert_eq!(
+            remote_host_and_slug("git@forgejo.coilysiren.me:coilysiren/repo-recall.git"),
+            Some((
+                "forgejo.coilysiren.me".into(),
+                "coilysiren/repo-recall".into(),
+            )),
+        );
+        assert!(remote_host_and_slug("https://github.com/only-one").is_none());
     }
 }
