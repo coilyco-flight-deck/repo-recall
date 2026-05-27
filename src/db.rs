@@ -33,7 +33,7 @@ const REFRESH_WATERMARKS: TableDefinition<&str, i64> = TableDefinition::new("ref
 
 /// Cache schema version. Bump whenever a redb table's key/value layout or
 /// the JSON shape of a persisted record changes. A mismatch between this
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 /// `META` key holding the on-disk schema version.
 const META_SCHEMA_VERSION: &str = "__schema_version";
@@ -123,6 +123,15 @@ const ISSUE_RECORDS: TableDefinition<u64, &[u8]> = TableDefinition::new("issue_r
 const ISSUE_RECORDS_BY_REPO_NUMBER: TableDefinition<(u64, i64), u64> =
     TableDefinition::new("issue_records_by_repo_number");
 
+// Milestones (#88). One row per (repo, source, number) where source is the
+// platform that owns the milestone: "github" or "forgejo".
+const MILESTONES: TableDefinition<u64, &[u8]> = TableDefinition::new("milestones");
+const MILESTONES_BY_REPO_SOURCE_NUMBER: TableDefinition<(u64, &str, i64), u64> =
+    TableDefinition::new("milestones_by_repo_source_number");
+// (due_on, milestone_id). No-due rows use `due_on = i64::MAX` so they tail.
+const OPEN_MILESTONES_BY_DUE: TableDefinition<(i64, u64), ()> =
+    TableDefinition::new("open_milestones_by_due");
+
 const META_NEXT_REPO: &str = "next_repo_id";
 const META_NEXT_SESSION: &str = "next_session_id";
 const META_NEXT_COMMIT: &str = "next_commit_id";
@@ -134,6 +143,7 @@ const META_NEXT_ISSUE_REF: &str = "next_issue_ref_id";
 const META_NEXT_LABELED_ISSUE: &str = "next_labeled_issue_id";
 const META_NEXT_PR_RECORD: &str = "next_pr_record_id";
 const META_NEXT_ISSUE_RECORD: &str = "next_issue_record_id";
+const META_NEXT_MILESTONE: &str = "next_milestone_id";
 
 // ---------------------------------------------------------------------------
 // public API surface (unchanged from the SQLite version)
@@ -369,6 +379,47 @@ pub struct IssueRecord {
     /// Raw reactions block from the REST response. Shape is owned by
     /// GitHub and may gain keys; persist as JSON so we don't need a
     pub reactions_json: String,
+}
+
+/// Source-platform sentinels for [`Milestone`] rows. Kept as a typed
+/// constant so callers can't typo the column at the call site.
+pub mod milestone_source {
+    pub const GITHUB: &str = "github";
+    pub const FORGEJO: &str = "forgejo";
+}
+
+/// One milestone from GitHub or Forgejo (#88). Keyed on `(repo, source, number)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Milestone {
+    pub id: i64,
+    pub repo_id: i64,
+    /// Owning platform: see [`milestone_source`].
+    pub source: String,
+    pub number: i64,
+    pub title: String,
+    /// Scrubbed + truncated description (~500 chars).
+    pub description: String,
+    pub html_url: String,
+    /// `"open"` or `"closed"`. Only `open` rows live in
+    /// [`OPEN_MILESTONES_BY_DUE`].
+    pub state: String,
+    pub due_on: Option<i64>,
+    pub open_issues: i64,
+    pub closed_issues: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub closed_at: Option<i64>,
+}
+
+impl Milestone {
+    /// Most recent activity ts: max of `updated_at`, `created_at`, `closed_at`.
+    pub fn last_activity_at(&self) -> i64 {
+        let mut t = self.updated_at.max(self.created_at);
+        if let Some(closed) = self.closed_at {
+            t = t.max(closed);
+        }
+        t
+    }
 }
 
 /// A reference from a session or commit to a GitHub issue or PR in a
@@ -615,6 +666,9 @@ impl CacheDb {
             let _ = write.open_table(PR_RECORDS_BY_REPO_NUMBER)?;
             let _ = write.open_table(ISSUE_RECORDS)?;
             let _ = write.open_table(ISSUE_RECORDS_BY_REPO_NUMBER)?;
+            let _ = write.open_table(MILESTONES)?;
+            let _ = write.open_table(MILESTONES_BY_REPO_SOURCE_NUMBER)?;
+            let _ = write.open_table(OPEN_MILESTONES_BY_DUE)?;
             let _ = write.open_table(REFRESH_WATERMARKS)?;
         }
         write.commit()?;
@@ -1513,6 +1567,45 @@ impl CacheDb {
         Ok(out)
     }
 
+    /// Open milestones across every repo, sorted by closest due date first.
+    /// Milestones with no `due_on` sort to the tail. `limit == 0` for all.
+    pub fn list_open_milestones_by_due(&self, limit: usize) -> Result<Vec<Milestone>> {
+        let read = self.db.begin_read()?;
+        let by_due = read.open_table(OPEN_MILESTONES_BY_DUE)?;
+        let mt = read.open_table(MILESTONES)?;
+        let mut out = Vec::new();
+        for row in by_due.iter()? {
+            let (k, _) = row?;
+            let (_due, id) = k.value();
+            if let Some(g) = mt.get(id)? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+            if limit > 0 && out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// All milestones (open + closed) for one repo, sorted by due date.
+    /// Mirrors `issue_records_for_repo`'s per-repo accessor shape.
+    pub fn milestones_for_repo(&self, repo_id: i64) -> Result<Vec<Milestone>> {
+        let read = self.db.begin_read()?;
+        let by_key = read.open_table(MILESTONES_BY_REPO_SOURCE_NUMBER)?;
+        let mt = read.open_table(MILESTONES)?;
+        let key_lo = (id_to_u64(repo_id), "", i64::MIN);
+        let key_hi = (id_to_u64(repo_id), "\u{10ffff}", i64::MAX);
+        let mut out = Vec::new();
+        for row in by_key.range(key_lo..=key_hi)? {
+            let (_, v) = row?;
+            if let Some(g) = mt.get(v.value())? {
+                out.push(serde_json::from_slice(g.value())?);
+            }
+        }
+        out.sort_by_key(|m: &Milestone| m.due_on.unwrap_or(i64::MAX));
+        Ok(out)
+    }
+
     /// Return all dispatch records for a repo, newest-first by
     /// `dispatched_at`. Empty when the repo has no `docs/repo-dispatch/`
     pub fn dispatches_for_repo(&self, repo_id: i64) -> Result<Vec<DispatchRow>> {
@@ -1669,6 +1762,9 @@ impl CacheWriter<'_> {
         clear_table::<(u64, i64), u64>(self.txn, PR_RECORDS_BY_REPO_NUMBER)?;
         clear_table::<u64, &[u8]>(self.txn, ISSUE_RECORDS)?;
         clear_table::<(u64, i64), u64>(self.txn, ISSUE_RECORDS_BY_REPO_NUMBER)?;
+        clear_table::<u64, &[u8]>(self.txn, MILESTONES)?;
+        clear_table::<(u64, &str, i64), u64>(self.txn, MILESTONES_BY_REPO_SOURCE_NUMBER)?;
+        clear_table::<(i64, u64), ()>(self.txn, OPEN_MILESTONES_BY_DUE)?;
         clear_table::<&str, i64>(self.txn, REFRESH_WATERMARKS)?;
         Ok(())
     }
@@ -1725,6 +1821,35 @@ impl CacheWriter<'_> {
         clear_table::<(u64, i64), u64>(self.txn, PR_RECORDS_BY_REPO_NUMBER)?;
         clear_table::<u64, &[u8]>(self.txn, ISSUE_RECORDS)?;
         clear_table::<(u64, i64), u64>(self.txn, ISSUE_RECORDS_BY_REPO_NUMBER)?;
+        self.clear_milestones_by_source(milestone_source::GITHUB)?;
+        Ok(())
+    }
+
+    /// Delete every milestone whose `source` matches `kind`. Used by
+    /// per-source wipes so a Forgejo pass doesn't touch GitHub rows.
+    fn clear_milestones_by_source(&self, kind: &str) -> Result<()> {
+        let mut victims: Vec<(u64, u64, i64, Option<i64>, bool)> = Vec::new();
+        {
+            let mt = self.txn.open_table(MILESTONES)?;
+            for row in mt.iter()? {
+                let (k, v) = row?;
+                let m: Milestone = serde_json::from_slice(v.value())?;
+                if m.source == kind {
+                    let is_open = m.state == "open";
+                    victims.push((k.value(), id_to_u64(m.repo_id), m.number, m.due_on, is_open));
+                }
+            }
+        }
+        let mut mt = self.txn.open_table(MILESTONES)?;
+        let mut by_key = self.txn.open_table(MILESTONES_BY_REPO_SOURCE_NUMBER)?;
+        let mut by_due = self.txn.open_table(OPEN_MILESTONES_BY_DUE)?;
+        for (id, repo, number, due_on, is_open) in victims {
+            mt.remove(id)?;
+            by_key.remove((repo, kind, number))?;
+            if is_open {
+                by_due.remove((due_on.unwrap_or(i64::MAX), id))?;
+            }
+        }
         Ok(())
     }
 
@@ -2164,6 +2289,66 @@ impl CacheWriter<'_> {
         Ok(u64_to_id(id))
     }
 
+    /// Upsert one milestone, idempotent on `(repo_id, source, number)`.
+    /// `source` must be a [`milestone_source`] constant.
+    pub fn upsert_milestone(
+        &self,
+        repo_id: i64,
+        source: &str,
+        rec: &crate::ingest::github::MilestoneInput,
+    ) -> Result<i64> {
+        let mut by_key = self.txn.open_table(MILESTONES_BY_REPO_SOURCE_NUMBER)?;
+        let key = (id_to_u64(repo_id), source, rec.number);
+        let (id, existing_state, existing_due) = match by_key.get(key)? {
+            Some(g) => {
+                let id = g.value();
+                drop(g);
+                let mt = self.txn.open_table(MILESTONES)?;
+                let prior = mt.get(id)?;
+                let (state, due) = match prior {
+                    Some(p) => {
+                        let m: Milestone = serde_json::from_slice(p.value())?;
+                        (m.state, m.due_on)
+                    }
+                    None => (String::new(), None),
+                };
+                (id, Some(state), due)
+            }
+            None => (next_id(self.txn, META_NEXT_MILESTONE)?, None, None),
+        };
+        let row = Milestone {
+            id: u64_to_id(id),
+            repo_id,
+            source: source.to_string(),
+            number: rec.number,
+            title: rec.title.clone(),
+            description: rec.description.clone(),
+            html_url: rec.html_url.clone(),
+            state: rec.state.clone(),
+            due_on: rec.due_on,
+            open_issues: rec.open_issues,
+            closed_issues: rec.closed_issues,
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            closed_at: rec.closed_at,
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        self.txn
+            .open_table(MILESTONES)?
+            .insert(id, bytes.as_slice())?;
+        by_key.insert(key, id)?;
+        let mut by_due = self.txn.open_table(OPEN_MILESTONES_BY_DUE)?;
+        if let Some(prior_state) = existing_state {
+            if prior_state == "open" {
+                by_due.remove((existing_due.unwrap_or(i64::MAX), id))?;
+            }
+        }
+        if row.state == "open" {
+            by_due.insert((row.due_on.unwrap_or(i64::MAX), id), ())?;
+        }
+        Ok(u64_to_id(id))
+    }
+
     pub fn insert_file_change(
         &self,
         repo_id: i64,
@@ -2536,6 +2721,70 @@ mod tests {
         let remaining = db.list_repos_with_counts().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].path, "/tmp/a");
+    }
+
+    /// Milestones sort by due, no-due lands at the tail, close drops from idx.
+    #[test]
+    fn milestones_round_trip_and_sort_by_due() {
+        use crate::ingest::github::MilestoneInput;
+        let dir = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_in_dir(dir.path()).unwrap();
+        let repo = db
+            .write_batch(|w| w.upsert_repo("/tmp/a", "a", 0, None, None))
+            .unwrap();
+
+        let m_late = MilestoneInput {
+            number: 1,
+            title: "late".into(),
+            description: "".into(),
+            html_url: "https://example.com/1".into(),
+            state: "open".into(),
+            due_on: Some(2_000_000_000),
+            open_issues: 3,
+            closed_issues: 1,
+            created_at: 1,
+            updated_at: 1,
+            closed_at: None,
+        };
+        let m_soon = MilestoneInput {
+            number: 2,
+            title: "soon".into(),
+            due_on: Some(1_000_000_000),
+            ..m_late.clone()
+        };
+        let m_no_due = MilestoneInput {
+            number: 3,
+            title: "no_due".into(),
+            due_on: None,
+            ..m_late.clone()
+        };
+
+        db.write_batch(|w| {
+            w.upsert_milestone(repo, milestone_source::GITHUB, &m_late)?;
+            w.upsert_milestone(repo, milestone_source::GITHUB, &m_soon)?;
+            w.upsert_milestone(repo, milestone_source::GITHUB, &m_no_due)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let listed = db.list_open_milestones_by_due(0).unwrap();
+        let titles: Vec<&str> = listed.iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["soon", "late", "no_due"]);
+
+        // Re-upsert "soon" as closed; it must drop from the open index but
+        // remain in the per-repo accessor.
+        let m_soon_closed = MilestoneInput {
+            state: "closed".into(),
+            closed_at: Some(1_500_000_000),
+            ..m_soon
+        };
+        db.write_batch(|w| w.upsert_milestone(repo, milestone_source::GITHUB, &m_soon_closed))
+            .unwrap();
+        let still_open = db.list_open_milestones_by_due(0).unwrap();
+        assert_eq!(still_open.len(), 2);
+        assert!(still_open.iter().all(|m| m.title != "soon"));
+        let all = db.milestones_for_repo(repo).unwrap();
+        assert_eq!(all.len(), 3);
     }
 
     /// Per-source wipes are isolated: clearing the sessions tables leaves

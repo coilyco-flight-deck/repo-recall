@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/refresh", post(api::refresh_sync))
         .route("/api/scan-version", get(api::scan_version))
         .route("/api/sessions", get(api::sessions))
+        .route("/api/milestones", get(api::milestones))
         .fallback(not_found_json)
         .with_state(state);
     match mcp_router {

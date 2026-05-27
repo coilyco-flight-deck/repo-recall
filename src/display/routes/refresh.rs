@@ -449,6 +449,7 @@ async fn ingest_remote_state(state: AppState) -> usize {
             // (octocrab in prod, FixturesClient in `make watch-fixtures`).
             let issue_state = github_client.fetch_open_issues(&slug).await;
             let pr_state = github_client.fetch_open_prs(&slug).await;
+            let milestone_state = github_client.fetch_open_milestones(&slug).await;
             let deploy_state = match deploy_wf.as_ref() {
                 Some(wf) => Some((
                     wf.clone(),
@@ -471,6 +472,7 @@ async fn ingest_remote_state(state: AppState) -> usize {
                 for st in [
                     pr_state.clone().discard_payload(),
                     issue_state.clone().discard_payload(),
+                    milestone_state.clone().discard_payload(),
                 ] {
                     if let RemoteFetchState::RateLimited { retry_after_secs } = st {
                         rate_limited = true;
@@ -483,6 +485,7 @@ async fn ingest_remote_state(state: AppState) -> usize {
 
                 let pr_records = pr_state.into_option().unwrap_or_default();
                 let issue_records = issue_state.into_option().unwrap_or_default();
+                let milestones = milestone_state.into_option().unwrap_or_default();
                 RemoteSnapshot {
                     id,
                     prs,
@@ -490,6 +493,7 @@ async fn ingest_remote_state(state: AppState) -> usize {
                     deploy,
                     pr_records,
                     issue_records,
+                    milestones,
                     rate_limited,
                     max_retry_after_secs,
                 }
@@ -546,6 +550,9 @@ async fn ingest_remote_state(state: AppState) -> usize {
                 }
                 for issue in &snap.issue_records {
                     w.upsert_issue_record(snap.id, issue)?;
+                }
+                for m in &snap.milestones {
+                    w.upsert_milestone(snap.id, crate::db::milestone_source::GITHUB, m)?;
                 }
                 n += 1;
             }
@@ -609,7 +616,8 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
             && snap.issues.is_none()
             && snap.deploy.is_none()
             && snap.pr_records.is_empty()
-            && snap.issue_records.is_empty();
+            && snap.issue_records.is_empty()
+            && snap.milestones.is_empty();
 
         if snap.rate_limited || snapshot_is_blank {
             if let Some(prior) = shadow.get(&snap.id) {
@@ -618,6 +626,7 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
                 snap.deploy.clone_from(&prior.deploy);
                 snap.pr_records.clone_from(&prior.pr_records);
                 snap.issue_records.clone_from(&prior.issue_records);
+                snap.milestones.clone_from(&prior.milestones);
                 substituted += 1;
             }
             continue;
@@ -631,6 +640,7 @@ async fn apply_last_good_shadow(state: &AppState, results: &mut [RemoteSnapshot]
                 deploy: snap.deploy.clone(),
                 pr_records: snap.pr_records.clone(),
                 issue_records: snap.issue_records.clone(),
+                milestones: snap.milestones.clone(),
                 captured_at: now,
             },
         );
@@ -688,6 +698,7 @@ struct RemoteSnapshot {
     deploy: Option<(String, git::log::DeployHealth)>,
     pr_records: Vec<crate::ingest::github::PrRecordInput>,
     issue_records: Vec<crate::ingest::github::IssueRecordInput>,
+    milestones: Vec<crate::ingest::github::MilestoneInput>,
     /// True if any of this snapshot's gh fetchers reported
     /// `RemoteFetchState::RateLimited`. Aggregated across the pass to
     rate_limited: bool,

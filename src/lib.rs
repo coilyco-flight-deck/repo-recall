@@ -61,6 +61,7 @@ pub struct CachedRemoteState {
     pub deploy: Option<(String, ingest::git::log::DeployHealth)>,
     pub pr_records: Vec<ingest::github::PrRecordInput>,
     pub issue_records: Vec<ingest::github::IssueRecordInput>,
+    pub milestones: Vec<ingest::github::MilestoneInput>,
     pub captured_at: chrono::DateTime<chrono::Utc>,
 }
 

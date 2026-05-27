@@ -134,6 +134,64 @@ pub async fn refresh_sync(State(state): State<AppState>) -> Response {
     axum::Json(body).into_response()
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneView {
+    #[serde(flatten)]
+    pub milestone: crate::db::Milestone,
+    pub repo_name: String,
+    pub repo_path: String,
+    pub repo_remote_url: Option<String>,
+    /// Precomputed max of `updated_at`, `created_at`, `closed_at`.
+    pub last_activity_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestonesResponse {
+    pub milestones: Vec<MilestoneView>,
+    pub generated_at: i64,
+    pub scan_version: u64,
+}
+
+/// `GET /api/milestones` - open milestones sorted by closest due date first.
+/// Milestones with no `due_on` sort to the tail (#88).
+pub async fn milestones(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let cache = state.cache_db.clone();
+    let (milestones, repos) = tokio::task::spawn_blocking(move || {
+        let ms = cache.list_open_milestones_by_due(0).unwrap_or_default();
+        let rs = cache.list_repos_with_counts().unwrap_or_default();
+        (ms, rs)
+    })
+    .await
+    .unwrap_or_default();
+
+    let mut by_id = std::collections::HashMap::with_capacity(repos.len());
+    for r in &repos {
+        by_id.insert(r.id, r);
+    }
+
+    let views: Vec<MilestoneView> = milestones
+        .into_iter()
+        .map(|m| {
+            let r = by_id.get(&m.repo_id);
+            let last_activity_at = m.last_activity_at();
+            MilestoneView {
+                repo_name: r.map(|r| r.name.clone()).unwrap_or_default(),
+                repo_path: r.map(|r| r.path.clone()).unwrap_or_default(),
+                repo_remote_url: r.and_then(|r| r.remote_url.clone()),
+                last_activity_at,
+                milestone: m,
+            }
+        })
+        .collect();
+
+    let body = MilestonesResponse {
+        milestones: views,
+        generated_at: chrono::Utc::now().timestamp(),
+        scan_version: state.scan_version.load(Ordering::Acquire),
+    };
+    json_with_etag(&headers, body.scan_version, &body)
+}
+
 // Signal derivation lives in `crate::signals` so both the HTTP and MCP
 // surfaces (`routes::api`, `mcp::tools`) call into one helper.
 

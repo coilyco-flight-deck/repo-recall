@@ -55,6 +55,16 @@ pub async fn spec() -> impl IntoResponse {
                     "responses": {"200": {"description": "Refresh complete", "content": {"application/json": {}}}}
                 }
             },
+            "/api/milestones": {
+                "get": {
+                    "summary": "Open milestones sorted by due date",
+                    "description": "Open milestones across every repo in the cache, sorted by closest `due_on` first. Milestones with no due date sort to the tail. Each row carries title, description, html_url, due_on, open/closed issue counts, last_activity_at, and the owning repo's name/path/remote_url. Powers the daily-headline-oss pulse cache (#88).",
+                    "responses": {
+                        "200": {"description": "Open milestones", "content": {"application/json": {}}},
+                        "304": {"description": "Not Modified, ETag matched"}
+                    }
+                }
+            },
             "/api/repos/{repo_id}/tickets/{issue_number}/history": {
                 "get": {
                     "summary": "Ticket history for a repo issue",

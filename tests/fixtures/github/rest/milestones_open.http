@@ -1,0 +1,35 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+
+[
+  {
+    "url": "https://api.github.com/repos/coilysiren/repo-recall/milestones/1",
+    "html_url": "https://github.com/coilysiren/repo-recall/milestone/1",
+    "id": 12001,
+    "number": 1,
+    "title": "Milestone A",
+    "description": "First testable slice.",
+    "state": "open",
+    "open_issues": 4,
+    "closed_issues": 6,
+    "created_at": "2026-04-01T12:00:00Z",
+    "updated_at": "2026-05-20T08:00:00Z",
+    "due_on": "2026-06-15T07:00:00Z",
+    "closed_at": null
+  },
+  {
+    "url": "https://api.github.com/repos/coilysiren/repo-recall/milestones/2",
+    "html_url": "https://github.com/coilysiren/repo-recall/milestone/2",
+    "id": 12002,
+    "number": 2,
+    "title": "Milestone B",
+    "description": "No due date.",
+    "state": "open",
+    "open_issues": 2,
+    "closed_issues": 0,
+    "created_at": "2026-04-10T12:00:00Z",
+    "updated_at": "2026-05-15T08:00:00Z",
+    "due_on": null,
+    "closed_at": null
+  }
+]

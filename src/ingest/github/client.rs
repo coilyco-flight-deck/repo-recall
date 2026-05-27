@@ -10,6 +10,7 @@ use octocrab::Octocrab;
 
 use super::fetch_state::RemoteFetchState;
 use super::issues::{parse_issues_json, IssueRecordInput};
+use super::milestones::{parse_milestones_json, MilestoneInput};
 use super::pulls::{parse_prs_json, PrRecordInput};
 use crate::ingest::git::log::{ActiveRepo, DeployHealth};
 
@@ -35,6 +36,12 @@ pub trait GithubClient: Send + Sync {
     /// `GET /repos/{owner}/{repo}/pulls?state=open&per_page=100` -
     /// open pull requests for one repo. Replaces
     async fn fetch_open_prs(&self, owner_repo: &str) -> RemoteFetchState<Vec<PrRecordInput>>;
+
+    /// `GET /repos/{owner}/{repo}/milestones?state=open&per_page=100` (#88).
+    async fn fetch_open_milestones(
+        &self,
+        owner_repo: &str,
+    ) -> RemoteFetchState<Vec<MilestoneInput>>;
 
     /// `GET /repos/{owner}/{repo}/actions/workflows/{wf}/runs?branch=B&per_page=30`
     /// plus a `last_success_ts` derived from the same response.
@@ -145,6 +152,21 @@ impl GithubClient for OctocrabClient {
             Err(e) => return super::fetch_state::classify_octocrab_error(&e),
         };
         RemoteFetchState::Ok(parse_prs_json(&value))
+    }
+
+    async fn fetch_open_milestones(
+        &self,
+        owner_repo: &str,
+    ) -> RemoteFetchState<Vec<MilestoneInput>> {
+        if self.unconfigured {
+            return RemoteFetchState::Unconfigured;
+        }
+        let path = format!("/repos/{owner_repo}/milestones?state=open&per_page=100");
+        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
+            Ok(v) => v,
+            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
+        };
+        RemoteFetchState::Ok(parse_milestones_json(&value))
     }
 
     async fn fetch_deploy_health(
@@ -354,6 +376,26 @@ impl GithubClient for FixturesClient {
             Err(e) => return RemoteFetchState::Error(format!("pulls_all.http body: {e}")),
         };
         RemoteFetchState::Ok(parse_prs_json(&value))
+    }
+
+    async fn fetch_open_milestones(
+        &self,
+        _owner_repo: &str,
+    ) -> RemoteFetchState<Vec<MilestoneInput>> {
+        let parsed = match self.read_fixture("milestones_open.http") {
+            Ok(p) => p,
+            Err(e) => return RemoteFetchState::Error(e),
+        };
+        if let Some(state) =
+            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
+        {
+            return state;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
+            Ok(v) => v,
+            Err(e) => return RemoteFetchState::Error(format!("milestones_open.http body: {e}")),
+        };
+        RemoteFetchState::Ok(parse_milestones_json(&value))
     }
 
     async fn fetch_deploy_health(
