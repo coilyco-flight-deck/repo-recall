@@ -1,62 +1,60 @@
 # Agent instructions
 
-## Project overview
+Workspace conventions load globally via `~/.claude/CLAUDE.md` → `agentic-os-kai/AGENTS.md`. This file is repo-specific.
 
-`repo-recall` joins on-disk repos against three sources (git, gh, Claude Code session JSONL) and serves the view to axum + MCP (pmcp stdio) in one process. Loopback-only, no telemetry, no auth.
+## Scope
 
-Stack: Rust 2021 (axum 0.8 + tokio, redb, tantivy, pmcp 2.6) for the API. React + Vite + Tailwind v4 under `web/`, served by Caddy (same shape as galaxy-gen). Rust side is JSON + MCP only. No config file.
+Local hydration layer joining on-disk repos against git, `gh`, and Claude Code session JSONL. Serves JSON over axum and MCP tools (pmcp stdio) in the same process. Loopback-only, no auth.
 
-## Structure
+## Project shape
 
-`src/main.rs` (entry), `lib.rs` (AppState), `db.rs` (redb schema, wipe-rebuild), `scanner.rs` (discovery), `sessions.rs` + `commits.rs` (sources), `join.rs` (cwd→repo, longest-prefix), `activity.rs` (scoring + categories), `routes/` (axum, JSON-only), `mcp/` (pmcp). `tests/smoke.rs` (axum) + `mcp_smoke.rs` (stdio).
+Inventory: [`docs/FEATURES.md`](docs/FEATURES.md). Rust 2021 (axum 0.8, tokio, redb, tantivy, pmcp 2.6); SPA under `web/` (React + Vite + Tailwind v4). Modules: `main.rs`, `lib.rs`, `db.rs`, `scanner.rs`, `sessions.rs`, `commits.rs`, `join.rs`, `activity.rs`, `routes/`, `mcp/`. Smoke tests in `tests/`.
 
-## Dev loop
+## Repo boundaries
 
-`make install` (cargo-watch + pre-commit), `make watch` (cargo-watch over src + Cargo.toml), `make test` (axum + MCP smoke), `make ci` (fmt + clippy + check + test).
+Two artifacts. Rust binary serves JSON + MCP; SPA builds to `web/dist/`, served by Caddy via `Dockerfile.web` + `deploy/Caddyfile`. No config file - env vars only (see README). Sessions, session_repos, commits all reference `repos.id` but never unify; cross-source views are query-time.
 
-Env vars: see README.
+## Commands
 
+Route through coily; see [`.coily/coily.yaml`](.coily/coily.yaml). `make install`, `make watch`, `make test`, `make ci`, `make watch-all` (Rust + Vite, proxied paths).
 
-## Conventions
+## Validation
 
-- **Two stores, no SQLite.** `cache.redb` + tantivy index, derived from disk; no migrations. Wipe-on-schema-change (`db::SCHEMA_VERSION`), not wipe-on-restart. Per-source refresh: each source has its own `refresh.per_source` interval + `REFRESH_WATERMARKS` watermark, runs when due, wipes only the tables it owns (`CacheWriter::wipe_*`).
-- **Discovery is lazy.** No root setting. Walks cwd + `REPO_RECALL_DEPTH` (default 4).
-- **`session_repos.match_type` is the extension point.** MVP writes `'cwd'`. Add rows; don't replace.
-- **Single writer.** `cache.write_batch(|w| { … })` per phase, atomic. `state.refresh_lock` blocks overlap. Reads use MVCC `begin_read()` freely.
-- **Every dashboard query has its own secondary index.** redb is KV. Per-repo aggregates precomputed at end of refresh by `finalize_repo_aggregates`.
-- **Integration tests boot real router on port 0.** Each gets its own cache dir (nanos + PID + counter). MCP tests spawn binary, poll until scan bumps past 0.
-- **Session parsing tolerates malformed lines.** Skip + `debug!`.
-- **Data sources stay separate.** sessions + session_repos + commits reference `repos.id` but don't unify. Cross-source views are query-time.
-- **Activity categories**: `Historical`, `LocalState`, `RemoteState`. Drives refresh placement and render.
-- **Activity score**: `Σ ln(1 + xᵢ / Mᵢ)` where `Mᵢ` is corpus max. Action-required hard-sorts above.
-- **`is_action_required` is curated**: dirty tree, in-progress git op, detached HEAD. Ahead/behind + stash are informational.
-- **Remote pass runs second.** Main refresh is local + blocking in one `spawn_blocking`. Remote uses tokio tasks + bounded semaphore (8). Failures swallowed at `debug!`.
-- **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list` (those go GraphQL underneath).
-- **Git log shelled out.** `git log --all --no-merges` subprocess, NUL-separated. No libgit2.
-- **Two-artifact shape.** Rust binary serves JSON + MCP. `web/` is a Vite SPA built to `web/dist/`, served by Caddy via `Dockerfile.web` + `deploy/Caddyfile`. See Reachability for URLs.
-- **Refresh signal is `GET /api/scan-version`** - monotonic counter bumped at end of refresh. ETag keys on the same counter.
-- **MCP server co-runs with axum.** `src/mcp/` calls existing modules. Port-bind failure falls back to MCP-only.
-- **MCP stdout reserved for JSON-RPC.** In `mcp` mode tracing writes stderr; axum writes stdout.
+Integration tests boot a router on port 0 with their own cache dir. MCP tests spawn the binary and poll until `scan-version` bumps past 0. Pre-commit runs trifecta + secret scan + cargo fmt/clippy; CI mirrors it.
 
-## Privacy
+## Safety
 
-Metadata + 200-char summary only, not transcripts. Loopback by default; `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache to `$TMPDIR`. Outbound limited to GitHub REST reads for PRs, issues, and deploy status.
+Loopback by default. `REPO_RECALL_HOST` override only when access is gated elsewhere (e.g. `tailscale serve`). Cache in `$TMPDIR`. Metadata + 200-char summary only, no transcripts. Outbound limited to GitHub REST reads. MCP stdout reserved for JSON-RPC; in `mcp` mode tracing writes stderr.
 
-## Reachability
+## Cross-repo contracts
 
-- **Prod (tailnet)** - `http://repo-recall` via MagicDNS. HTTP only (short names have no HTTPS cert). Caddy fronts the SPA + reverse-proxies `/api/*`, `/openapi.json`, `/mcp` to the Rust binary.
-- **Local dev** - `http://127.0.0.1:7777` (Rust). `make watch-all` adds Vite proxying the same paths.
+- **Two stores, no SQLite.** `cache.redb` + tantivy. Wipe-on-schema-change (`db::SCHEMA_VERSION`). Per-source refresh via `refresh.per_source` + `REFRESH_WATERMARKS`; wipes only its tables.
+- **Discovery lazy.** Walks cwd + `REPO_RECALL_DEPTH` (default 4).
+- **`session_repos.match_type` is the extension point.** MVP writes `'cwd'`; add rows, don't replace.
+- **Single writer.** `cache.write_batch` per phase, atomic. `refresh_lock` blocks overlap; reads use MVCC.
+- **Secondary indexes per query.** Aggregates precomputed by `finalize_repo_aggregates`.
+- **Activity score** `Σ ln(1 + xᵢ / Mᵢ)`; action-required hard-sorts above. Categories `Historical`, `LocalState`, `RemoteState`.
+- **`is_action_required` curated**: dirty tree, in-progress git op, detached HEAD. Ahead/behind + stash informational.
+- **Remote pass second.** Local in one `spawn_blocking`; remote via bounded semaphore (8), failures at `debug!`.
+- **No GraphQL.** All GitHub via `gh api` REST. Never `gh api graphql`, never `gh {issue,pr,repo,search} list`.
+- **Git log shelled out** as `git log --all --no-merges`, NUL-separated. No libgit2.
+- **MCP co-runs with axum.** Port-bind failure falls back to MCP-only.
+- **Refresh signal** `GET /api/scan-version` - monotonic; ETag keys on it.
 
-## Release + post-push
+Reachability: prod (tailnet) `http://repo-recall` via MagicDNS, HTTP only; Caddy fronts SPA + reverse-proxies `/api/*`, `/openapi.json`, `/mcp`. Local dev `http://127.0.0.1:7777`.
 
-Push to `main` → `.github/workflows/release.yml`: tag-action tags + cuts Release, `bump-formula` rewrites `Formula/repo-recall.rb` url+tag+revision via Contents API with skip-CI marker. No external tap. Cargo.toml pinned `0.0.0-dev`; version from `build.rs` (`$REPO_RECALL_VERSION` or `git describe --tags`). Install: `brew tap coilysiren/repo-recall https://github.com/coilysiren/repo-recall && brew install coilysiren/repo-recall/repo-recall`. Never write the literal skip-CI token in a commit body.
+## Release
 
-Post-push: verify CI at +300s; `brew outdated` → `brew upgrade`; `coily ssh systemctl start repo-recall-update.service`. Skip for docs-only.
+Push to `main` → `.github/workflows/release.yml` tags + cuts Release; `bump-formula` rewrites `Formula/repo-recall.rb` via Contents API with a skip-CI marker (never write the literal token). `Cargo.toml` pinned `0.0.0-dev`; version from `build.rs`. Install via `brew tap coilysiren/repo-recall https://github.com/coilysiren/repo-recall`. Post-push: verify CI +300s, `brew upgrade`, `coily ssh systemctl start repo-recall-update.service`. Docs-only commits skip.
+
+## Agent rules
+
+One issue per change. Every commit closes a same-repo issue with `closes #N` or a Forgejo URL.
 
 ## See also
 
 - [README.md](README.md) - human-facing intro.
-- [docs/FEATURES.md](docs/FEATURES.md) - inventory of what ships today.
+- [docs/FEATURES.md](docs/FEATURES.md) - inventory.
 - [.coily/coily.yaml](.coily/coily.yaml) - allowlisted commands.
 
 Cross-reference convention: coilysiren/agentic-os#59.

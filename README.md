@@ -16,24 +16,24 @@ Local-only. Binds `127.0.0.1`, cache lives in `$TMPDIR`. Outbound limited to Git
 Two artifacts deployed side by side:
 
 - **Rust binary** - JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML.
-- **React SPA** under `web/` - static bundle built by Vite, served by Caddy in its own container in production. Consumes the JSON surface above. Hello World stub today; the real card dashboard lands in [#144](https://github.com/coilysiren/repo-recall/issues/144).
+- **React SPA** under `web/` - static bundle built by Vite, served by Caddy in its own container in production. Consumes the JSON surface. Hello World stub today; the real card dashboard lands in [#144](https://github.com/coilysiren/repo-recall/issues/144).
 
-Local dev: `make watch-all` runs cargo-watch on the Rust side and the Vite dev server on the web side concurrently. The Vite dev server proxies `/api`, `/openapi.json`, and `/mcp` to the Rust binary so a single browser origin works.
+Endpoint list and MCP tool inventory: [`docs/endpoints.md`](docs/endpoints.md). Env vars: [`docs/env-vars.md`](docs/env-vars.md).
 
-## JSON endpoints
+## Quick start
 
-- `GET /` - full dashboard projection: repos ranked by composite activity score, recent sessions, recent commits, action-required signals, banner counts.
-- `GET /api/action-required` - thin action-required list. `id = "<repo_id>:<signal>"`.
-- `GET /api/scan-version` - single-integer poll target.
-- `POST /api/refresh` - sync refresh.
-- `GET /api/repos/{repo_id}/tickets/{issue_number}/history` - per-issue session + commit join.
-- `GET /openapi.json` - hand-maintained OpenAPI 3.1 description of the surface.
+```sh
+cargo run
+curl http://127.0.0.1:7777/
+```
 
-Every JSON response carries `ETag: "<scan_version>"`. Pass `If-None-Match` for `304 Not Modified` between scans.
+No config, no wizard. Walks cwd + 4 levels for `.git`, parses `~/.claude/projects/**/*.jsonl`, joins by `cwd`.
+
+Local dev: `make watch-all` runs cargo-watch on the Rust side and the Vite dev server on the web side concurrently. Vite proxies `/api`, `/openapi.json`, `/mcp` to the Rust binary so a single browser origin works.
 
 ## MCP host
 
-repo-recall runs an MCP server in the same process. For Claude Desktop:
+For Claude Desktop:
 
 ```json
 {
@@ -45,21 +45,6 @@ repo-recall runs an MCP server in the same process. For Claude Desktop:
   }
 }
 ```
-
-Tools: `recall_dashboard`, `recall_repo`, `recall_session`, `recall_search`, `recall_action_required`, `recall_ticket_history`, `recall_refresh`.
-
-## Point an agent at it
-
-Hand the URL or MCP entry to a coding agent. Starter prompts: "work through every repo flagged as action-required", "find dirty trees and commit or discard", "land or delete stale local branches".
-
-## Quick start
-
-```sh
-cargo run
-curl http://127.0.0.1:7777/
-```
-
-No config, no wizard. Walks cwd + 4 levels for `.git`, parses `~/.claude/projects/**/*.jsonl`, joins by `cwd`.
 
 ## Install via Homebrew
 
@@ -75,20 +60,16 @@ Logs at `$(brew --prefix)/var/log/repo-recall.{log,err.log}`. `brew services edi
 
 Drop empty `.repo-recall-ignore` at the root of a repo cloned for reading. Suppresses all action-required signals. Opt-in.
 
-## Env vars
+## Point an agent at it
 
-`REPO_RECALL_PORT` (7777, loopback only), `REPO_RECALL_CWD` (process cwd), `REPO_RECALL_DEPTH` (4), `REPO_RECALL_COMMITS_PER_REPO` (500), `REPO_RECALL_CACHE_DIR` (`$TMPDIR/repo-recall-<port>`, wipe-on-schema-change), `REPO_RECALL_REFRESH_INTERVAL_SECS` (150, 0 disables; per-source overrides via `refresh.per_source` in the config file), `REPO_RECALL_TURN_INDEX_DAYS` (30, 0 indexes every session's turns), `RUST_LOG`.
-
-## Privacy
-
-- Stores metadata + 200-char summary only.
-- Loopback only. Never `0.0.0.0` on shared boxes.
-- Outbound calls: GitHub REST reads for PRs, issues, and deploy status (reuses `gh` auth, no tokens stored).
+Hand the URL or MCP entry to a coding agent. Starter prompts: "work through every repo flagged as action-required", "find dirty trees and commit or discard", "land or delete stale local branches".
 
 ## See also
 
 - [AGENTS.md](AGENTS.md) - agent-facing operating rules.
 - [docs/FEATURES.md](docs/FEATURES.md) - inventory of what ships today.
+- [docs/endpoints.md](docs/endpoints.md) - JSON + MCP surface.
+- [docs/env-vars.md](docs/env-vars.md) - configuration knobs.
 - [.coily/coily.yaml](.coily/coily.yaml) - allowlisted commands.
 
 Cross-reference convention from [coilysiren/agentic-os#59](https://github.com/coilysiren/agentic-os/issues/59).
