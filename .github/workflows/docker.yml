@@ -1,27 +1,9 @@
 name: docker
 
-# Build, push, and (on main) sideload + roll on kai-server.
-#
-# Image:
-#   ghcr.io/coilysiren/repo-recall-api  (Dockerfile, Rust + axum + MCP on :7777)
-#
-# Two paths on every push to main:
-#
-# 1. Public GHCR push. The `build` job tags `latest` + short-sha
-#    and publishes to ghcr.io/coilysiren/repo-recall-api. Anyone who
-#    wants to deploy repo-recall on their own k8s cluster pulls from here.
-#
-# 2. Kai-server sideload. The `ship` job (needs build) pulls the
-#    just-pushed image, docker-save it, pipes the tarball over
-#    tailscale ssh into kai-server's containerd via
-#    `k3s ctr -n k8s.io images import -`, then `kubectl set image` +
-#    `rollout status` to land the SHA-pinned image. Sidesteps ghcr.io
-#    flakiness for the homelab deploy while keeping the public image
-#    available for third-party consumers. Pattern mirrors
-#    coilysiren/galaxy-gen's build-publish-deploy.yml.
-#
-# Tag pushes only do the GHCR step (release flow publishes a versioned
-# image; the homelab rolls from main).
+# Build + publish the API image to GHCR on every push to main and on tag pushes.
+# Image: ghcr.io/coilysiren/repo-recall-api (Rust + axum + MCP on :7777).
+# Homelab redeploy is pull-side (kai-server `repo-recall-update.service`);
+# GitHub Actions does not touch K3s or the tailnet (#92).
 
 on:
   push:
@@ -31,7 +13,6 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write  # tailscale OIDC for the `ship` job
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -74,72 +55,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=repo-recall-api
           cache-to: type=gha,scope=repo-recall-api,mode=max
-          # Pass tag-derived version to build.rs so the binary reports a
-          # real version when built from a tag. Falls through to
-          # `git describe` on plain main commits.
+          # Tag-derived version passed to build.rs so tag builds report a
+          # real version; falls through to git describe on main commits.
           build-args: |
             REPO_RECALL_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-
-  # Kai-server sideload. Only on main pushes (tag pushes are a release
-  # publish flow; the homelab rolls from main commits). Pulls the
-  # just-pushed GHCR image, saves it as a tarball, pipes it over
-  # tailscale ssh into kai-server's k3s containerd, then rolls the
-  # deployment to the SHA-pinned image ref. This bypasses any
-  # cluster-side GHCR pull (ghcr.io has been flaky enough that the
-  # homelab benefits from a registry-free path) while keeping the
-  # public image available for anyone else who wants to deploy
-  # repo-recall on their own cluster.
-  ship:
-    if: github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      # OIDC-based tailnet join. The federated identity for this repo is
-      # provisioned in coilysiren/infrastructure/terraform/tailscale-oidc/;
-      # TS_CLIENT_ID and TS_AUDIENCE are repo secrets set by
-      # `make sync-tailscale-oidc-secrets`.
-      - uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_CLIENT_ID }}
-          audience: ${{ secrets.TS_AUDIENCE }}
-          tags: tag:ci
-          use-cache: "true"
-          hostname: github-actions-${{ github.run_id }}
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Pull the just-pushed image, then save + stream it over tailscale
-      # ssh into kai-server's containerd. Keep the GHCR ref end-to-end
-      # so kubelet's IfNotPresent lookup matches the ref containerd
-      # stored on import; an earlier version retagged locally and broke
-      # the lookup, which fell through to a docker.io pull that 404s
-      # (repo-recall#219).
-      - name: Sideload to kai-server + roll
-        env:
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          SHORT="${SHA:0:7}"
-          ref="ghcr.io/coilysiren/repo-recall-api:sha-${SHORT}"
-          docker pull "$ref"
-          docker save "$ref" | \
-            tailscale ssh deploy@kai-server \
-              "sudo k3s ctr -n k8s.io images import -"
-          # `sudo k3s kubectl` because k3s ships its own kubectl and the
-          # deploy user has NOPASSWD on /usr/local/bin/k3s but no
-          # kubeconfig of its own. Same shape as the `sudo k3s ctr`
-          # import above.
-          tailscale ssh deploy@kai-server \
-            "sudo k3s kubectl -n repo-recall set image deploy/repo-recall api=$ref"
-          tailscale ssh deploy@kai-server \
-            "sudo k3s kubectl -n repo-recall rollout status deploy/repo-recall --timeout=5m"
