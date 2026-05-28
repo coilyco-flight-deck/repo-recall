@@ -28,6 +28,9 @@ commands:
   ci:
     run: make ci
     description: Full pre-merge gate (fmt-check + clippy + check + test). Matches GitHub Actions.
+  install-systemd-user:
+    run: make install-systemd-user
+    description: Build + install as a systemd --user service (Linux/WSL). Idempotent.
   run:
     run: make run
     description: Run the server (cargo + caddy https proxy at https://$(https_host):$(https_port))
@@ -49,5 +52,6 @@ catalog:
     staging:
       mac: brew-service
       windows: scoop-service
+      wsl: systemd-user
     prod:
       kai-server: k3s

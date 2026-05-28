@@ -1,0 +1,20 @@
+[Unit]
+Description=repo-recall local hydration service (JSON HTTP + MCP)
+Documentation=https://forgejo.coilysiren.me/coilysiren/repo-recall
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/repo-recall
+WorkingDirectory=%h/projects/coilysiren
+# linuxbrew first: this host's system git (/usr/bin/git) is too old to parse
+# gpg.format=ssh, which makes every `git log` fail. Brew git/gh win on PATH.
+Environment=PATH=%h/.local/bin:/home/linuxbrew/.linuxbrew/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=REPO_RECALL_CWD=%h/projects/coilysiren
+Environment=REPO_RECALL_PORT=7777
+Environment=REPO_RECALL_DEPTH=4
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
