@@ -1,0 +1,399 @@
+# repo-recall on kai-server k3s. Tailnet-only, no Ingress, no Route 53.
+#
+# Three containers in one Pod: `api` (Rust axum + MCP on :7777), `web`
+# (Caddy serving the static SPA on :80, reverse-proxying /api,
+# /openapi.json, /mcp to localhost:7777), and `ts` (tailscale sidecar
+# in kernel mode that gives the Pod a tailnet IP, so tailnet peers
+# reach `http://repo-recall` via MagicDNS directly).
+#
+# Images:
+#   api -> 192.168.0.194:30500/repo-recall-api:<sha>  (in-cluster registry)
+#   web -> ghcr.io/coilysiren/repo-recall-web:<sha>    (frozen; no SPA
+#          source remains in this repo, so the web image is never rebuilt.
+#          The pull is cluster-side over the public internet, not via the
+#          tailnet, so it keeps working without GitHub joining the tailnet.)
+#
+# The api image is built and pushed by .forgejo/workflows/build-publish-
+# deploy.yml on every push to main: the in-cluster Forgejo runner builds it,
+# pushes the plain-http registry ref (192.168.0.194:30500, served via the
+# runner's DinD --insecure-registry), then `kubectl set image` rolls the
+# api container to the fresh SHA tag. kai-server's containerd carries the
+# insecure-registry entry in registries.yaml, and the Pod is pinned to
+# kai-server, so the cluster-side pull of 192.168.0.194:30500/... lands on
+# that node. No tailnet join, no GHCR, no docker-save sideload.
+# See coilysiren/infrastructure#168, #171, coilysiren/repo-recall#97.
+#
+# Apply: coily ops kubectl apply -f deploy/repo-recall.yml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: repo-recall
+---
+# Deployer ServiceAccount for the Forgejo Actions release pipeline. The CI
+# deploy job authenticates as this SA to roll the app Deployment over the
+# LAN (kubeconfig in the Forgejo Actions secret DEPLOY_KUBECONFIG on
+# coilysiren/repo-recall, built from this SA's token Secret below). No
+# tailnet join, no SSH. See coilysiren/repo-recall#97.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deployer
+  namespace: repo-recall
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: repo-recall
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer
+  namespace: repo-recall
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployer
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: repo-recall
+---
+# Long-lived token for the deployer SA. Kubernetes populates token, ca.crt,
+# and namespace into this Secret; the DEPLOY_KUBECONFIG Forgejo secret is
+# built from its ca.crt + token. Regenerate the kubeconfig if rotated. The
+# token never lives in git. See coilysiren/repo-recall#97.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: deployer-token
+  namespace: repo-recall
+  annotations:
+    kubernetes.io/service-account.name: deployer
+type: kubernetes.io/service-account-token
+---
+# Dedicated ServiceAccount + Role + RoleBinding so the ts sidecar can
+# read/write its TS_KUBE_SECRET state Secret (repo-recall-ts-state).
+# Scoped tight: only this Secret name, only get/update/patch (+ create
+# for initial seed). Mirrors the operator's `proxies` ServiceAccount
+# pattern, but namespaced to repo-recall rather than living in the
+# global tailscale namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: repo-recall
+  namespace: repo-recall
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: repo-recall-ts-state
+  namespace: repo-recall
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["repo-recall-ts-state"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: repo-recall-ts-state
+  namespace: repo-recall
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: repo-recall-ts-state
+subjects:
+  - kind: ServiceAccount
+    name: repo-recall
+    namespace: repo-recall
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: repo-recall
+  namespace: repo-recall
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: repo-recall
+  template:
+    metadata:
+      labels:
+        app: repo-recall
+    spec:
+      serviceAccountName: repo-recall
+      # Pin to kai-server (native Linux 6.8) instead of the WSL2 nodes
+      # (kai-desktop-tower / kai-desktop-tower-wsl). The ts sidecar
+      # needs /dev/net/tun, which the WSL2 kernel doesn't expose to
+      # containerd by default. Every working operator-managed ts-proxy
+      # in this cluster is on kai-server; same constraint applies here.
+      # Also keeps the hostPath worktree consistent (single source of
+      # truth on one node) and lands the in-cluster registry pull on the
+      # one node whose containerd trusts 192.168.0.194:30500 (#171).
+      nodeSelector:
+        kubernetes.io/hostname: kai-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: 192.168.0.194:30500/repo-recall-api:latest
+          # Pulled from the in-cluster registry (192.168.0.194:30500) by
+          # kai-server's containerd over plain http. Always, so each rolled
+          # <sha> tag from the Forgejo pipeline is fetched fresh.
+          imagePullPolicy: Always
+          ports:
+            - name: api
+              containerPort: 7777
+          env:
+            # 0.0.0.0 so the kubelet readiness/liveness probes reach
+            # :7777 via the pod IP. The api stays private: only the web
+            # container's :80 is fronted externally, and the tailnet
+            # ACL doesn't open :7777. Caddy reverse-proxies to
+            # localhost:7777 in-pod, which works either way.
+            - name: REPO_RECALL_HOST
+              value: "0.0.0.0"
+            - name: REPO_RECALL_PORT
+              value: "7777"
+            # MCP CORS allowlist. The Caddy sidecar terminates the tailnet
+            # request on the SPA origin; same-Pod localhost upstream means
+            # MCP only ever sees a same-origin call. Listing the public
+            # MagicDNS name here lets a direct curl from a tailnet peer
+            # against /mcp succeed too.
+            - name: REPO_RECALL_MCP_ORIGINS
+              value: "http://repo-recall,http://repo-recall.tail09a41b.ts.net,https://repo-recall.tail09a41b.ts.net"
+            # Mounted worktree + Claude session JSONL. HOME is repointed at
+            # the mount root so the standard `~/.claude/projects/*.jsonl`
+            # glob in the ingest layer finds the sessions without code changes.
+            - name: REPO_RECALL_CWD
+              value: "/workspace/projects/coilysiren"
+            - name: HOME
+              value: "/workspace/home"
+            # GitHub token for the octocrab ingest layer. Sourced from
+            # SSM /coilysiren/repo-recall/gh-token via the external-
+            # secrets operator (see ExternalSecret below). repo-recall's
+            # OctocrabClient reads GH_TOKEN ahead of `gh auth token`,
+            # so this env var alone is sufficient - no need to seed a
+            # gh CLI config in the image.
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: repo-recall-gh-token
+                  key: token
+          volumeMounts:
+            - name: projects
+              mountPath: /workspace/projects/coilysiren
+              readOnly: true
+            - name: claude
+              mountPath: /workspace/home/.claude
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /api/scan-version
+              port: 7777
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/scan-version
+              port: 7777
+            initialDelaySeconds: 30
+            periodSeconds: 30
+        - name: web
+          # Frozen: the SPA source no longer lives in this repo, so the web
+          # image is never rebuilt and stays on its last GHCR digest. The
+          # pull is cluster-side (containerd -> ghcr.io), not via the tailnet.
+          image: ghcr.io/coilysiren/repo-recall-web:sha-79e9434
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            # Port 80 so tailnet peers can hit `http://repo-recall`
+            # without an explicit :PORT suffix - same shape as forgejo
+            # (Service.port 80 -> targetPort 3000, but here we drop the
+            # port-translating Service since the sidecar puts the Pod
+            # directly on the tailnet, so web binds 80 itself).
+            - name: PORT
+              value: "80"
+            # Same-Pod sibling. localhost is the Caddyfile default but
+            # passing it explicitly keeps the deploy self-documenting.
+            - name: API_UPSTREAM
+              value: "localhost:7777"
+          securityContext:
+            # Caddy runs as UID 1000 per the pod-level securityContext;
+            # binding port 80 from non-root needs CAP_NET_BIND_SERVICE.
+            # Strictly scoped to the bind capability, no other privilege.
+            capabilities:
+              add: ["NET_BIND_SERVICE"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 15
+            periodSeconds: 30
+        # tailscale sidecar in kernel mode. Pod gains a tailnet IP via
+        # WireGuard userspace + a real TUN device (privileged: true is
+        # what the previous operator-managed ts-proxy StatefulSets use
+        # on this same kernel, so it's the known-working shape).
+        # Once `tailscale up` runs, web's 0.0.0.0:80 listener is
+        # reachable from tailnet peers at `http://repo-recall`. No
+        # explicit forwarding rule needed - same pod netns means the
+        # tailnet IP and the pod IP both terminate at the web container.
+        - name: ts
+          image: tailscale/tailscale:v1.78.1
+          env:
+            - name: TS_HOSTNAME
+              value: repo-recall
+            - name: TS_KUBE_SECRET
+              value: repo-recall-ts-state
+            - name: TS_USERSPACE
+              value: "false"
+            - name: TS_AUTH_ONCE
+              value: "true"
+            # Don't override the pod's resolv.conf; the cluster has its
+            # own DNS path and accepting tailnet DNS would break in-pod
+            # service discovery for the api/web siblings.
+            - name: TS_EXTRA_ARGS
+              value: "--accept-dns=false"
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: repo-recall-ts-authkey
+                  key: authkey
+          securityContext:
+            # privileged needed for /dev/net/tun. The pod-level
+            # runAsNonRoot is overridden here because tailscaled needs
+            # root for the netlink + tun ioctls; the api/web siblings
+            # still run as UID 1000.
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: projects
+          hostPath:
+            path: /home/kai/projects/coilysiren
+            type: Directory
+        - name: claude
+          hostPath:
+            path: /home/kai/.claude
+            type: Directory
+---
+# GH_TOKEN for the api container's octocrab ingest. Sourced from
+# SSM /coilysiren/repo-recall/gh-token.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: repo-recall-gh-token
+  namespace: repo-recall
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-parameter-store
+    kind: ClusterSecretStore
+  target:
+    name: repo-recall-gh-token
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        token: "{{ .ghToken }}"
+  data:
+    - secretKey: ghToken
+      remoteRef:
+        key: /coilysiren/repo-recall/gh-token
+---
+# TS_AUTHKEY for the ts sidecar. Sourced from
+# SSM /coilysiren/repo-recall/ts-authkey, which terraform/tailscale-
+# devices/ provisions. Single-use, 90-day expiry; the ts sidecar's
+# TS_KUBE_SECRET state Secret holds the persisted device identity
+# after first boot so subsequent pod restarts don't need a fresh key.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: repo-recall-ts-authkey
+  namespace: repo-recall
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-parameter-store
+    kind: ClusterSecretStore
+  target:
+    name: repo-recall-ts-authkey
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        authkey: "{{ .authkey }}"
+  data:
+    - secretKey: authkey
+      remoteRef:
+        key: /coilysiren/repo-recall/ts-authkey
+---
+# ClusterIP Service for in-cluster routing only. Tailnet exposure
+# comes from the ts sidecar's WireGuard interface, not from any
+# Service annotation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: repo-recall
+  namespace: repo-recall
+spec:
+  type: ClusterIP
+  selector:
+    app: repo-recall
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP

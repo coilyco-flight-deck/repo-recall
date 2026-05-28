@@ -1,0 +1,59 @@
+name: build-publish-deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features --no-fail-fast
+
+  deploy:
+    runs-on: docker
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      # Build the api image and push it to the in-cluster registry. The
+      # runner's DinD sidecar is the docker host (DOCKER_HOST=tcp://
+      # localhost:2375) and carries --insecure-registry=192.168.0.194:30500,
+      # so the plain-http push to the NodePort registry round-trips. No
+      # tailnet join, no GHCR, no docker-save sideload. See
+      # coilysiren/infrastructure#168, #171, coilysiren/repo-recall#97.
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          IMAGE=192.168.0.194:30500/repo-recall-api:${{ github.sha }}
+          docker build \
+            --progress plain \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t "$IMAGE" \
+            .
+          docker push "$IMAGE"
+      # Roll the deployment over the LAN. The kubeconfig points at the k3s
+      # API on the LAN IP (192.168.0.194:6443, in the cert SANs) and
+      # authenticates as the deployer ServiceAccount (deploy/repo-recall.yml).
+      # The Pod is pinned to kai-server, where registries.yaml has the
+      # insecure entry, so the cluster-side pull of 192.168.0.194:30500/...
+      # lands on that node (#171). Only the `api` container is rolled; the
+      # frozen `web` and `ts` sidecars are untouched.
+      - name: Roll deployment
+        env:
+          DEPLOY_KUBECONFIG: ${{ secrets.DEPLOY_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          IMAGE=192.168.0.194:30500/repo-recall-api:${{ github.sha }}
+          echo "$DEPLOY_KUBECONFIG" | base64 -d > /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl -n repo-recall set image \
+            deploy/repo-recall api="$IMAGE"
+          kubectl -n repo-recall rollout status \
+            deploy/repo-recall --timeout=5m
