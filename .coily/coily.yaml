@@ -43,9 +43,6 @@ catalog:
   owner: kai
   lifecycle: production
   description: "Hydration layer for agent work. Joins OTel spans, git/gh state, Claude Code sessions, and local docs context into one queryable surface (JSON HTTP + MCP)."
-  providesApis:
-    - recall-api
-    - recall-mcp
   dependsOn: []
   deploy:
     dev: local
