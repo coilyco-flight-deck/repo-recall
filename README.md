@@ -53,6 +53,16 @@ brew services start repo-recall
 
 Logs at `$(brew --prefix)/var/log/repo-recall.{log,err.log}`. `brew services edit repo-recall` for custom `WorkingDirectory` / env vars.
 
+## Install as a systemd service (Linux / WSL)
+
+Where brew services isn't the right fit (Linux desktop, WSL), install a `systemd --user` unit:
+
+```sh
+coily exec install-systemd-user   # or: make install-systemd-user
+```
+
+Builds the release binary, installs it to `~/.local/bin/repo-recall`, drops [`scripts/repo-recall.service`](scripts/repo-recall.service) into `~/.config/systemd/user/`, enables lingering (starts at boot without a login), and starts the service. Idempotent: re-run after a rebuild to roll the binary. Logs via `journalctl --user -u repo-recall -f`.
+
 ## Silencing repos
 
 Drop empty `.repo-recall-ignore` at the root of a repo cloned for reading. Suppresses all action-required signals. Opt-in.

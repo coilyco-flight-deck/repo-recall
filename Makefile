@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean
+.PHONY: help install install-systemd-user run watch watch-fixtures watch-fixtures-errors build release test smoke fmt fmt-check lint check ci clean
 
 # Config ---------------------------------------------------------------------
 # cwd defaults to $REPO_RECALL_CWD if exported, else $(CURDIR). Lets callers
@@ -18,6 +18,9 @@ install: ## Install dev tooling (cargo-watch, pre-commit hooks)
 	cargo install cargo-watch --locked
 	@command -v pre-commit >/dev/null || pip install --user pre-commit
 	pre-commit install
+
+install-systemd-user: ## Build + install as a systemd --user service (Linux/WSL). Idempotent.
+	bash scripts/install-systemd-user.sh
 
 run: ## Run the server (cargo + caddy https proxy at https://$(https_host):$(https_port))
 	@caddy reverse-proxy --from https://$(https_host):$(https_port) --to 127.0.0.1:$(port) --internal-certs > /tmp/repo-recall-caddy.log 2>&1 & \
