@@ -55,8 +55,6 @@ Logs at `$(brew --prefix)/var/log/repo-recall.{log,err.log}`. `brew services edi
 
 ## Install as a systemd service (Linux / WSL)
 
-Where brew services isn't the right fit (Linux desktop, WSL), install a `systemd --user` unit:
-
 ```sh
 coily exec install-systemd-user   # or: make install-systemd-user
 ```

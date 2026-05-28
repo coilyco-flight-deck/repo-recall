@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Install repo-recall as a systemd --user service (Linux / WSL surface).
-#
-# Mirrors the Formula `service do` block (brew on macOS) and k3s (kai-server
-# prod) for the Linux desktop / WSL surface, where neither brew services nor
-# k3s is the right fit but a per-user systemd unit is. Idempotent: safe to
-# re-run after a rebuild to pick up a new binary.
-#
-# Requires: a working Rust toolchain. On Kai's bare WSL/Focal host that means
-# `cc` must point at the zig shim (brew gcc links a glibc newer than Focal's
-# runtime). See the `kai-wsl-env` skill if the build fails on cc/glibc.
+# Install repo-recall as a per-user systemd service (Linux / WSL surface).
+# Idempotent; needs a working `cc` (see kai-wsl-env skill for the zig shim).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

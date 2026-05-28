@@ -902,7 +902,22 @@ mod tests {
         git(&["checkout", "-b", "merged-old"], None);
         commit("merged work", Some(old));
         git(&["checkout", "main"], None);
-        git(&["merge", "--no-ff", "merged-old", "-m", "merge"], None);
+        // The merge commit needs a committer identity too; pass it inline so
+        // the test doesn't depend on a global git config (CI runners have none).
+        git(
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "merge",
+                "--no-ff",
+                "merged-old",
+                "-m",
+                "merge",
+            ],
+            None,
+        );
 
         // A fresh unmerged branch: tip is now, so not stale.
         git(&["checkout", "-b", "fresh-feature"], None);
