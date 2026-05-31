@@ -1,5 +1,5 @@
 //! Machine-consumable endpoints for an external orchestrator
-//! ([issue #3](https://github.com/coilysiren/repo-recall/issues/3)).
+//! ([issue #3](https://github.com/coilyco-flight-deck/repo-recall/issues/3)).
 
 use std::sync::atomic::Ordering;
 

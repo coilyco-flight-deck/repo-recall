@@ -28,6 +28,6 @@ Summary of the loop:
 
 ## See also
 
-- [coilysiren/repo-recall#125](https://github.com/coilysiren/repo-recall/issues/125) - feature design.
-- [coilysiren/repo-recall#126](https://github.com/coilysiren/repo-recall/issues/126) - long-shot to eliminate the in-Desktop step entirely.
-- [coilysiren/agentic-os-kai#383](https://github.com/coilysiren/agentic-os-kai/issues/383) - the prior spike.
+- [coilysiren/repo-recall#125](https://github.com/coilyco-flight-deck/repo-recall/issues/125) - feature design.
+- [coilysiren/repo-recall#126](https://github.com/coilyco-flight-deck/repo-recall/issues/126) - long-shot to eliminate the in-Desktop step entirely.
+- [coilysiren/agentic-os-kai#383](https://github.com/coilyco-bridge/agentic-os-kai/issues/383) - the prior spike.

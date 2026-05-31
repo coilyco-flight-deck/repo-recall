@@ -1,5 +1,5 @@
-//! Config-file loader. See [#145](https://github.com/coilysiren/repo-recall/issues/145).
-//!
+//! Config-file loader.
+//! See <https://github.com/coilyco-flight-deck/repo-recall/issues/145>.
 
 use std::path::{Path, PathBuf};
 

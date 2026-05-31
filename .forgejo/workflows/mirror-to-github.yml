@@ -28,6 +28,6 @@ jobs:
             echo "mirror-to-github: GITHUB_MIRROR_PAT secret not set; skipping." >&2
             exit 0
           fi
-          git remote add github "https://x-access-token:${PAT}@github.com/coilysiren/repo-recall.git"
+          git remote add github "https://x-access-token:${PAT}@github.com/coilyco-flight-deck/repo-recall.git"
           git push --force github main
           git push --force --tags github

@@ -83,7 +83,7 @@ mod tests {
                 "number": 7,
                 "title": "v1.0",
                 "description": "First stable release.",
-                "html_url": "https://github.com/coilysiren/repo-recall/milestone/7",
+                "html_url": "https://github.com/coilyco-flight-deck/repo-recall/milestone/7",
                 "state": "open",
                 "due_on": "2026-06-30T07:00:00Z",
                 "open_issues": 3,

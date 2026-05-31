@@ -234,8 +234,9 @@ mod tests {
 
     #[test]
     fn with_issue_pull_url_captures_n() {
-        let hits =
-            gh_refs_with_issue_in_text("https://github.com/coilysiren/repo-recall/pull/56 landed");
+        let hits = gh_refs_with_issue_in_text(
+            "https://github.com/coilyco-flight-deck/repo-recall/pull/56 landed",
+        );
         assert_eq!(
             hits,
             vec![GhRef {
@@ -276,8 +277,9 @@ mod tests {
 
     #[test]
     fn pull_url() {
-        let hits =
-            gh_refs_in_text("https://github.com/coilysiren/repo-recall/pull/56 changed files");
+        let hits = gh_refs_in_text(
+            "https://github.com/coilyco-flight-deck/repo-recall/pull/56 changed files",
+        );
         assert_eq!(hits, vec![("coilysiren".into(), "repo-recall".into())]);
     }
 

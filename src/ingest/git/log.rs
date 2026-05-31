@@ -771,7 +771,7 @@ pub struct ActiveRepo {
 }
 
 /// Pull `OWNER/NAME` out of a normalised remote URL like
-/// `https://github.com/coilysiren/repo-recall`. Returns `None` for non-
+/// `https://github.com/coilyco-flight-deck/repo-recall`. Returns `None` for non-
 pub fn github_owner_repo(remote_url: &str) -> Option<String> {
     let parsed = parse_owner_repo(remote_url)?;
     if parsed.host != "github.com" {
@@ -954,8 +954,8 @@ mod tests {
     #[test]
     fn normalizes_ssh_shorthand() {
         assert_eq!(
-            normalize_remote_url("git@github.com:coilysiren/repo-recall.git").as_deref(),
-            Some("https://github.com/coilysiren/repo-recall"),
+            normalize_remote_url("git@github.com:coilyco-flight-deck/repo-recall.git").as_deref(),
+            Some("https://github.com/coilyco-flight-deck/repo-recall"),
         );
     }
 
@@ -977,11 +977,11 @@ mod tests {
     fn extracts_github_owner_repo() {
         use super::github_owner_repo;
         assert_eq!(
-            github_owner_repo("https://github.com/coilysiren/repo-recall").as_deref(),
+            github_owner_repo("https://github.com/coilyco-flight-deck/repo-recall").as_deref(),
             Some("coilysiren/repo-recall"),
         );
         assert_eq!(
-            github_owner_repo("https://github.com/coilysiren/repo-recall/").as_deref(),
+            github_owner_repo("https://github.com/coilyco-flight-deck/repo-recall/").as_deref(),
             Some("coilysiren/repo-recall"),
         );
         assert!(github_owner_repo("https://gitlab.com/a/b").is_none());
@@ -993,7 +993,7 @@ mod tests {
     fn extracts_host_and_slug_for_any_provider() {
         use super::remote_host_and_slug;
         assert_eq!(
-            remote_host_and_slug("https://github.com/coilysiren/repo-recall"),
+            remote_host_and_slug("https://github.com/coilyco-flight-deck/repo-recall"),
             Some(("github.com".into(), "coilysiren/repo-recall".into())),
         );
         assert_eq!(
