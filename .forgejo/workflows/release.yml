@@ -75,7 +75,7 @@ jobs:
           formula_path: Formula/repo-recall.rb
           tag: ${{ needs.release.outputs.tag }}
           revision: ${{ steps.rev.outputs.revision }}
-          forgejo_token: ${{ secrets.FORGEJO_PAT }}
+          forgejo_token: ${{ secrets.CI_RELEASE_TOKEN }}
 
   bump-tap-formula:
     # Centralized monorepo tap: rewrite Formula/repo-recall.rb in
@@ -83,9 +83,10 @@ jobs:
     # Reuses the same composite action as bump-formula, but points `repo`
     # at the tap and overrides `url_template` to a literal so the pinned
     # url still targets this source repo (not the tap). Cross-repo write,
-    # so FORGEJO_PAT needs push access to the tap. This is the primary
-    # install path; the per-repo bump-formula above stays one cycle as a
-    # fallback for the old direct-repo tap.
+    # so it uses CI_RELEASE_TOKEN (org-level write:repository PAT on
+    # coilyco-flight-deck) rather than the auto job token. This is the
+    # primary install path; the per-repo bump-formula above stays one
+    # cycle as a fallback for the old direct-repo tap.
     needs: release
     if: ${{ needs.release.outputs.tag != '' }}
     runs-on: docker
@@ -110,7 +111,7 @@ jobs:
           revision: ${{ steps.rev.outputs.revision }}
           url_template: "https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall.git"
           message: "chore(formula): bump repo-recall to {TAG} [skip ci]"
-          forgejo_token: ${{ secrets.FORGEJO_PAT }}
+          forgejo_token: ${{ secrets.CI_RELEASE_TOKEN }}
 
   windows-assets:
     needs: release
