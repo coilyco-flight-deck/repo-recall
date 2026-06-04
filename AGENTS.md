@@ -45,7 +45,7 @@ Reachability: prod (tailnet) `http://repo-recall` via MagicDNS, HTTP only. Local
 
 ## Release
 
-Push to `main` → `.github/workflows/release.yml` tags + cuts Release; `bump-formula` rewrites `Formula/repo-recall.rb` via Contents API with a skip-CI marker (never write the literal token). `Cargo.toml` pinned `0.0.0-dev`; version from `build.rs`. Install via `brew tap coilysiren/repo-recall https://github.com/coilyco-flight-deck/repo-recall`. Post-push: verify CI +300s, `brew upgrade`, `coily ssh systemctl start repo-recall-update.service`. Docs-only commits skip.
+Push to `main` → `.forgejo/workflows/release.yml` tags + cuts Release, then two Contents-API bump jobs (skip-CI; never write the token): `bump-tap-formula` pins central `coilyco-flight-deck/homebrew-tap` (primary), `bump-formula` keeps in-repo formula one cycle as fallback. Version from `build.rs`. Install: `brew install coilyco-flight-deck/tap/repo-recall` (URL in README). Post-push: verify CI +300s, `brew upgrade`, `coily ssh systemctl start repo-recall-update.service`. Docs-only skip.
 
 ## Agent rules
 

@@ -1,14 +1,21 @@
 name: release
 
 # Forgejo-canonical release pipeline. Triggers on push to main against
-# the forgejo repo (forgejo.coilysiren.me/coilysiren/repo-recall). Cuts
-# the tag + release on forgejo, rewrites Formula/repo-recall.rb to pin
-# the new tag+revision via forgejo Contents API, and attaches the Windows
-# binary that coilysiren/scoop-bucket consumes.
+# the forgejo repo (forgejo.coilysiren.me/coilyco-flight-deck/repo-recall).
+# Cuts the tag + release on forgejo, then two formula-bump jobs pin the new
+# tag+revision via forgejo Contents API, and attaches the Windows binary
+# that coilyco-bridge/scoop-bucket consumes.
 #
-# Brew install path is forgejo direct-repo:
-#   brew tap coilysiren/repo-recall https://forgejo.coilysiren.me/coilysiren/repo-recall
-#   brew install coilysiren/repo-recall/repo-recall
+# Brew now installs from the centralized flight-deck tap:
+#   brew tap coilyco-flight-deck/tap https://forgejo.coilysiren.me/coilyco-flight-deck/homebrew-tap
+#   brew install coilyco-flight-deck/tap/repo-recall
+#
+# bump-tap-formula writes that central tap. The per-repo bump-formula
+# (Formula/repo-recall.rb in this repo) is kept fresh for one migration
+# cycle as a fallback for the old direct-repo tap:
+#   brew tap coilyco-flight-deck/repo-recall https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall
+#   brew install coilyco-flight-deck/repo-recall/repo-recall
+# Drop bump-formula + Formula/repo-recall.rb next release cycle.
 #
 # Version is baked at build time via build.rs from $REPO_RECALL_VERSION.
 # Shared composite actions live at coilysiren/agentic-os/actions/*.
@@ -68,6 +75,41 @@ jobs:
           formula_path: Formula/repo-recall.rb
           tag: ${{ needs.release.outputs.tag }}
           revision: ${{ steps.rev.outputs.revision }}
+          forgejo_token: ${{ secrets.FORGEJO_PAT }}
+
+  bump-tap-formula:
+    # Centralized monorepo tap: rewrite Formula/repo-recall.rb in
+    # coilyco-flight-deck/homebrew-tap to pin the just-cut tag + revision.
+    # Reuses the same composite action as bump-formula, but points `repo`
+    # at the tap and overrides `url_template` to a literal so the pinned
+    # url still targets this source repo (not the tap). Cross-repo write,
+    # so FORGEJO_PAT needs push access to the tap. This is the primary
+    # install path; the per-repo bump-formula above stays one cycle as a
+    # fallback for the old direct-repo tap.
+    needs: release
+    if: ${{ needs.release.outputs.tag != '' }}
+    runs-on: docker
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - id: rev
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: coilysiren/agentic-os/actions/bump-formula@main
+        with:
+          repo: coilyco-flight-deck/homebrew-tap
+          formula_path: Formula/repo-recall.rb
+          tag: ${{ needs.release.outputs.tag }}
+          revision: ${{ steps.rev.outputs.revision }}
+          url_template: "https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall.git"
+          message: "chore(formula): bump repo-recall to {TAG} [skip ci]"
           forgejo_token: ${{ secrets.FORGEJO_PAT }}
 
   windows-assets:
