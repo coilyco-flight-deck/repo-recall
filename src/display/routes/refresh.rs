@@ -204,7 +204,7 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
         }
 
         // cli_guard source: audit log (#148). Walks every JSONL shard under
-        // `~/.coily/audit/` and groups rows by `commit_scope`. Rows whose
+        // `~/.coily/audit/`, grouping by repo_root (legacy commit_scope). Rows whose
         if do_cli {
             cache_db.write_batch(|w| w.wipe_cli_guard())?;
             ingest_cli_guard(&cache_db, &repo_id_by_path)?;
@@ -811,9 +811,12 @@ fn ingest_cli_guard(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Res
             match audit::parse_audit_file(path) {
                 Ok(records) => {
                     for rec in records {
+                        // coily/cli-guard stamp the toplevel as repo_root (legacy rows
+                        // used commit_scope); fall back so current rows still route.
                         let repo_id = rec
                             .commit_scope
                             .as_deref()
+                            .or(rec.repo_root.as_deref())
                             .and_then(|s| by_path.get(s).copied())
                             .unwrap_or(0);
                         let (_id, was_new) = w.upsert_audit_event(repo_id, &rec)?;

@@ -356,6 +356,10 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
             "\n",
             r#"{"id":"019e2891-eeee-ffff-aaaa-bbbbbbbbbbbb","ts":1778796720,"verb":"whoami","argv":["coily","whoami"]}"#,
             "\n",
+            // Current coily stamps the git toplevel as `repo_root` and omits
+            // `commit_scope`; this row must still route to r1 via the fallback.
+            r#"{"id":"019e2892-1111-2222-3333-444444444444","ts":1778796740,"decision":"accept","verb":"ops.aws","argv":["coily","ops","aws","whoami"],"repo_root":"/repo/r1"}"#,
+            "\n",
             "\nnot json\n",
         ),
     )
@@ -387,6 +391,7 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
                     let repo_id = rec
                         .commit_scope
                         .as_deref()
+                        .or(rec.repo_root.as_deref())
                         .and_then(|s| by_path.get(s).copied())
                         .unwrap_or(0);
                     w.upsert_audit_event(repo_id, &rec)?;
@@ -397,13 +402,19 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
         .expect("write");
 
     let all = cache_db.list_all_audit_events().expect("read all");
-    assert_eq!(all.len(), 3, "two routed + one unrouted, malformed dropped");
+    assert_eq!(
+        all.len(),
+        4,
+        "three routed + one unrouted, malformed dropped"
+    );
 
     let r1 = cache_db
         .audit_events_for_repo(repos[0].0, None, 50)
         .expect("r1");
-    assert_eq!(r1.len(), 1);
-    assert_eq!(r1[0].verb, "ops.gh");
+    // commit_scope row + repo_root-only row both route to r1; newest first.
+    assert_eq!(r1.len(), 2);
+    assert_eq!(r1[0].verb, "ops.aws");
+    assert_eq!(r1[1].verb, "ops.gh");
 
     let r2 = cache_db
         .audit_events_for_repo(repos[1].0, None, 50)
@@ -425,6 +436,7 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
                     let repo_id = rec
                         .commit_scope
                         .as_deref()
+                        .or(rec.repo_root.as_deref())
                         .and_then(|s| by_path.get(s).copied())
                         .unwrap_or(0);
                     let (_id, was_new) = w.upsert_audit_event(repo_id, &rec)?;
@@ -434,7 +446,7 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
             Ok(())
         })
         .expect("write 2");
-    assert_eq!(cache_db.list_all_audit_events().expect("count").len(), 3);
+    assert_eq!(cache_db.list_all_audit_events().expect("count").len(), 4);
 
     std::fs::remove_dir_all(&audit_dir).ok();
     std::fs::remove_dir_all(&cache_dir).ok();
