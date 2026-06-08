@@ -49,7 +49,7 @@ Push to `main` → `.forgejo/workflows/release.yml` tags + cuts Release, then tw
 
 ## Agent rules
 
-One issue per change. Every commit closes a same-repo issue with `closes #N` or a Forgejo URL.
+One issue per change. `closes #N` or a Forgejo URL encouraged, not enforced.
 
 ## See also
 
