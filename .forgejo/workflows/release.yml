@@ -1,24 +1,6 @@
+# Forgejo-canonical release: tag, cut release, bump tap + per-repo formula, ship binaries.
 name: release
 
-# Forgejo-canonical release pipeline. Triggers on push to main against
-# the forgejo repo (forgejo.coilysiren.me/coilyco-flight-deck/repo-recall).
-# Cuts the tag + release on forgejo, then two formula-bump jobs pin the new
-# tag+revision via forgejo Contents API, and attaches the Windows binary
-# that coilyco-bridge/scoop-bucket consumes.
-#
-# Brew now installs from the centralized flight-deck tap:
-#   brew tap coilyco-flight-deck/tap https://forgejo.coilysiren.me/coilyco-flight-deck/homebrew-tap
-#   brew install coilyco-flight-deck/tap/repo-recall
-#
-# bump-tap-formula writes that central tap. The per-repo bump-formula
-# (Formula/repo-recall.rb in this repo) is kept fresh for one migration
-# cycle as a fallback for the old direct-repo tap:
-#   brew tap coilyco-flight-deck/repo-recall https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall
-#   brew install coilyco-flight-deck/repo-recall/repo-recall
-# Drop bump-formula + Formula/repo-recall.rb next release cycle.
-#
-# Version is baked at build time via build.rs from $REPO_RECALL_VERSION.
-# Shared composite actions live at coilysiren/agentic-os/actions/*.
 
 on:
   push:
@@ -42,8 +24,6 @@ jobs:
 
       - id: tag
         uses: coilysiren/agentic-os/actions/tag-bump@main
-        # No bump input: every push-to-main release is a minor bump. For a
-        # major, cut the vN.0.0 tag by hand; pushes resume minor from there.
 
       - id: create
         if: ${{ steps.tag.outputs.new_tag != '' }}
@@ -78,15 +58,6 @@ jobs:
           forgejo_token: ${{ secrets.CI_RELEASE_TOKEN }}
 
   bump-tap-formula:
-    # Centralized monorepo tap: rewrite Formula/repo-recall.rb in
-    # coilyco-flight-deck/homebrew-tap to pin the just-cut tag + revision.
-    # Reuses the same composite action as bump-formula, but points `repo`
-    # at the tap and overrides `url_template` to a literal so the pinned
-    # url still targets this source repo (not the tap). Cross-repo write,
-    # so it uses CI_RELEASE_TOKEN (org-level write:repository PAT on
-    # coilyco-flight-deck) rather than the auto job token. This is the
-    # primary install path; the per-repo bump-formula above stays one
-    # cycle as a fallback for the old direct-repo tap.
     needs: release
     if: ${{ needs.release.outputs.tag != '' }}
     runs-on: docker

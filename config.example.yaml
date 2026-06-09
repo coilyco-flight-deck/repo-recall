@@ -1,16 +1,4 @@
-# repo-recall config — full template with every key, every default.
-#
-# This file ships in the repo as a reference. The runtime loader lands
-# in #145; until then, repo-recall reads its knobs from REPO_RECALL_*
-# environment variables only. The keys below are the planned schema.
-#
-# Override precedence (once loader lands):
-#   1. REPO_RECALL_* env vars (final override, per host)
-#   2. ./repo-recall.yaml in the process cwd (per workspace)
-#   3. ~/.config/repo-recall/config.yaml (XDG, per user)
-#   4. these defaults, baked into the binary
-#
-# Values shown here are Kai's defaults. Swap paths to your own setup.
+# repo-recall config - full template with every key, every default.
 
 server:
   port: 7777                    # REPO_RECALL_PORT
@@ -33,14 +21,6 @@ discovery:
 
 refresh:
   interval_secs: 150             # REPO_RECALL_REFRESH_INTERVAL_SECS. 0 disables periodic refresh.
-  # Per-source cadence overrides, keyed by ingest source name. Each entry
-  # is a nested block carrying an optional interval_secs; a null or absent
-  # interval_secs falls back to refresh.interval_secs above. An entire
-  # absent per_source block keeps every source on the global cadence.
-  # The fan-out scheduler ticks at the smallest resolved interval and runs
-  # each source when its own watermark says its interval has elapsed, so
-  # e.g. `github_remote: 30` polls CI every 30s while `git_log: 300` rescans
-  # commits every 5 minutes. A resolved interval of 0 disables that source.
   per_source:
     git_log:
       interval_secs: null
@@ -52,9 +32,6 @@ refresh:
       interval_secs: null
     cli_guard:
       interval_secs: null
-    # Labeled-issue GraphQL ingest (Source 6 of #155). The sole sanctioned
-    # GraphQL call site — runs hourly to stay well inside GitHub's GraphQL
-    # secondary budget while still picking up dispatch-label churn quickly.
     github_remote_labeled:
       interval_secs: 3600
 
@@ -89,66 +66,48 @@ dashboard:
     tiebreaker: name_asc
     action_required_floats_to_top: true
 
-# Repo-card row schema. Lands with the UI refloat at #144.
-# "show-if" suppression logic is encoded in code, not here. This file
-# controls enable/disable, row caps, and time windows only.
 card:
   short:
     rows:
-      # Repo name + path + click-through to detail page.
       - id: heading
         enabled: true
-      # Action-required alerts: failing CI, dirty tree, in-progress git op, detached HEAD.
       - id: banner
         enabled: true
         cap_rows: 5
-      # Informational status pills: ahead/behind, stash count, deploy state, open PRs/issues.
       - id: health
         enabled: true
-      # Recent commits with author + timestamp, capped at the window below.
       - id: activity
         enabled: true
         cap_rows: 5
         cap_window_days: 30
-      # Open PRs and issues assigned to you / awaiting your review.
       - id: work
         enabled: true
         cap_rows: 5
-      # Open `structural-ask` / `autonomous-block` issues. Oldest first so the stalest float up.
       - id: asks
         enabled: true
         cap_rows: 3
         sort: oldest_first
-      # Recent Claude Code sessions that touched this repo (from JSONL transcripts).
       - id: sessions
         enabled: true
         cap_rows: 5
         cap_window_days: 90
-      # AFK dispatch queue: open `repo-dispatch` tracking issues fanned out to autonomous agents.
       - id: dispatch
         enabled: true
         cap_rows: 3
-      # Hottest files in the recent window (top N by edits).
       - id: churn
         enabled: true
         cap_rows: 5
         cap_window_days: 30
-      # Hottest directories (file-churn rolled up by leading path components).
-      # `depth` = how many path components define a directory bucket; e.g.
-      # depth=2 buckets `src/ingest/git/log.rs` under `src/ingest`. Files
-      # shallower than `depth` keep their actual depth.
       - id: hot_dirs
         enabled: true
         cap_rows: 5
         cap_window_days: 30
         depth: 2
-      # "View all" link to the verbose card if any row was capped.
       - id: overflow_link
         enabled: true
   verbose:
     show_absent_with_reason: true  # "no sessions in last 90d" instead of suppressing
     rows:
-      # Same row semantics as `short.rows` above; only caps and windows differ.
       - id: activity
         cap_rows: 100
         cap_window_days: 90

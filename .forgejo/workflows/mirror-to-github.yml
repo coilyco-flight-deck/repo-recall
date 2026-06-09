@@ -1,10 +1,6 @@
+# Mirror Forgejo (canonical) main + tags to the read-only GitHub mirror on every push.
 name: mirror-to-github
 
-# Forgejo is the canonical source for repo-recall. GitHub is a read-only
-# mirror. This workflow pushes Forgejo's main and tags to GitHub on every
-# push event so the mirror tracks. No-ops cleanly when the
-# GITHUB_MIRROR_PAT secret is absent, so the workflow can land before the
-# secret is provisioned.
 
 on:
   push:

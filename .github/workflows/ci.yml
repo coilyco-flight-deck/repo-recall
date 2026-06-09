@@ -1,3 +1,4 @@
+# CI gates: rustfmt, clippy, tests. Tailwind css regen is a pre-commit hook, not CI.
 name: ci
 
 on:
@@ -44,13 +45,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --no-fail-fast
-
-  # No css job: the tailwindcss v4 standalone CLI does not produce
-  # byte-identical output across builds (linux-x64 vs macOS-arm64 differ,
-  # and same-platform builds at the same version still drift), so a
-  # css-check gate in CI was a coin flip. The pre-commit hook regenerates
-  # the bundle on every commit that touches static/tailwind.input.css,
-  # any .rs file, or any static/.js file, which is the actual point of
-  # control. The committed static/tailwind.css is what gets shipped via
-  # Docker COPY and via the brew Formula's static dir; CI doesn't model
-  # that pipeline meaningfully by re-minifying the same input.

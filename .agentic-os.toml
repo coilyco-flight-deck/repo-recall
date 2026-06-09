@@ -1,0 +1,6 @@
+# Per-repo opt-outs for agentic-os tree-walking hooks (this repo has no pyproject.toml).
+
+[code-comments]
+# Generated region: the managed-hook BEGIN/END markers are stamped and required
+# by agentic-os/scripts/apply-agentic-os-hooks.py, so they cannot move to line 1.
+excludes = [".pre-commit-config.yaml"]

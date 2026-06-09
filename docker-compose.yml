@@ -1,6 +1,4 @@
-# Local mirror of the API + MCP service. For day-to-day iteration prefer
-# `make watch` (cargo-watch). docker compose is for the "ship-shape preview"
-# path and as the local mirror of prod.
+# Local API + MCP mirror for ship-shape preview. Prefer make watch for daily iteration.
 
 services:
   api:
