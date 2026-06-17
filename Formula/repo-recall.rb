@@ -1,7 +1,7 @@
 class RepoRecall < Formula
   desc "Local dev dashboard that indexes Claude Code session history against your repos"
   homepage "https://forgejo.coilysiren.me/coilysiren/repo-recall"
-  url "https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall.git", tag: "v0.49.0", revision: "802543c5d2caab3db5ebdec66bbf04358c9137b2"
+  url "https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall.git", tag: "v0.50.0", revision: "42fa5830ff8f73b53b19c0a004944778f16d3836"
   license "MIT"
   head "https://forgejo.coilysiren.me/coilysiren/repo-recall.git", branch: "main"
 
