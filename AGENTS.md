@@ -16,7 +16,7 @@ Single artifact. Rust binary serves JSON + MCP. No web frontend - agents consume
 
 ## Commands
 
-Route through coily; see [`.coily/coily.yaml`](.coily/coily.yaml). `make install`, `make watch`, `make test`, `make ci`.
+Route dev commands through ward, which reads [`.ward/ward.yaml`](.ward/ward.yaml) (`ward exec <verb>`).
 
 ## Validation
 
@@ -55,6 +55,7 @@ One issue per change. `closes #N` or a Forgejo URL encouraged, not enforced.
 
 - [README.md](README.md) - human-facing intro.
 - [docs/FEATURES.md](docs/FEATURES.md) - inventory.
-- [.coily/coily.yaml](.coily/coily.yaml) - allowlisted commands.
+- [.ward/ward.yaml](.ward/ward.yaml) - allowlist
+- [.coily/coily.yaml](.coily/coily.yaml) - migration.
 
 Cross-reference convention: coilysiren/agentic-os#59.
