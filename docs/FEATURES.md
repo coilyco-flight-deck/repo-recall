@@ -10,7 +10,7 @@ Joins three primary sources on the same host:
 
 - **Claude Code sessions** from `~/.claude/projects/**/*.jsonl`. Metadata + 200-char summaries, malformed lines skipped.
 - **git** via `git log --all --no-merges` + working-tree status: counts, stash, branch, ahead/behind, in-progress op, detached HEAD.
-- **GitHub** via `gh` REST: open + draft PRs, issues, review queue, deploy workflow status. No GraphQL.
+- **GitHub / Forgejo** via REST: PRs, issues, milestones, commits, deploy status. No GraphQL. A per-repo host probe picks the GitHub or Forgejo (`REPO_RECALL_FORGEJO_TOKEN`) client.
 
 Joins by `cwd` (longest-prefix) plus a fuzzy content-mention pass. `session_repos.match_type` is the extension point.
 
@@ -40,7 +40,7 @@ Two stores, no SQLite. `cache.redb` (KV) + tantivy full-text, derived from disk;
 
 ## Refresh tier
 
-Per-source fan-out. Each source (`git_log`, `github_remote`, `sessions`, `cli_guard`, `docs`) has its own `refresh.per_source.<source>.interval_secs`, falling back to `refresh.interval_secs` (default 150s, 0 disables). `REFRESH_WATERMARKS` gates each: runs when interval elapsed, wiping only its tables. Discovery first; remote via bounded-concurrency tokio tasks, failures at `debug!`.
+Per-source fan-out. Each source (`git_log`, `github_remote`, `sessions`, `cli_guard`, `docs`) has its own `refresh.per_source.<source>.interval_secs`, falling back to `refresh.interval_secs` (default 150s, 0 disables). `REFRESH_WATERMARKS` gates each: runs when interval elapsed, wiping only its tables. Discovery first; remote via bounded-concurrency tokio tasks, failures at `debug!`. `REPO_RECALL_REMOTE_FIRST` (#109) hydrates a clone-less host from the API alone (commits included); see `docs/forgejo-dispatch.md`.
 
 ## Full-text session search
 
@@ -48,7 +48,7 @@ Per-source fan-out. Each source (`git_log`, `github_remote`, `sessions`, `cli_gu
 
 ## Privacy posture
 
-Local-only. Loopback bind. Cache in `$TMPDIR`. `Session` rows store metadata + 200-char summary; full turn text lives only in tantivy, scrubbed at ingest. Outbound limited to GitHub REST via local `gh` auth.
+Local-only. Loopback bind. Cache in `$TMPDIR`. `Session` rows store metadata + 200-char summary; full turn text lives only in tantivy, scrubbed at ingest. Outbound limited to GitHub + Forgejo REST reads.
 
 ## Distribution
 
