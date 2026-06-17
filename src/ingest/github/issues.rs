@@ -33,7 +33,9 @@ pub fn parse_issues_json(value: &serde_json::Value) -> Vec<IssueRecordInput> {
     };
     let mut out = Vec::with_capacity(arr.len());
     for issue in arr {
-        if issue.get("pull_request").is_some() {
+        // Skip real PRs (GitHub tags them with a `pull_request` object) but
+        // keep Forgejo issues, which carry `"pull_request": null` (#109).
+        if issue.get("pull_request").is_some_and(|v| !v.is_null()) {
             continue;
         }
         let number = issue.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -116,4 +118,27 @@ fn parse_ts(v: &serde_json::Value, key: &str) -> i64 {
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.timestamp())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_forgejo_issue_with_null_pull_request() {
+        // Forgejo (#109) sends `"pull_request": null` on issues; GitHub omits
+        // it and sets an object only on PRs. Keep null, skip objects.
+        let body = serde_json::json!([
+            { "number": 109, "title": "real issue", "pull_request": serde_json::Value::Null },
+            { "number": 7, "title": "actually a PR", "pull_request": { "url": "x" } },
+            { "number": 8, "title": "plain github issue" }
+        ]);
+        let parsed = parse_issues_json(&body);
+        let nums: Vec<i64> = parsed.iter().map(|i| i.number).collect();
+        assert_eq!(
+            nums,
+            vec![109, 8],
+            "kept issue+null and plain, dropped the PR"
+        );
+    }
 }

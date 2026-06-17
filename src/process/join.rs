@@ -34,9 +34,13 @@ pub struct GhRef {
 /// values. Matches two shapes:
 pub fn gh_refs_with_issue_in_text(text: &str) -> Vec<GhRef> {
     let mut out = Vec::new();
-    // Pass 1: github.com/<owner>/<repo>/(pull|issues)/<n>. Split on
-    // "github.com/" so we can ignore protocol/host/leading path.
-    for tail in text.split("github.com/").skip(1) {
+    // Pass 1: host-agnostic <scheme>://<host>/<owner>/<repo>/(pull|pulls|issues)/<n>
+    // (#109) - split on "://", drop the host, accept Forgejo `pulls/` + GitHub `pull/`.
+    for after_scheme in text.split("://").skip(1) {
+        let Some(host_end) = after_scheme.find('/') else {
+            continue;
+        };
+        let tail = &after_scheme[host_end + 1..];
         if let Some((owner, rest)) = split_name(tail) {
             let after_owner = &tail[owner.len()..];
             if !after_owner.starts_with('/') {
@@ -49,7 +53,9 @@ pub fn gh_refs_with_issue_in_text(text: &str) -> Vec<GhRef> {
                     continue;
                 }
                 let after = &after_repo[1..];
-                let kind_pull = after.strip_prefix("pull/");
+                let kind_pull = after
+                    .strip_prefix("pulls/")
+                    .or_else(|| after.strip_prefix("pull/"));
                 let kind_issue = after.strip_prefix("issues/");
                 let digits_tail = kind_pull.or(kind_issue);
                 if let Some(rest) = digits_tail {
@@ -240,9 +246,43 @@ mod tests {
         assert_eq!(
             hits,
             vec![GhRef {
-                owner: "coilysiren".into(),
+                owner: "coilyco-flight-deck".into(),
                 repo: "repo-recall".into(),
                 issue: 56,
+            }]
+        );
+    }
+
+    #[test]
+    fn forgejo_issue_url_captures_n() {
+        // #109: cross-ref parsing is host-agnostic, so a self-hosted Forgejo
+        // issue URL parses the same as a github.com one.
+        let hits = gh_refs_with_issue_in_text(
+            "tracked at https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall/issues/109",
+        );
+        assert_eq!(
+            hits,
+            vec![GhRef {
+                owner: "coilyco-flight-deck".into(),
+                repo: "repo-recall".into(),
+                issue: 109,
+            }]
+        );
+    }
+
+    #[test]
+    fn forgejo_pulls_url_captures_n() {
+        // Forgejo's PR path segment is `pulls/` (GitHub uses `pull/`); both
+        // must parse (#109).
+        let hits = gh_refs_with_issue_in_text(
+            "see https://forgejo.coilysiren.me/coilyco-flight-deck/repo-recall/pulls/42",
+        );
+        assert_eq!(
+            hits,
+            vec![GhRef {
+                owner: "coilyco-flight-deck".into(),
+                repo: "repo-recall".into(),
+                issue: 42,
             }]
         );
     }
@@ -280,7 +320,10 @@ mod tests {
         let hits = gh_refs_in_text(
             "https://github.com/coilyco-flight-deck/repo-recall/pull/56 changed files",
         );
-        assert_eq!(hits, vec![("coilysiren".into(), "repo-recall".into())]);
+        assert_eq!(
+            hits,
+            vec![("coilyco-flight-deck".into(), "repo-recall".into())]
+        );
     }
 
     #[test]

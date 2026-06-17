@@ -132,6 +132,12 @@ spec:
                 secretKeyRef:
                   name: repo-recall-gh-token
                   key: token
+            - name: REPO_RECALL_FORGEJO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: repo-recall-forgejo-token
+                  key: token
+                  optional: true
           volumeMounts:
             - name: projects
               mountPath: /workspace/projects/coilysiren

@@ -239,6 +239,12 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
     // github_remote source: PR + issue counts, deploy status, then the
     // "clone one" active-repo snapshot. Runs as its own async tasks so the
     let remote_updated = if do_remote {
+        // Remote-first (#109): seed targets from the viewer's remote repos
+        // BEFORE the remote-state pass. No-op when the flag is off.
+        if state.remote_first {
+            let seeded = seed_remote_repos(state.clone()).await;
+            tracing::debug!("remote-first: seeded {seeded} remote repo target(s)");
+        }
         let n = ingest_remote_state(state.clone()).await;
         let _active = ingest_active_repos(state.clone()).await;
         n
@@ -396,7 +402,15 @@ async fn ingest_remote_state(state: AppState) -> usize {
     // Re-probe the viewer on every refresh - the user may have logged in
     // since startup, switched accounts, or hit a fresh rate limit. The
     use crate::ingest::github::RemoteFetchState;
-    let viewer_state = state.github_client.fetch_user().await;
+    let mut viewer_state = state.github_client.fetch_user().await;
+    // Remote-first (#109): a Forgejo-only container has no GitHub auth, so fall
+    // back to the Forgejo viewer instead of aborting the whole remote pass.
+    if state.remote_first && !matches!(viewer_state, RemoteFetchState::Ok(_)) {
+        let fj_viewer = state.forgejo_client.fetch_user().await;
+        if matches!(fj_viewer, RemoteFetchState::Ok(_)) {
+            viewer_state = fj_viewer;
+        }
+    }
     let my_login = match &viewer_state {
         RemoteFetchState::Ok(u) => u.login.clone(),
         _ => {
@@ -478,15 +492,6 @@ async fn ingest_remote_state(state: AppState) -> usize {
             let slug_for_blocking = slug.clone();
             tokio::task::spawn_blocking(move || {
                 let slug = slug_for_blocking;
-                // `gh`-shell counts are GitHub-only; Forgejo skips them (#91).
-                let (prs, issues) = if source == crate::db::milestone_source::GITHUB {
-                    match git::log::fetch_pr_and_issue_counts(&slug, &login) {
-                        Some((p, i)) => (Some(p), Some(i)),
-                        None => (None, None),
-                    }
-                } else {
-                    (None, None)
-                };
                 use crate::ingest::github::RemoteFetchState;
                 let deploy = deploy_state.and_then(|(wf, st)| st.into_option().map(|h| (wf, h)));
 
@@ -509,6 +514,29 @@ async fn ingest_remote_state(state: AppState) -> usize {
                 let pr_records = pr_state.into_option().unwrap_or_default();
                 let issue_records = issue_state.into_option().unwrap_or_default();
                 let milestones = milestone_state.into_option().unwrap_or_default();
+
+                // GitHub gets open counts from a `gh`-shell call (#91); Forgejo
+                // has none, so derive them from the fetched records (#109).
+                let (prs, issues) = if source == crate::db::milestone_source::GITHUB {
+                    match git::log::fetch_pr_and_issue_counts(&slug, &login) {
+                        Some((p, i)) => (Some(p), Some(i)),
+                        None => (None, None),
+                    }
+                } else {
+                    let issues = git::log::IssueCounts {
+                        open: issue_records.len() as i64,
+                        assigned_to_me: issue_records
+                            .iter()
+                            .filter(|r| r.assignees.iter().any(|a| a.eq_ignore_ascii_case(&login)))
+                            .count() as i64,
+                    };
+                    let prs = git::log::PrCounts {
+                        open: pr_records.len() as i64,
+                        ..Default::default()
+                    };
+                    (Some(prs), Some(issues))
+                };
+
                 RemoteSnapshot {
                     id,
                     milestone_source: source,
@@ -578,6 +606,75 @@ async fn ingest_remote_state(state: AppState) -> usize {
                 for m in &snap.milestones {
                     w.upsert_milestone(snap.id, snap.milestone_source, m)?;
                 }
+                n += 1;
+            }
+            Ok(n)
+        })
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(0)
+}
+
+/// Remote-first seeding (#109): upsert the viewer's remote repos into `REPOS`
+/// so `remote_targets()` returns them with no clone. See docs/forgejo-dispatch.md.
+async fn seed_remote_repos(state: AppState) -> usize {
+    use crate::ingest::github::RemoteFetchState;
+    let gh = match state.github_client.fetch_active_repos(100).await {
+        RemoteFetchState::Ok(v) => v,
+        _ => Vec::new(),
+    };
+    let fj = match state.forgejo_client.fetch_active_repos(100).await {
+        RemoteFetchState::Ok(v) => v,
+        _ => Vec::new(),
+    };
+    let mut actives = gh;
+    actives.extend(fj);
+    if actives.is_empty() {
+        return 0;
+    }
+
+    // Dedup against repos already present (e.g. locally discovered clones)
+    // by host+slug, so remote-first only adds repos not already targeted.
+    let existing = {
+        let cache_db = state.cache_db.clone();
+        tokio::task::spawn_blocking(move || cache_db.remote_targets(0))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+    };
+    let existing_slugs: std::collections::HashSet<(String, String)> = existing
+        .iter()
+        .filter_map(|(_, url, _, _)| git::log::remote_host_and_slug(url))
+        .map(|(h, s)| (h.to_ascii_lowercase(), s.to_ascii_lowercase()))
+        .collect();
+
+    let now = Utc::now().timestamp();
+    let cache_db = state.cache_db.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        cache_db.write_batch(|w| {
+            let mut n = 0usize;
+            for a in &actives {
+                if a.is_archived {
+                    continue;
+                }
+                let Some(branch) = a.default_branch.as_deref() else {
+                    continue;
+                };
+                if let Some((h, s)) = git::log::remote_host_and_slug(&a.https_url) {
+                    if existing_slugs.contains(&(h.to_ascii_lowercase(), s.to_ascii_lowercase())) {
+                        continue;
+                    }
+                }
+                w.upsert_repo(
+                    &a.https_url,
+                    &a.full_name,
+                    now,
+                    Some(&a.https_url),
+                    Some(branch),
+                )?;
                 n += 1;
             }
             Ok(n)

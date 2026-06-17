@@ -24,6 +24,9 @@ pub struct AppState {
     /// Cap on how many GitHub-hosted repos get remote-state queries (CI,
     /// PRs, issues) per refresh — picked as the top-N by most-recent commit
     pub remote_target_limit: usize,
+    /// Remote-first (#109): seed dispatch targets from the viewer's remote
+    /// repos so a clone-less container still hydrates. Additive.
+    pub remote_first: bool,
     pub refresh_lock: Arc<Mutex<()>>,
     pub last_scan: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
     /// Categorized state of the GitHub viewer. Updated at startup and

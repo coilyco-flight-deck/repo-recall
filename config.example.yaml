@@ -37,9 +37,10 @@ refresh:
 
 ingest:
   github:
-    remote_target_limit: 25      # REPO_RECALL_REMOTE_TARGET_LIMIT. PRs/issues/CI fan-out cap.
+    remote_target_limit: 25      # REPO_RECALL_REMOTE_TARGET_LIMIT. PRs/issues/CI fan-out cap (0 = all).
     per_page: 100                # gh API page size (max 100).
     concurrency: 8               # in-flight gh subprocesses.
+    remote_first: false          # REPO_RECALL_REMOTE_FIRST (#109). Seed targets from remote repos for clone-less hosts.
   git:
     worktree_snapshot_cap: 50    # per-repo uncommitted-file sample size.
     churn_window_days: 30        # 30d cutoff for activity score + hotspots.

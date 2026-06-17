@@ -157,6 +157,9 @@ pub struct IngestGithub {
     pub remote_target_limit: usize,
     pub per_page: u32,
     pub concurrency: usize,
+    /// Remote-first (#109): seed dispatch targets from the viewer's remote
+    /// repos so a clone-less container still hydrates. See docs/forgejo-dispatch.md.
+    pub remote_first: bool,
 }
 
 impl Default for IngestGithub {
@@ -165,6 +168,7 @@ impl Default for IngestGithub {
             remote_target_limit: 25,
             per_page: 100,
             concurrency: 8,
+            remote_first: false,
         }
     }
 }
@@ -603,6 +607,12 @@ fn overlay_env(cfg: &mut Config) {
             Ok(n) => cfg.ingest.github.remote_target_limit = n,
             Err(e) => tracing::warn!("REPO_RECALL_REMOTE_TARGET_LIMIT={v:?} invalid: {e}"),
         }
+    }
+    if let Ok(v) = std::env::var("REPO_RECALL_REMOTE_FIRST") {
+        cfg.ingest.github.remote_first = matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
     }
     if let Ok(v) = std::env::var("REPO_RECALL_STALE_ASK_DAYS") {
         match v.parse() {

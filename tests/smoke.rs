@@ -44,6 +44,7 @@ async fn boot_with(
         commits_per_repo: 50,
         refresh_interval_secs: 0,
         remote_target_limit: 0,
+        remote_first: false,
         refresh_lock: Arc::new(Mutex::new(())),
         last_scan: Arc::new(Mutex::new(None)),
         viewer: Arc::new(Mutex::new(viewer)),

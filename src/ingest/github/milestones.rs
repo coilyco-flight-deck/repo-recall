@@ -1,5 +1,5 @@
-//! Open-milestone ingest (#88). Same parser shape works for GitHub and
-//! Forgejo/Gitea since the milestone REST payload is mirrored field-for-field.
+//! Open-milestone ingest (#88). One parser, two shapes: Forgejo keys on `id`
+//! (no `number`) and omits `html_url` (#109); GitHub uses `number`.
 
 use chrono::DateTime;
 
@@ -27,7 +27,13 @@ pub fn parse_milestones_json(value: &serde_json::Value) -> Vec<MilestoneInput> {
     };
     let mut out = Vec::with_capacity(arr.len());
     for m in arr {
-        let number = m.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
+        // GitHub uses a user-facing `number`; Forgejo (#109) keys on `id`
+        // only. Prefer `number`, fall back to `id`, else drop the row.
+        let number = m
+            .get("number")
+            .and_then(|v| v.as_i64())
+            .or_else(|| m.get("id").and_then(|v| v.as_i64()))
+            .unwrap_or(0);
         if number == 0 {
             continue;
         }
@@ -112,5 +118,30 @@ mod tests {
     fn empty_array_yields_empty_vec() {
         let body = serde_json::json!([]);
         assert!(parse_milestones_json(&body).is_empty());
+    }
+
+    #[test]
+    fn forgejo_milestone_keyed_on_id_not_number() {
+        // Forgejo milestone payloads carry `id` but no `number` (#109). The
+        // parser must fall back to `id` instead of dropping the row.
+        let body = serde_json::json!([
+            {
+                "id": 5,
+                "title": "coily to ward consolidation",
+                "description": "epic slice",
+                "state": "open",
+                "open_issues": 0,
+                "closed_issues": 31,
+                "created_at": "2026-06-15T15:27:30Z",
+                "updated_at": "2026-06-17T08:22:10Z",
+                "closed_at": serde_json::Value::Null,
+                "due_on": serde_json::Value::Null,
+            }
+        ]);
+        let parsed = parse_milestones_json(&body);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].number, 5);
+        assert_eq!(parsed[0].title, "coily to ward consolidation");
+        assert_eq!(parsed[0].closed_issues, 31);
     }
 }

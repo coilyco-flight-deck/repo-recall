@@ -978,11 +978,11 @@ mod tests {
         use super::github_owner_repo;
         assert_eq!(
             github_owner_repo("https://github.com/coilyco-flight-deck/repo-recall").as_deref(),
-            Some("coilysiren/repo-recall"),
+            Some("coilyco-flight-deck/repo-recall"),
         );
         assert_eq!(
             github_owner_repo("https://github.com/coilyco-flight-deck/repo-recall/").as_deref(),
-            Some("coilysiren/repo-recall"),
+            Some("coilyco-flight-deck/repo-recall"),
         );
         assert!(github_owner_repo("https://gitlab.com/a/b").is_none());
         assert!(github_owner_repo("https://github.com/only-one").is_none());
@@ -994,7 +994,10 @@ mod tests {
         use super::remote_host_and_slug;
         assert_eq!(
             remote_host_and_slug("https://github.com/coilyco-flight-deck/repo-recall"),
-            Some(("github.com".into(), "coilysiren/repo-recall".into())),
+            Some((
+                "github.com".into(),
+                "coilyco-flight-deck/repo-recall".into()
+            )),
         );
         assert_eq!(
             remote_host_and_slug("https://forgejo.coilysiren.me/coilysiren/repo-recall.git"),

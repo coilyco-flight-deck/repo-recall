@@ -112,6 +112,7 @@ async fn main() -> miette::Result<()> {
 
     let refresh_interval_secs: u64 = cfg.refresh.interval_secs;
     let remote_target_limit: usize = cfg.ingest.github.remote_target_limit;
+    let remote_first: bool = cfg.ingest.github.remote_first;
 
     let state = AppState {
         cache_db,
@@ -120,6 +121,7 @@ async fn main() -> miette::Result<()> {
         commits_per_repo,
         refresh_interval_secs,
         remote_target_limit,
+        remote_first,
         refresh_lock: Arc::new(Mutex::new(())),
         last_scan: Arc::new(Mutex::new(None)),
         viewer: Arc::new(Mutex::new(viewer)),
