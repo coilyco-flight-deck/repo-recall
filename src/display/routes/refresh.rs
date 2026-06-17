@@ -247,6 +247,20 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
         }
         let n = ingest_remote_state(state.clone()).await;
         let _active = ingest_active_repos(state.clone()).await;
+        // Remote commit ingest (#109, Slice 2): additive, remote-mode only.
+        // Local git_log ingest still owns commits on cloned hosts.
+        if state.remote_first {
+            let c = ingest_remote_commits(state.clone()).await;
+            tracing::debug!("remote-first: ingested {c} remote commit(s)");
+            // These commits land after the blocking-phase finalize, so
+            // recompute the aggregates (commits_30d / churn) the dashboard reads.
+            let cache_db = state.cache_db.clone();
+            let cutoff = chrono::Utc::now().timestamp() - 30 * 86_400;
+            let _ = tokio::task::spawn_blocking(move || {
+                cache_db.write_batch(|w| w.finalize_repo_aggregates(cutoff))
+            })
+            .await;
+        }
         n
     } else {
         0
@@ -676,6 +690,82 @@ async fn seed_remote_repos(state: AppState) -> usize {
                     Some(branch),
                 )?;
                 n += 1;
+            }
+            Ok(n)
+        })
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(0)
+}
+
+/// Remote commit ingest (#109, Slice 2): fetch each remote target's commits and
+/// write `CommitRecord` rows with no clone. Remote-first only; additive.
+async fn ingest_remote_commits(state: AppState) -> usize {
+    use crate::ingest::github::RemoteFetchState;
+    use crate::ingest::remote_kind::RemoteKind;
+
+    let target_limit = state.remote_target_limit;
+    let cache_db = state.cache_db.clone();
+    let targets =
+        match tokio::task::spawn_blocking(move || cache_db.remote_targets(target_limit)).await {
+            Ok(Ok(v)) => v,
+            _ => return 0,
+        };
+    let limit = state.commits_per_repo;
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let mut set = tokio::task::JoinSet::new();
+    for (id, url, branch, _path) in targets {
+        let Some((host, slug)) = git::log::remote_host_and_slug(&url) else {
+            continue;
+        };
+        let Some(kind) = state.remote_kind_cache.detect(&host).await else {
+            continue;
+        };
+        let client = match kind {
+            RemoteKind::Github => state.github_client.clone(),
+            RemoteKind::Forgejo => state.forgejo_client.clone(),
+        };
+        let sem = semaphore.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok()?;
+            match client.fetch_commits(&slug, &branch, limit).await {
+                RemoteFetchState::Ok(commits) => Some((id, commits)),
+                _ => None,
+            }
+        });
+    }
+    let mut results: Vec<(i64, Vec<crate::ingest::git::log::CommitRecord>)> = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(pair)) = res {
+            results.push(pair);
+        }
+    }
+    if results.is_empty() {
+        return 0;
+    }
+
+    let cache_db = state.cache_db.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        cache_db.write_batch(|w| {
+            let mut n = 0usize;
+            for (repo_id, commits) in &results {
+                for rec in commits {
+                    let (commit_id, _new) = w.upsert_commit(*repo_id, rec)?;
+                    // Mirror local ingest: record `closes #N` trailers as
+                    // repo-implicit issue refs from the commit subject.
+                    for issue_n in crate::process::join::closes_refs_in_text(&rec.subject) {
+                        w.record_issue_ref(
+                            *repo_id,
+                            issue_n,
+                            crate::db::issue_ref_source::COMMIT,
+                            commit_id,
+                        )?;
+                    }
+                    n += 1;
+                }
             }
             Ok(n)
         })

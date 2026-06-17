@@ -8,11 +8,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use octocrab::Octocrab;
 
+use super::commits::parse_commits_json;
 use super::fetch_state::RemoteFetchState;
 use super::issues::{parse_issues_json, IssueRecordInput};
 use super::milestones::{parse_milestones_json, MilestoneInput};
 use super::pulls::{parse_prs_json, PrRecordInput};
-use crate::ingest::git::log::{ActiveRepo, DeployHealth};
+use crate::ingest::git::log::{ActiveRepo, CommitRecord, DeployHealth};
 
 /// Authenticated user as exposed to repo-recall. Trimmed shape: only
 /// the fields the dashboard / refresh path actually reads. Octocrab's
@@ -55,6 +56,15 @@ pub trait GithubClient: Send + Sync {
     /// `GET /user/repos?sort=pushed&type=owner&per_page=N` - viewer's
     /// recently-pushed repos. Replaces
     async fn fetch_active_repos(&self, limit: usize) -> RemoteFetchState<Vec<ActiveRepo>>;
+
+    /// `GET /repos/{owner}/{repo}/commits?sha={branch}` (#109) - recent commits
+    /// mapped onto the local `CommitRecord` shape for remote-mode ingest.
+    async fn fetch_commits(
+        &self,
+        owner_repo: &str,
+        branch: &str,
+        limit: usize,
+    ) -> RemoteFetchState<Vec<CommitRecord>>;
 }
 
 /// Build the right client for the current process based on env state:
@@ -198,6 +208,23 @@ impl GithubClient for OctocrabClient {
             Err(e) => return super::fetch_state::classify_octocrab_error(&e),
         };
         RemoteFetchState::Ok(parse_active_repos_json(&value))
+    }
+
+    async fn fetch_commits(
+        &self,
+        owner_repo: &str,
+        branch: &str,
+        limit: usize,
+    ) -> RemoteFetchState<Vec<CommitRecord>> {
+        if self.unconfigured {
+            return RemoteFetchState::Unconfigured;
+        }
+        let path = format!("/repos/{owner_repo}/commits?sha={branch}&per_page={limit}");
+        let value: serde_json::Value = match self.inner.get(&path, None::<&()>).await {
+            Ok(v) => v,
+            Err(e) => return super::fetch_state::classify_octocrab_error(&e),
+        };
+        RemoteFetchState::Ok(parse_commits_json(&value))
     }
 }
 
@@ -439,6 +466,28 @@ impl GithubClient for FixturesClient {
             Err(e) => return RemoteFetchState::Error(format!("user_repos.http body: {e}")),
         };
         RemoteFetchState::Ok(parse_active_repos_json(&value))
+    }
+
+    async fn fetch_commits(
+        &self,
+        _owner_repo: &str,
+        _branch: &str,
+        _limit: usize,
+    ) -> RemoteFetchState<Vec<CommitRecord>> {
+        let parsed = match self.read_fixture("commits.http") {
+            Ok(p) => p,
+            Err(e) => return RemoteFetchState::Error(e),
+        };
+        if let Some(state) =
+            super::fetch_state::classify_http_status(parsed.status, &parsed.headers)
+        {
+            return state;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&parsed.body) {
+            Ok(v) => v,
+            Err(e) => return RemoteFetchState::Error(format!("commits.http body: {e}")),
+        };
+        RemoteFetchState::Ok(parse_commits_json(&value))
     }
 }
 

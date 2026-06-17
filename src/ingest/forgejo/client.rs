@@ -6,11 +6,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::ingest::git::log::{ActiveRepo, DeployHealth};
+use crate::ingest::git::log::{ActiveRepo, CommitRecord, DeployHealth};
 use crate::ingest::github::client::parse_active_repos_json;
 use crate::ingest::github::{
-    parse_issues_json, parse_milestones_json, parse_prs_json, AuthedUser, GithubClient,
-    IssueRecordInput, MilestoneInput, PrRecordInput, RemoteFetchState,
+    parse_commits_json, parse_issues_json, parse_milestones_json, parse_prs_json, AuthedUser,
+    GithubClient, IssueRecordInput, MilestoneInput, PrRecordInput, RemoteFetchState,
 };
 
 const FORGEJO_TOKEN_ENV: &str = "REPO_RECALL_FORGEJO_TOKEN";
@@ -154,6 +154,17 @@ impl GithubClient for ReqwestForgejoClient {
         let path = format!("/user/repos?page=1&limit={capped}");
         self.get_json(&path, parse_active_repos_json).await
     }
+
+    async fn fetch_commits(
+        &self,
+        owner_repo: &str,
+        branch: &str,
+        limit: usize,
+    ) -> RemoteFetchState<Vec<CommitRecord>> {
+        let capped = limit.clamp(1, 100);
+        let path = format!("/repos/{owner_repo}/commits?sha={branch}&limit={capped}");
+        self.get_json(&path, parse_commits_json).await
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +197,10 @@ mod tests {
         ));
         assert!(matches!(
             client.fetch_deploy_health("a/b", "ci.yml", "main").await,
+            RemoteFetchState::Unconfigured
+        ));
+        assert!(matches!(
+            client.fetch_commits("a/b", "main", 50).await,
             RemoteFetchState::Unconfigured
         ));
     }
