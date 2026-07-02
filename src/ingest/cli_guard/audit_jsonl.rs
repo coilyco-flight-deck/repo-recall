@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-/// One row from coily's audit JSONL, normalized for storage. Mirrors the
+/// One row from ward's audit JSONL, normalized for storage. Mirrors the
 /// shape produced by cli-guard's `audit` writer. Unknown fields on the
 #[derive(Debug, Clone)]
 pub struct AuditRecord {
@@ -70,7 +70,7 @@ pub struct ProfileDecision {
 }
 
 /// Resolve the audit directory. Honors `REPO_RECALL_AUDIT_DIR` (point at
-/// a fixture tree for tests) and otherwise falls back to `~/.coily/audit`,
+/// a fixture tree for tests) and otherwise falls back to `~/.ward/audit`,
 pub fn default_audit_dir() -> Option<PathBuf> {
     if let Some(over) = std::env::var_os("REPO_RECALL_AUDIT_DIR") {
         let dir = PathBuf::from(over);
@@ -83,7 +83,7 @@ pub fn default_audit_dir() -> Option<PathBuf> {
         );
     }
     let home = std::env::var_os("HOME")?;
-    let dir = PathBuf::from(home).join(".coily").join("audit");
+    let dir = PathBuf::from(home).join(".ward").join("audit");
     if dir.is_dir() {
         Some(dir)
     } else {
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn parses_canonical_row() {
         let path = fixture(&[
-            r#"{"id":"019e288b-280c-7fde-85fd-f323b3086b13","ts":1778796668,"decision":"accept","verb":"ops.gh","argv":["coily","ops","gh","whoami"],"exit_code":0,"duration_ms":1000,"commit_scope":"/Users/kai/projects/coilysiren/repo-recall"}"#,
+            r#"{"id":"019e288b-280c-7fde-85fd-f323b3086b13","ts":1778796668,"decision":"accept","verb":"ops.gh","argv":["ward-kdl","ops","gh","whoami"],"exit_code":0,"duration_ms":1000,"commit_scope":"/Users/kai/projects/coilysiren/repo-recall"}"#,
         ]);
         let recs = parse_audit_file(&path).unwrap();
         assert_eq!(recs.len(), 1);

@@ -58,6 +58,6 @@ Homebrew tap, `brew services`-managed. Conventional commits drive GHA releases +
 
 - [README.md](../README.md) - human-facing intro.
 - [AGENTS.md](../AGENTS.md) - agent-facing operating rules.
-- [.coily/coily.yaml](../.coily/coily.yaml) - allowlisted commands.
+- [.ward/ward.yaml](../.ward/ward.yaml) - allowlisted commands.
 
 Cross-reference convention from [coilysiren/agentic-os#59](https://github.com/coilyco-flight-deck/agentic-os/issues/59).

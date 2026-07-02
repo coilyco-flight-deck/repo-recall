@@ -351,15 +351,15 @@ async fn cli_guard_audit_ingest_round_trips_through_cache() {
     std::fs::write(
         audit_dir.join("coilysiren-repo-recall.jsonl"),
         concat!(
-            r#"{"id":"019e288b-280c-7fde-85fd-f323b3086b13","ts":1778796668,"decision":"accept","verb":"ops.gh","argv":["coily","ops","gh","whoami"],"exit_code":0,"duration_ms":1000,"commit_scope":"/repo/r1"}"#,
+            r#"{"id":"019e288b-280c-7fde-85fd-f323b3086b13","ts":1778796668,"decision":"accept","verb":"ops.gh","argv":["ward-kdl","ops","gh","whoami"],"exit_code":0,"duration_ms":1000,"commit_scope":"/repo/r1"}"#,
             "\n",
-            r#"{"id":"019e2890-aaaa-bbbb-cccc-dddddddddddd","ts":1778796700,"decision":"deny","verb":"pkg.cargo","argv":["coily","pkg","cargo","build"],"exit_code":1,"commit_scope":"/repo/r2","audit_override":true}"#,
+            r#"{"id":"019e2890-aaaa-bbbb-cccc-dddddddddddd","ts":1778796700,"decision":"deny","verb":"pkg.cargo","argv":["ward","pkg","cargo","build"],"exit_code":1,"commit_scope":"/repo/r2","audit_override":true}"#,
             "\n",
-            r#"{"id":"019e2891-eeee-ffff-aaaa-bbbbbbbbbbbb","ts":1778796720,"verb":"whoami","argv":["coily","whoami"]}"#,
+            r#"{"id":"019e2891-eeee-ffff-aaaa-bbbbbbbbbbbb","ts":1778796720,"verb":"whoami","argv":["ward","whoami"]}"#,
             "\n",
-            // Current coily stamps the git toplevel as `repo_root` and omits
+            // Current ward stamps the git toplevel as `repo_root` and omits
             // `commit_scope`; this row must still route to r1 via the fallback.
-            r#"{"id":"019e2892-1111-2222-3333-444444444444","ts":1778796740,"decision":"accept","verb":"ops.aws","argv":["coily","ops","aws","whoami"],"repo_root":"/repo/r1"}"#,
+            r#"{"id":"019e2892-1111-2222-3333-444444444444","ts":1778796740,"decision":"accept","verb":"ops.aws","argv":["ward-kdl","ops","aws","whoami"],"repo_root":"/repo/r1"}"#,
             "\n",
             "\nnot json\n",
         ),

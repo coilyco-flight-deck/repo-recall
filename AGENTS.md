@@ -12,7 +12,7 @@ Inventory: [`docs/FEATURES.md`](docs/FEATURES.md). Rust 2021 (axum 0.8, tokio, r
 
 ## Repo boundaries
 
-Single artifact. Rust binary serves JSON + MCP. No web frontend - agents consume MCP, the `luca-*` skills + `coily` wrappers consume the JSON surface. No config file - env vars only (see README). Sessions, session_repos, commits all reference `repos.id` but never unify; cross-source views are query-time.
+Single artifact. Rust binary serves JSON + MCP. No web frontend - agents consume MCP, the `luca-*` skills + `ward` wrappers consume the JSON surface. No config file - env vars only (see README). Sessions, session_repos, commits all reference `repos.id` but never unify; cross-source views are query-time.
 
 ## Commands
 
@@ -45,7 +45,7 @@ Reachability: prod (tailnet) `http://repo-recall` via MagicDNS, HTTP only. Local
 
 ## Release
 
-Push to `main` → `.forgejo/workflows/release.yml` tags + cuts Release, then two Contents-API bump jobs (skip-CI; never write the token): `bump-tap-formula` pins central `coilyco-flight-deck/homebrew-tap` (primary), `bump-formula` keeps in-repo formula one cycle as fallback. Version from `build.rs`. Install: `brew install coilyco-flight-deck/tap/repo-recall` (URL in README). Post-push: verify CI +300s, `brew upgrade`, `coily ssh systemctl start repo-recall-update.service`. Docs-only skip.
+Push to `main` → `.forgejo/workflows/release.yml` tags + cuts Release, then two Contents-API bump jobs (skip-CI; never write the token): `bump-tap-formula` pins central `coilyco-flight-deck/homebrew-tap` (primary), `bump-formula` keeps in-repo formula one cycle as fallback. Version from `build.rs`. Install: `brew install coilyco-flight-deck/tap/repo-recall` (URL in README). Post-push: verify CI +300s, `brew upgrade`, `ssh kai@kai-server systemctl start repo-recall-update.service`. Docs-only skip.
 
 ## Agent rules
 
@@ -56,6 +56,5 @@ One issue per change. `closes #N` or a Forgejo URL encouraged, not enforced.
 - [README.md](README.md) - human-facing intro.
 - [docs/FEATURES.md](docs/FEATURES.md) - inventory.
 - [.ward/ward.yaml](.ward/ward.yaml) - allowlist
-- [.coily/coily.yaml](.coily/coily.yaml) - migration.
 
 Cross-reference convention: coilysiren/agentic-os#59.

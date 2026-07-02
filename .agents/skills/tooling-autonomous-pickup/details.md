@@ -63,4 +63,4 @@ Errors get their own line per item with the MCP error message verbatim.
 
 - [`recall-dispatch`](../../../../repo-recall/.agents/skills/recall-dispatch/SKILL.md) - producer side.
 - [`kai-autonomous-engineering`](../kai-autonomous-engineering/SKILL.md) - older long-horizon planner.
-- [`kai-coily-dispatch-shorthand`](../kai-coily-dispatch-shorthand/SKILL.md) - synchronous `coily dispatch`.
+- [`kai-ward-dispatch-shorthand`](../kai-ward-dispatch-shorthand/SKILL.md) - synchronous `ward agent` dispatch.

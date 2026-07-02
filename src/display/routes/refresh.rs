@@ -33,7 +33,7 @@ pub enum Source {
     /// Claude Code session JSONL: sessions, cwd/content/gh-ref joins,
     /// the full-text turn index. Owns the session tables.
     Sessions,
-    /// cli-guard audit log under `~/.coily/audit/`. Owns the audit tables.
+    /// cli-guard audit log under `~/.ward/audit/`. Owns the audit tables.
     CliGuard,
     /// Repo docs (README / AGENTS / FEATURES / file health). No ingest is
     /// wired yet - the slot exists so the scheduler carries its cadence
@@ -204,7 +204,7 @@ pub async fn run_refresh_for(state: AppState, sources: &[Source]) -> anyhow::Res
         }
 
         // cli_guard source: audit log (#148). Walks every JSONL shard under
-        // `~/.coily/audit/`, grouping by repo_root (legacy commit_scope). Rows whose
+        // `~/.ward/audit/`, grouping by repo_root (legacy commit_scope). Rows whose
         if do_cli {
             cache_db.write_batch(|w| w.wipe_cli_guard())?;
             ingest_cli_guard(&cache_db, &repo_id_by_path)?;
@@ -976,7 +976,7 @@ struct RefreshStats {
     skipped: usize,
 }
 
-/// Walk every JSONL shard under `~/.coily/audit/` (or the path resolved
+/// Walk every JSONL shard under `~/.ward/audit/` (or the path resolved
 /// by `audit::default_audit_dir`), parse each row, and insert it keyed
 fn ingest_cli_guard(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Result<usize> {
     let Some(audit_dir) = audit::default_audit_dir() else {
@@ -998,7 +998,7 @@ fn ingest_cli_guard(cache_db: &CacheDb, repos: &[(i64, PathBuf)]) -> anyhow::Res
             match audit::parse_audit_file(path) {
                 Ok(records) => {
                     for rec in records {
-                        // coily/cli-guard stamp the toplevel as repo_root (legacy rows
+                        // ward/cli-guard stamp the toplevel as repo_root (legacy rows
                         // used commit_scope); fall back so current rows still route.
                         let repo_id = rec
                             .commit_scope

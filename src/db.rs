@@ -91,7 +91,7 @@ const DISPATCHES: TableDefinition<u64, &[u8]> = TableDefinition::new("dispatches
 const DISPATCHES_BY_REPO: TableDefinition<(u64, i64, u64), ()> =
     TableDefinition::new("dispatches_by_repo");
 
-// cli-guard audit events. One row per coily verb invocation. See #148.
+// cli-guard audit events. One row per ward verb invocation. See #148.
 const AUDIT_EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("audit_events");
 // (repo_id, -ts, audit_event_id) -> () — newest-first per repo. Repo `0`
 // holds rows whose scope (repo_root, legacy commit_scope) matched no repo.
@@ -283,7 +283,7 @@ pub struct Commit {
     pub body: String,
 }
 
-/// Audit-log row from coily, joined to its repo via repo_root (legacy commit_scope).
+/// Audit-log row from ward, joined to its repo via repo_root (legacy commit_scope).
 /// `repo_id == 0` means the row's scope didn't match any discovered repo
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {

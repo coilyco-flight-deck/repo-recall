@@ -1,4 +1,4 @@
-# Per-repo coily command allowlist for repo-recall. The canonical dev-verb entry point.
+# Per-repo ward command allowlist for repo-recall. The canonical dev-verb entry point.
 
 commands:
   build:

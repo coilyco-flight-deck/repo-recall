@@ -13,7 +13,7 @@ Local-only. Binds `127.0.0.1`, cache lives in `$TMPDIR`. Outbound limited to Git
 
 ## Surface
 
-API + MCP service only. The Rust binary serves JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML, no web frontend. Consumers are agents (via MCP) and the `luca-*` skills + `coily` wrappers (via JSON).
+API + MCP service only. The Rust binary serves JSON HTTP on `127.0.0.1:7777` plus an MCP server co-running in the same process. No HTML, no web frontend. Consumers are agents (via MCP) and the `luca-*` skills + `ward` wrappers (via JSON).
 
 Endpoint list and MCP tool inventory: [`docs/endpoints.md`](docs/endpoints.md). Env vars: [`docs/env-vars.md`](docs/env-vars.md).
 
@@ -56,7 +56,7 @@ Logs at `$(brew --prefix)/var/log/repo-recall.{log,err.log}`. `brew services edi
 ## Install as a systemd service (Linux / WSL)
 
 ```sh
-coily exec install-systemd-user   # or: make install-systemd-user
+ward exec install-systemd-user   # or: make install-systemd-user
 ```
 
 Builds the release binary, installs it to `~/.local/bin/repo-recall`, drops [`scripts/repo-recall.service`](scripts/repo-recall.service) into `~/.config/systemd/user/`, enables lingering (starts at boot without a login), and starts the service. Idempotent: re-run after a rebuild to roll the binary. Logs via `journalctl --user -u repo-recall -f`.
@@ -75,6 +75,6 @@ Hand the URL or MCP entry to a coding agent. Starter prompts: "work through ever
 - [docs/FEATURES.md](docs/FEATURES.md) - inventory of what ships today.
 - [docs/endpoints.md](docs/endpoints.md) - JSON + MCP surface.
 - [docs/env-vars.md](docs/env-vars.md) - configuration knobs.
-- [.coily/coily.yaml](.coily/coily.yaml) - allowlisted commands.
+- [.ward/ward.yaml](.ward/ward.yaml) - allowlisted commands.
 
 Cross-reference convention from [coilysiren/agentic-os#59](https://github.com/coilyco-flight-deck/agentic-os/issues/59).

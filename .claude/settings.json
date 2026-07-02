@@ -2,9 +2,6 @@
   "permissions": {
     "allow": [
       "Bash(cat:*)",
-      "Bash(coily ops flyctl:*)",
-      "Bash(coily ops gcloud:*)",
-      "Bash(coily:*)",
       "Bash(file:*)",
       "Bash(find:*)",
       "Bash(git:*)",
@@ -16,6 +13,8 @@
       "Bash(stat:*)",
       "Bash(tail:*)",
       "Bash(tree:*)",
+      "Bash(ward:*)",
+      "Bash(ward-kdl:*)",
       "Bash(wc:*)",
       "Bash(yq:*)"
     ]

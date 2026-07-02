@@ -12,13 +12,13 @@ capture() {
   local name=$1; shift
   local path=$1; shift
   echo "[capture] $name <- $path $*"
-  coily ops gh api -i --method GET "$path" "$@" \
+  gh api -i --method GET "$path" "$@" \
     | python3 "$HERE/sanitize.py" \
     > "$name.http"
 }
 
 # Real-server happy paths against this repo + this user.
-# Note: coily blocks `&` in argv, so query params are split into -F flags.
+# Note: query params are split into -F flags rather than a `&`-joined query string.
 capture issues_open      "/repos/$REPO/issues" -F state=open -F per_page=2
 capture pulls_all        "/repos/$REPO/pulls" -F state=all -F per_page=2
 capture actions_runs_branch "/repos/$REPO/actions/runs" -F branch=main -F per_page=1

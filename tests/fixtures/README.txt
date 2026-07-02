@@ -10,7 +10,7 @@ Raw HTTP response files (`*.http`: status line + headers + blank line + body, wi
 - `errors/` - hand-authored failure-mode responses (401, 403 primary rate-limited, 403 secondary rate-limited, 502, malformed JSON, empty array). Documented in `errors/README.txt`.
 - `graphql/` - hand-authored happy and error responses for the labeled-issue query. Pending: real capture is gated on Kai's per-call GraphQL approval per `AGENTS.md`.
 
-To re-capture: `tests/fixtures/github/capture.sh`. Requires `coily ops gh` access and a logged-in `gh` PAT.
+To re-capture: `tests/fixtures/github/capture.sh`. Requires a logged-in `gh` PAT.
 
 ## sessions/
 
